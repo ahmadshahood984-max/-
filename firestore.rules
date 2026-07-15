@@ -1,0 +1,31 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny to ensure security of other collections
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Rules for school live data sync keys
+    // Since the app uses client-side password verification rather than Firebase Auth,
+    // this collection must be publicly accessible for reads and writes to sync across devices.
+    match /school_live_data/{key} {
+      allow read, write: if true;
+    }
+
+    // Rules for FCM registration tokens
+    match /fcm_tokens/{parentId} {
+      allow read, write: if true;
+    }
+
+    // Rules for notifications
+    match /notifications/{docId} {
+      allow read, write: if true;
+    }
+
+    // Rules for system usage tracking
+    match /system_usage/{dateId} {
+      allow read, write: if true;
+    }
+  }
+}

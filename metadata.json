@@ -1,0 +1,6 @@
+{
+  "name": "المدرسة الدولية - حلب مدينة مارع",
+  "description": "النظام المدرسي المتكامل للمدرسة الدولية في حلب - مدينة مارع يربط بين المدير والمعلم وولي الأمر بمزامنة فورية كاملة.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
