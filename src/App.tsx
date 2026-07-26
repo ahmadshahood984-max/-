@@ -1074,11 +1074,11 @@ export default function App() {
         )}
       </header>
 
-      {/* Main App Simulator Frame */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-4 md:p-8 grid grid-cols-1 lg:grid-cols-4 gap-6 items-start">
+      {/* Main App Simulator Frame - Full Width Desktop View */}
+      <main className="flex-1 w-full p-2 sm:p-4 md:p-6 lg:p-8">
         
         {/* Dynamic Display Area of selected application */}
-        <div className="lg:col-span-3">
+        <div className="w-full">
           <motion.div
             key={activePortal}
             initial={{ opacity: 0, y: 10 }}
@@ -1152,75 +1152,6 @@ export default function App() {
               />
             )}
           </motion.div>
-        </div>
-
-        {/* Right Info Sidebar containing Live Sync Event Log & App Explainer */}
-        <div className="space-y-6">
-          
-          {/* Quick Guide */}
-          {activePortal !== 'director' && activePortal !== 'teacher' && activePortal !== 'parent' && (
-            <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm space-y-3">
-              <h3 className="font-bold text-slate-800 text-xs uppercase tracking-wider flex items-center gap-2">
-                <Info className="w-4 h-4 text-indigo-600" />
-                <span>دليل تجربة ترابط البيانات</span>
-              </h3>
-              <p className="text-[11px] text-slate-500 leading-relaxed">
-                هذا النظام الذكي يحاكي العمل المدرسي اليومي بمزامنة فورية كاملة. لاختبار الترابط المباشر:
-              </p>
-              <ol className="text-[11px] text-slate-600 space-y-2 list-decimal list-inside pr-1 leading-relaxed">
-                <li>
-                  <strong>رصد الغياب:</strong> افتح <em>تطبيق المعلم</em>، اختر تاريخ اليوم، غيّر حالة طالب لحالة غياب، واضغط حفظ.
-                </li>
-                <li>
-                  <strong>تطبيق ولي الأمر:</strong> انتقل إليه وستلاحظ ظهور الغياب الموثق في التو واللحظة. اضغط <em>تقديم تبرير غياب</em>.
-                </li>
-                <li>
-                  <strong>اعتماد المدير:</strong> افتح <em>تطبيق المدير</em> لتجد الطلب معلقاً. اضغط على <em>موافق</em>.
-                </li>
-                <li>
-                  <strong>تحديث فوري:</strong> عد لسجل الغياب في تطبيق المعلم أو ولي الأمر وستلاحظ تعديل حالة الطالب تلقائياً لعذر مقبول!
-                </li>
-              </ol>
-            </div>
-          )}
-
-          {/* Active Live Sync Log */}
-          {false && (
-            <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm space-y-4">
-              <div className="flex justify-between items-center border-b border-slate-100 pb-3">
-                <h3 className="font-bold text-xs uppercase tracking-wider text-slate-800 flex items-center gap-2">
-                  <Activity className="w-4 h-4 text-indigo-600 animate-pulse" />
-                  <span>سجل المزامنة الفورية النشط</span>
-                </h3>
-                <div className="flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping"></span>
-                  <span className="text-[9px] font-bold text-emerald-600 font-sans uppercase">Live</span>
-                </div>
-              </div>
-
-              <div className="space-y-3.5 max-h-[300px] overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-slate-200">
-                {events.map(event => (
-                  <div key={event.id} className="text-right text-[11px] border-b border-slate-100 pb-2.5 last:border-0">
-                    <div className="flex justify-between items-center text-slate-400 text-[10px] mb-1">
-                      <span className={`px-1.5 py-0.5 rounded font-bold text-[9px] ${
-                        event.type === 'success' 
-                          ? 'bg-green-50 text-green-700 border border-green-100' 
-                          : event.type === 'warning' 
-                          ? 'bg-amber-50 text-amber-700 border border-amber-100' 
-                          : event.type === 'primary' 
-                          ? 'bg-indigo-50 text-indigo-700 border border-indigo-100'
-                          : 'bg-slate-50 text-slate-600 border border-slate-100'
-                      }`}>
-                        {event.type === 'success' ? 'نجاح' : event.type === 'warning' ? 'طلب' : event.type === 'primary' ? 'رسالة' : 'نظام'}
-                      </span>
-                      <span className="font-mono text-slate-400">{event.time}</span>
-                    </div>
-                    <p className="text-slate-700 leading-relaxed font-medium">{event.text}</p>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
         </div>
       </main>
 
