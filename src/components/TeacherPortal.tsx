@@ -79,6 +79,10 @@ export default function TeacherPortal({
   const [selectedTeacherId, setSelectedTeacherId] = useState<string>(teachers[0]?.id || 't1');
   const activeTeacher = teachers.find(t => t.id === selectedTeacherId);
 
+  const [showWelcomeModal, setShowWelcomeModal] = useState<boolean>(() => {
+    return !sessionStorage.getItem('teacher_welcome_dismissed');
+  });
+
   const [schoolAppIcon, setSchoolAppIcon] = useState<string>(() => {
     return localStorage.getItem('school_app_icon') || '';
   });
@@ -902,10 +906,22 @@ export default function TeacherPortal({
           <div className={`${isMobileMenuOpen ? 'block' : 'hidden md:block'} space-y-3`}>
             {/* Logged in Teacher Info & Logout */}
             <div className="bg-white p-3 rounded-xl border border-indigo-100/80 shadow-2xs space-y-2">
-              <span className="text-[9px] text-emerald-700 font-bold flex items-center gap-1 justify-end">
-                <span>بوابة المعلم الآمنة</span>
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-              </span>
+              <div className="flex items-center justify-between">
+                <button
+                  type="button"
+                  onClick={() => setShowWelcomeModal(true)}
+                  className="px-2 py-0.5 bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200 rounded-md text-[9px] font-extrabold flex items-center gap-1 transition cursor-pointer"
+                  title="عرض رسالة الترحيب"
+                >
+                  <Sparkles className="w-2.5 h-2.5 text-amber-500" />
+                  <span>ترحيب ✨</span>
+                </button>
+
+                <span className="text-[9px] text-emerald-700 font-bold flex items-center gap-1">
+                  <span>بوابة المعلم الآمنة</span>
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                </span>
+              </div>
               <button
                 onClick={() => {
                   setIsTeacherLoggedIn(false);
@@ -2939,6 +2955,101 @@ export default function TeacherPortal({
             templateStorageKey="school_whatsapp_behavior_template"
             onConfirmSend={handleConfirmSendWhatsAppTeacher}
           />
+        )}
+
+        {/* Welcome Greeting Modal for Teacher */}
+        {showWelcomeModal && (
+          <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4 z-[10010]">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 15 }}
+              className="bg-white rounded-3xl max-w-lg w-full shadow-2xl border border-indigo-100 overflow-hidden text-right relative"
+            >
+              {/* Header Banner */}
+              <div className="bg-gradient-to-r from-indigo-800 via-indigo-700 to-slate-900 text-white p-6 relative overflow-hidden">
+                <div className="absolute top-0 left-0 w-full h-full bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-amber-400/20 via-transparent to-transparent pointer-events-none"></div>
+                <button
+                  onClick={() => {
+                    sessionStorage.setItem('teacher_welcome_dismissed', 'true');
+                    setShowWelcomeModal(false);
+                  }}
+                  className="absolute top-4 left-4 text-slate-300 hover:text-white p-1.5 hover:bg-white/10 rounded-full transition cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+                <div className="flex items-center gap-3.5">
+                  <div className="w-14 h-14 bg-amber-400/20 border border-amber-300/40 rounded-2xl flex items-center justify-center shrink-0 shadow-inner overflow-hidden">
+                    {schoolAppIcon ? (
+                      <img src={schoolAppIcon} alt="الشعار" className="w-full h-full object-cover" />
+                    ) : (
+                      <BookOpen className="w-7 h-7 text-amber-300" />
+                    )}
+                  </div>
+                  <div>
+                    <span className="inline-block bg-amber-400/20 border border-amber-300/30 text-amber-300 text-[10px] font-bold px-2.5 py-0.5 rounded-full mb-1">
+                      بوابة المعلم 📚
+                    </span>
+                    <h3 className="font-extrabold text-lg text-white">أهلاً بك أستاذنا الفاضل ✨</h3>
+                    <p className="text-xs text-indigo-200 mt-0.5">{activeTeacher?.name || 'المعلم الموقر'}</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Body Content */}
+              <div className="p-6 space-y-4">
+                <div className="bg-indigo-50/70 border border-indigo-100 rounded-2xl p-4 text-xs text-indigo-950 leading-relaxed space-y-2">
+                  <p className="font-extrabold text-sm text-indigo-900">
+                    نثمن عالياً جهودكم الجبارة في تنشئة ورعاية أجيال المستقبل 🌟
+                  </p>
+                  <p className="text-slate-700">
+                    يسعدنا تقديم كافة التسهيلات لكم لرصد درجات الطلاب، تسجيل الحضور والغياب اليومي، وإرسال الملاحظات والتنبيهات التعليمية بكل سلاسة.
+                  </p>
+                </div>
+
+                {/* Highlights Grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1">
+                  <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl text-center space-y-1">
+                    <div className="w-8 h-8 bg-indigo-100 text-indigo-700 rounded-lg flex items-center justify-center mx-auto">
+                      <Award className="w-4 h-4" />
+                    </div>
+                    <span className="block text-[11px] font-bold text-slate-800">رصد الدرجات</span>
+                    <span className="block text-[9px] text-slate-500">سجل العلامات والاختبارات</span>
+                  </div>
+
+                  <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl text-center space-y-1">
+                    <div className="w-8 h-8 bg-emerald-100 text-emerald-700 rounded-lg flex items-center justify-center mx-auto">
+                      <CheckCircle2 className="w-4 h-4" />
+                    </div>
+                    <span className="block text-[11px] font-bold text-slate-800">تفقد الحضور</span>
+                    <span className="block text-[9px] text-slate-500">حضور وغياب الطلاب</span>
+                  </div>
+
+                  <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl text-center space-y-1">
+                    <div className="w-8 h-8 bg-amber-100 text-amber-700 rounded-lg flex items-center justify-center mx-auto">
+                      <MessageSquare className="w-4 h-4" />
+                    </div>
+                    <span className="block text-[11px] font-bold text-slate-800">التواصل اليومي</span>
+                    <span className="block text-[9px] text-slate-500">ملاحظات وواجبات</span>
+                  </div>
+                </div>
+
+                {/* Action Button */}
+                <div className="pt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      sessionStorage.setItem('teacher_welcome_dismissed', 'true');
+                      setShowWelcomeModal(false);
+                    }}
+                    className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl transition cursor-pointer shadow-md shadow-indigo-100 flex items-center justify-center gap-2"
+                  >
+                    <span>البدء بالمهام والدروس 📝</span>
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
         )}
       </AnimatePresence>
     </div>

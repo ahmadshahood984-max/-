@@ -89,6 +89,10 @@ export default function ParentPortal({
     return localStorage.getItem('school_app_icon') || '';
   });
 
+  const [showWelcomeModal, setShowWelcomeModal] = useState<boolean>(() => {
+    return !sessionStorage.getItem('parent_welcome_dismissed');
+  });
+
   React.useEffect(() => {
     const handleStorageUpdate = () => {
       const savedIcon = localStorage.getItem('school_app_icon');
@@ -1961,7 +1965,17 @@ export default function ParentPortal({
                 )}
               </div>
               <div className="text-right">
-                <h3 className="font-bold text-sm text-slate-100">{activeParent?.name}</h3>
+                <div className="flex items-center gap-1.5">
+                  <h3 className="font-bold text-sm text-slate-100">{activeParent?.name}</h3>
+                  <button
+                    type="button"
+                    onClick={() => setShowWelcomeModal(true)}
+                    className="p-1 text-amber-300 hover:text-amber-200 hover:bg-slate-900 rounded-md transition cursor-pointer"
+                    title="رسالة الترحيب"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
+                  </button>
+                </div>
                 <span className="text-[10px] text-indigo-400 font-bold block">تطبيق ولي الأمر للهاتف</span>
               </div>
             </div>
@@ -3239,6 +3253,100 @@ export default function ParentPortal({
               </button>
             </motion.div>
           ))}
+          {/* Welcome Greeting Modal for Parent */}
+          {showWelcomeModal && (
+            <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4 z-[10010]">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.9, y: 15 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.9, y: 15 }}
+                className="bg-white rounded-3xl max-w-lg w-full shadow-2xl border border-indigo-100 overflow-hidden text-right relative"
+              >
+                {/* Header Banner */}
+                <div className="bg-gradient-to-r from-indigo-900 via-indigo-800 to-slate-900 text-white p-6 relative overflow-hidden">
+                  <div className="absolute top-0 left-0 w-full h-full bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-amber-400/20 via-transparent to-transparent pointer-events-none"></div>
+                  <button
+                    onClick={() => {
+                      sessionStorage.setItem('parent_welcome_dismissed', 'true');
+                      setShowWelcomeModal(false);
+                    }}
+                    className="absolute top-4 left-4 text-slate-300 hover:text-white p-1.5 hover:bg-white/10 rounded-full transition cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                  <div className="flex items-center gap-3.5">
+                    <div className="w-14 h-14 bg-amber-400/20 border border-amber-300/40 rounded-2xl flex items-center justify-center shrink-0 shadow-inner overflow-hidden">
+                      {schoolAppIcon ? (
+                        <img src={schoolAppIcon} alt="الشعار" className="w-full h-full object-cover" />
+                      ) : (
+                        <Heart className="w-7 h-7 text-amber-300" />
+                      )}
+                    </div>
+                    <div>
+                      <span className="inline-block bg-amber-400/20 border border-amber-300/30 text-amber-300 text-[10px] font-bold px-2.5 py-0.5 rounded-full mb-1">
+                        بوابة ولي الأمر 👨‍👩‍👧‍👦
+                      </span>
+                      <h3 className="font-extrabold text-lg text-white">أهلاً وسهلاً بكم في تطبيق المدرسة</h3>
+                      <p className="text-xs text-indigo-200 mt-0.5">{activeParent?.name || 'ولي الأمر الفاضل'}</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Body Content */}
+                <div className="p-6 space-y-4">
+                  <div className="bg-indigo-50/70 border border-indigo-100 rounded-2xl p-4 text-xs text-indigo-950 leading-relaxed space-y-2">
+                    <p className="font-extrabold text-sm text-indigo-900">
+                      مرحباً بكم في البوابة الإلكترونية المخصصة لمتابعة أبنائكم 🌟
+                    </p>
+                    <p className="text-slate-700">
+                      نسعد بتواصلكم المستمر ومتابعتكم الحثيثة لمسيرة أبنائكم التعليمية، الاطلاع على علامات الاختبارات، سجلات الحضور والغياب، وتلقي التنبيهات المدرسية مباشرة.
+                    </p>
+                  </div>
+
+                  {/* Highlights Grid */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1">
+                    <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl text-center space-y-1">
+                      <div className="w-8 h-8 bg-indigo-100 text-indigo-700 rounded-lg flex items-center justify-center mx-auto">
+                        <Award className="w-4 h-4" />
+                      </div>
+                      <span className="block text-[11px] font-bold text-slate-800">نتائج الأبناء</span>
+                      <span className="block text-[9px] text-slate-500">العلامات والشهادات</span>
+                    </div>
+
+                    <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl text-center space-y-1">
+                      <div className="w-8 h-8 bg-emerald-100 text-emerald-700 rounded-lg flex items-center justify-center mx-auto">
+                        <Calendar className="w-4 h-4" />
+                      </div>
+                      <span className="block text-[11px] font-bold text-slate-800">سجل الحضور</span>
+                      <span className="block text-[9px] text-slate-500">حضور وغياب وتأخير</span>
+                    </div>
+
+                    <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl text-center space-y-1">
+                      <div className="w-8 h-8 bg-amber-100 text-amber-700 rounded-lg flex items-center justify-center mx-auto">
+                        <Bell className="w-4 h-4" />
+                      </div>
+                      <span className="block text-[11px] font-bold text-slate-800">الإشعارات</span>
+                      <span className="block text-[9px] text-slate-500">إعلانات ورسائل فورية</span>
+                    </div>
+                  </div>
+
+                  {/* Action Button */}
+                  <div className="pt-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        sessionStorage.setItem('parent_welcome_dismissed', 'true');
+                        setShowWelcomeModal(false);
+                      }}
+                      className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl transition cursor-pointer shadow-md shadow-indigo-100 flex items-center justify-center gap-2"
+                    >
+                      <span>متابعة بيانات الأبناء 🎓</span>
+                    </button>
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+          )}
         </AnimatePresence>
       </div>
     </div>

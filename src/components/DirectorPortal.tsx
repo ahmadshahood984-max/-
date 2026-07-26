@@ -189,6 +189,9 @@ export default function DirectorPortal({
     totalWrites: 0
   });
   const [isMetricsModalOpen, setIsMetricsModalOpen] = useState(false);
+  const [showWelcomeModal, setShowWelcomeModal] = useState<boolean>(() => {
+    return !sessionStorage.getItem('director_welcome_dismissed');
+  });
   const [isFullscreen, setIsFullscreen] = useState(false);
 
   const toggleFullscreen = () => {
@@ -3146,8 +3149,18 @@ ${directivesFormatted}
               </div>
             </div>
 
-            {/* Action buttons: Screen mode & Firestore metrics monitoring badge */}
+            {/* Action buttons: Screen mode, Welcome message & Firestore metrics monitoring badge */}
             <div className="flex items-center gap-1.5">
+              {/* Welcome Message Modal Trigger */}
+              <button
+                type="button"
+                onClick={() => setShowWelcomeModal(true)}
+                className="p-1.5 rounded-lg border border-amber-500/30 bg-amber-950/30 text-amber-300 hover:text-white hover:bg-amber-900/50 transition cursor-pointer flex items-center gap-1 shadow-2xs"
+                title="رسالة الترحيب والتعريف"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
+              </button>
+
               {/* Fullscreen / Computer View Toggle Button */}
               <button
                 type="button"
@@ -8649,6 +8662,103 @@ ${sampleEval}
             onConfirmSend={handleConfirmSendWhatsAppDirector}
           />
         )}
+
+        {/* Welcome Greeting Modal for Director */}
+        <AnimatePresence>
+          {showWelcomeModal && (
+            <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4 z-[10010]">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.9, y: 15 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.9, y: 15 }}
+                className="bg-white rounded-3xl max-w-lg w-full shadow-2xl border border-indigo-100 overflow-hidden text-right relative"
+              >
+                {/* Header Banner */}
+                <div className="bg-gradient-to-r from-indigo-900 via-indigo-800 to-slate-900 text-white p-6 relative overflow-hidden">
+                  <div className="absolute top-0 left-0 w-full h-full bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-amber-400/20 via-transparent to-transparent pointer-events-none"></div>
+                  <button
+                    onClick={() => {
+                      sessionStorage.setItem('director_welcome_dismissed', 'true');
+                      setShowWelcomeModal(false);
+                    }}
+                    className="absolute top-4 left-4 text-slate-300 hover:text-white p-1.5 hover:bg-white/10 rounded-full transition cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                  <div className="flex items-center gap-3.5">
+                    <div className="w-14 h-14 bg-amber-400/20 border border-amber-300/40 rounded-2xl flex items-center justify-center shrink-0 shadow-inner overflow-hidden">
+                      {schoolAppIcon ? (
+                        <img src={schoolAppIcon} alt="الشعار" className="w-full h-full object-cover" />
+                      ) : (
+                        <Building className="w-7 h-7 text-amber-300" />
+                      )}
+                    </div>
+                    <div>
+                      <span className="inline-block bg-amber-400/20 border border-amber-300/30 text-amber-300 text-[10px] font-bold px-2.5 py-0.5 rounded-full mb-1">
+                        بوابة المدير العام 🏫
+                      </span>
+                      <h3 className="font-extrabold text-lg text-white">أهلاً وسهلاً بكم في المنصة المدرسية</h3>
+                      <p className="text-xs text-indigo-200 mt-0.5">المدرسة الدولية - حلب / مارع</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Body Content */}
+                <div className="p-6 space-y-4">
+                  <div className="bg-indigo-50/70 border border-indigo-100 rounded-2xl p-4 text-xs text-indigo-950 leading-relaxed space-y-2">
+                    <p className="font-extrabold text-sm text-indigo-900">
+                      مرحباً بكم حضرتكم في لوحة التحكم الإدارية المركزية ✨
+                    </p>
+                    <p className="text-slate-700">
+                      نتمنى لكم يوماً حافلاً بالإنجاز والنجاح في إشراف وتوجيه مسيرة المدرسة، متابعة التقارير الأكاديمية والتواصل مع الكادر التعليمي وأولياء الأمور بكل سهولة وسرعة.
+                    </p>
+                  </div>
+
+                  {/* Highlights Grid */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1">
+                    <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl text-center space-y-1">
+                      <div className="w-8 h-8 bg-indigo-100 text-indigo-700 rounded-lg flex items-center justify-center mx-auto">
+                        <Activity className="w-4 h-4" />
+                      </div>
+                      <span className="block text-[11px] font-bold text-slate-800">إحصائيات مباشرة</span>
+                      <span className="block text-[9px] text-slate-500">حضور ونتائج الأبناء</span>
+                    </div>
+
+                    <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl text-center space-y-1">
+                      <div className="w-8 h-8 bg-emerald-100 text-emerald-700 rounded-lg flex items-center justify-center mx-auto">
+                        <Users className="w-4 h-4" />
+                      </div>
+                      <span className="block text-[11px] font-bold text-slate-800">إدارة الكادر</span>
+                      <span className="block text-[9px] text-slate-500">المعلمون والصفوف</span>
+                    </div>
+
+                    <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl text-center space-y-1">
+                      <div className="w-8 h-8 bg-amber-100 text-amber-700 rounded-lg flex items-center justify-center mx-auto">
+                        <Bell className="w-4 h-4" />
+                      </div>
+                      <span className="block text-[11px] font-bold text-slate-800">تواصل مباشر</span>
+                      <span className="block text-[9px] text-slate-500">إشعارات وواتساب</span>
+                    </div>
+                  </div>
+
+                  {/* Action Button */}
+                  <div className="pt-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        sessionStorage.setItem('director_welcome_dismissed', 'true');
+                        setShowWelcomeModal(false);
+                      }}
+                      className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl transition cursor-pointer shadow-md shadow-indigo-100 flex items-center justify-center gap-2"
+                    >
+                      <span>الانتقال إلى لوحة الإدارة 🚀</span>
+                    </button>
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
       </div>
     </div>
   );
