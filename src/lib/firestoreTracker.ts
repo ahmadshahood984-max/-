@@ -76,22 +76,39 @@ function saveMetrics(metrics: FirestoreMetrics) {
   window.dispatchEvent(new CustomEvent(METRICS_EVENT, { detail: metrics }));
 }
 
-// Asynchronously and non-blockingly update the 'system_usage' collection in Firestore
+let pendingReads = 0;
+let pendingWrites = 0;
+let usageSyncTimer: ReturnType<typeof setTimeout> | null = null;
+
+// Asynchronously and non-blockingly update the 'system_usage' collection in Firestore (batched every 30s)
 export async function incrementFirestoreUsage(reads: number, writes: number) {
-  if (reads === 0 && writes === 0) return;
-  try {
-    const today = getTodayDateString();
-    const docRef = doc(db, 'system_usage', today);
-    const updateData: any = {};
-    if (reads > 0) {
-      updateData.daily_read_count = increment(reads);
-    }
-    if (writes > 0) {
-      updateData.daily_write_count = increment(writes);
-    }
-    await setDoc(docRef, updateData, { merge: true });
-  } catch (err) {
-    console.warn("Could not sync Firestore usage counters (offline or preview mode):", err);
+  pendingReads += reads;
+  pendingWrites += writes;
+
+  if (!usageSyncTimer) {
+    usageSyncTimer = setTimeout(async () => {
+      const toSyncReads = pendingReads;
+      const toSyncWrites = pendingWrites;
+      pendingReads = 0;
+      pendingWrites = 0;
+      usageSyncTimer = null;
+
+      if (toSyncReads === 0 && toSyncWrites === 0) return;
+      try {
+        const today = getTodayDateString();
+        const docRef = doc(db, 'system_usage', today);
+        const updateData: any = {};
+        if (toSyncReads > 0) {
+          updateData.daily_read_count = increment(toSyncReads);
+        }
+        if (toSyncWrites > 0) {
+          updateData.daily_write_count = increment(toSyncWrites);
+        }
+        await setDoc(docRef, updateData, { merge: true });
+      } catch (err) {
+        console.warn("Could not sync Firestore usage counters (offline or preview mode):", err);
+      }
+    }, 30000); // Batch every 30 seconds
   }
 }
 
@@ -127,19 +144,14 @@ export function trackActivityOperation(type: 'read' | 'write', amount: number = 
 export function simulateBackgroundTraffic() {
   const metrics = loadFirestoreMetrics();
   
-  // Random reads between 2 and 8
-  const randReads = Math.floor(Math.random() * 7) + 2;
-  // 15% chance of a background write (a parent submitting something, a teacher posting a grade)
-  const randWrites = Math.random() < 0.15 ? 1 : 0;
+  // Random reads between 1 and 3
+  const randReads = Math.floor(Math.random() * 3) + 1;
+  const randWrites = Math.random() < 0.05 ? 1 : 0;
 
   metrics.simulatedReads += randReads;
   metrics.simulatedWrites += randWrites;
 
   saveMetrics(metrics);
-  // Also periodically upload a small fraction of simulated traffic to Firebase system_usage to make it dynamic
-  if (Math.random() < 0.3) {
-    incrementFirestoreUsage(randReads, randWrites);
-  }
 }
 
 // Subscribe to real-time Firestore DB system_usage count
@@ -172,22 +184,12 @@ export function subscribeToFirebaseSystemUsage(callback: (usage: { reads: number
   }
 }
 
-// Auto-start background simulator when imported
+// Auto-start background monitoring safely when imported
 if (typeof window !== 'undefined') {
-  // Pre-seed some starting data if empty so the dashboard has visual metrics initially
-  const metrics = loadFirestoreMetrics();
-  if (metrics.totalReads === 0) {
-    metrics.simulatedReads = 12540; // realistic mid-day read baseline
-    metrics.simulatedWrites = 412;   // realistic mid-day write baseline
-    saveMetrics(metrics);
-  }
+  // Load initial metrics cleanly
+  loadFirestoreMetrics();
 
-  // Run the background simulator every 8 seconds to mimic live updates
-  setInterval(() => {
-    simulateBackgroundTraffic();
-  }, 8000);
-
-  // Auto subscribe to the live Firebase DB system_usage document to merge counters
+  // Subscribe to live Firebase system_usage document without background traffic simulation loops
   subscribeToFirebaseSystemUsage(() => {});
 }
 
