@@ -3103,23 +3103,8 @@ ${directivesFormatted}
               </div>
             </div>
 
-            {/* Action buttons: Screen mode, Refresh Sync & Firestore metrics monitoring badge */}
+            {/* Action buttons: Screen mode & Firestore metrics monitoring badge */}
             <div className="flex items-center gap-1.5">
-              {/* Refresh Data Sync Button */}
-              <button
-                type="button"
-                onClick={handleManualSync}
-                disabled={isSyncingData}
-                className={`p-1.5 rounded-lg border transition cursor-pointer flex items-center gap-1 shadow-2xs ${
-                  isSyncingData
-                    ? 'bg-amber-950/60 border-amber-600 text-amber-300'
-                    : 'bg-indigo-600/30 border-indigo-500/50 text-indigo-200 hover:bg-indigo-600 hover:text-white hover:border-indigo-400'
-                }`}
-                title="تحديث ومزامنة البيانات الفورية مع المعلمين وأولياء الأمور 🔄"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${isSyncingData ? 'animate-spin text-amber-300' : ''}`} />
-              </button>
-
               {/* Fullscreen / Computer View Toggle Button */}
               <button
                 type="button"
@@ -3463,66 +3448,6 @@ ${directivesFormatted}
 
       {/* Main Content Area */}
       <div className="flex-1 min-w-0 p-4 md:p-6 lg:p-8 overflow-y-auto w-full space-y-5">
-        
-        {/* Top Sticky/Header Sync & Refresh Bar */}
-        <div className="bg-white p-3.5 sm:p-4 rounded-2xl border border-indigo-100 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-3">
-          <div className="flex items-center gap-3 text-right w-full sm:w-auto">
-            <div className="p-2.5 bg-indigo-50 text-indigo-600 rounded-xl shrink-0 border border-indigo-100">
-              <RefreshCw className={`w-5 h-5 ${isSyncingData ? 'animate-spin text-indigo-600' : ''}`} />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h2 className="font-extrabold text-xs sm:text-sm text-slate-800">مزامنة البيانات الفورية مع بوابات المعلم وولي الأمر</h2>
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200/80">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping"></span>
-                  تزامن لحظي
-                </span>
-              </div>
-              <p className="text-[11px] text-slate-500 mt-0.5">
-                اضغط هنا لتأكيد تحديث كافة البيانات ونشر التعديلات فوراً لتظهر لدى المعلمين وأولياء الأمور
-              </p>
-            </div>
-          </div>
-
-          <button
-            type="button"
-            id="dir-btn-refresh-data"
-            onClick={handleManualSync}
-            disabled={isSyncingData}
-            className={`w-full sm:w-auto px-4 py-2.5 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 shadow-sm cursor-pointer whitespace-nowrap ${
-              isSyncingData
-                ? 'bg-amber-500 text-white cursor-wait'
-                : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-indigo-100 active:scale-98'
-            }`}
-          >
-            <RefreshCw className={`w-4 h-4 ${isSyncingData ? 'animate-spin' : ''}`} />
-            <span>{isSyncingData ? 'جاري التحديث والتزامن...' : 'تحديث ومزامنة البيانات الآن 🔄'}</span>
-          </button>
-        </div>
-
-        {/* Sync Success Alert Banner */}
-        <AnimatePresence>
-          {syncSuccessMsg && (
-            <motion.div
-              initial={{ opacity: 0, y: -10, scale: 0.98 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: -10, scale: 0.98 }}
-              className="bg-emerald-50 border border-emerald-200 text-emerald-800 p-3.5 rounded-xl text-xs font-bold flex items-center justify-between gap-3 shadow-xs text-right"
-            >
-              <div className="flex items-center gap-2.5">
-                <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
-                <span>{syncSuccessMsg}</span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setSyncSuccessMsg(null)}
-                className="text-emerald-600 hover:text-emerald-800 text-sm font-bold font-mono px-1 cursor-pointer"
-              >
-                ×
-              </button>
-            </motion.div>
-          )}
-        </AnimatePresence>
         <AnimatePresence mode="wait">
           {/* Dashboard Tab */}
           {activeTab === 'dashboard' && (
