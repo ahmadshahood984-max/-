@@ -79,6 +79,21 @@ export default function TeacherPortal({
   const [selectedTeacherId, setSelectedTeacherId] = useState<string>(teachers[0]?.id || 't1');
   const activeTeacher = teachers.find(t => t.id === selectedTeacherId);
 
+  const [schoolAppIcon, setSchoolAppIcon] = useState<string>(() => {
+    return localStorage.getItem('school_app_icon') || '';
+  });
+
+  useEffect(() => {
+    const handleStorageUpdate = () => {
+      const savedIcon = localStorage.getItem('school_app_icon');
+      if (savedIcon !== null) {
+        setSchoolAppIcon(savedIcon);
+      }
+    };
+    window.addEventListener('school_storage_update', handleStorageUpdate);
+    return () => window.removeEventListener('school_storage_update', handleStorageUpdate);
+  }, []);
+
   // Sync selectedTeacherId to localStorage so other portals/App.tsx can read the active teacher
   useEffect(() => {
     if (selectedTeacherId) {
@@ -859,8 +874,12 @@ export default function TeacherPortal({
           {/* Sidebar Header with Hamburger button on Mobile */}
           <div className="flex items-center justify-between border-b border-indigo-100 pb-3 mb-3 md:mb-4 md:pb-3">
             <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-xl bg-indigo-600 text-white flex items-center justify-center font-black shadow-xs text-xs">
-                {activeTeacher?.name.replace('أ.', '').trim().charAt(0)}
+              <div className="w-8 h-8 rounded-xl bg-indigo-600 text-white flex items-center justify-center font-black shadow-xs text-xs overflow-hidden shrink-0">
+                {schoolAppIcon ? (
+                  <img src={schoolAppIcon} alt="الشعار" className="w-full h-full object-cover" />
+                ) : (
+                  activeTeacher?.name.replace('أ.', '').trim().charAt(0)
+                )}
               </div>
               <div className="text-right">
                 <h3 className="font-extrabold text-xs text-slate-950">{activeTeacher?.name}</h3>

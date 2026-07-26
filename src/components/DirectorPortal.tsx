@@ -44,7 +44,10 @@ import {
   Moon,
   Sun,
   Clock,
-  Layers
+  Layers,
+  Image as ImageIcon,
+  Sparkles,
+  RotateCcw
 } from 'lucide-react';
 import { buildWhatsAppUrl, openWhatsAppDirectly, getWhatsAppSentRecords, recordWhatsAppSent, WhatsAppSentRecord } from '../lib/whatsapp';
 import { generateEvaluationCardImage, shareOrDownloadEvaluationImage } from '../lib/generateCardImage';
@@ -204,6 +207,34 @@ export default function DirectorPortal({
 
   const [isSyncingData, setIsSyncingData] = useState(false);
   const [syncSuccessMsg, setSyncSuccessMsg] = useState<string | null>(null);
+
+  const [schoolAppIcon, setSchoolAppIcon] = useState<string>(() => {
+    return localStorage.getItem('school_app_icon') || '';
+  });
+
+  useEffect(() => {
+    const handleStorageUpdate = (e: any) => {
+      const savedIcon = localStorage.getItem('school_app_icon');
+      if (savedIcon !== null) {
+        setSchoolAppIcon(savedIcon);
+      }
+    };
+    window.addEventListener('school_storage_update', handleStorageUpdate);
+    return () => window.removeEventListener('school_storage_update', handleStorageUpdate);
+  }, []);
+
+  const updateAppIcon = (iconValue: string) => {
+    setSchoolAppIcon(iconValue);
+    if (iconValue) {
+      localStorage.setItem('school_app_icon', iconValue);
+    } else {
+      localStorage.removeItem('school_app_icon');
+    }
+    window.dispatchEvent(new CustomEvent('school_storage_update', {
+      detail: { key: 'school_app_icon', value: iconValue }
+    }));
+    window.dispatchEvent(new Event('storage'));
+  };
 
   const handleManualSync = async () => {
     setIsSyncingData(true);
@@ -2899,8 +2930,12 @@ ${directivesFormatted}
   if (!isLoggedIn) {
     return (
       <div id="director-login-container" className="bg-white min-h-[460px] rounded-2xl border border-slate-200 shadow-md flex flex-col items-center justify-center p-8 max-w-md mx-auto my-12">
-        <div className="p-3 bg-indigo-50 text-indigo-600 rounded-2xl mb-4 shadow-xs">
-          <Building className="w-8 h-8" />
+        <div className="p-3 bg-indigo-50 text-indigo-600 rounded-2xl mb-4 shadow-xs overflow-hidden w-14 h-14 flex items-center justify-center">
+          {schoolAppIcon ? (
+            <img src={schoolAppIcon} alt="الشعار" className="w-full h-full object-cover rounded-xl" />
+          ) : (
+            <Building className="w-8 h-8" />
+          )}
         </div>
         <h2 className="text-xl font-extrabold text-slate-900 text-center">المدرسة الدولية</h2>
         <p className="text-xs font-medium text-slate-500 text-center mt-1">حلب - مدينة مارع (بوابة المدير العام)</p>
@@ -2958,8 +2993,12 @@ ${directivesFormatted}
           className="bg-white rounded-3xl border border-slate-200/90 shadow-xl p-6 md:p-10 max-w-md w-full text-center space-y-6"
         >
           {/* Logo icon */}
-          <div className="w-16 h-16 bg-indigo-600 rounded-2xl flex items-center justify-center text-white shadow-lg shadow-indigo-200 mx-auto">
-            <Building className="w-8 h-8" />
+          <div className="w-16 h-16 bg-indigo-600 rounded-2xl flex items-center justify-center text-white shadow-lg shadow-indigo-200 mx-auto overflow-hidden">
+            {schoolAppIcon ? (
+              <img src={schoolAppIcon} alt="الشعار" className="w-full h-full object-cover" />
+            ) : (
+              <Building className="w-8 h-8" />
+            )}
           </div>
 
           {/* Title & Subtitle */}
@@ -3094,8 +3133,12 @@ ${directivesFormatted}
           {/* Header section of Sidebar with Logo and metrics button */}
           <div className="flex items-center justify-between mb-2 pb-2.5 border-b border-slate-900">
             <div className="flex items-center gap-2">
-              <div className="p-1.5 bg-indigo-600/20 text-indigo-400 border border-indigo-900/40 rounded-xl shrink-0">
-                <Building className="w-4 h-4" />
+              <div className="w-8 h-8 rounded-xl bg-indigo-600/20 text-indigo-400 border border-indigo-900/40 shrink-0 overflow-hidden flex items-center justify-center">
+                {schoolAppIcon ? (
+                  <img src={schoolAppIcon} alt="الشعار" className="w-full h-full object-cover" />
+                ) : (
+                  <Building className="w-4 h-4" />
+                )}
               </div>
               <div className="text-right">
                 <span className="block font-black text-xs text-slate-100 tracking-wide">الإدارة العامة</span>
@@ -3544,6 +3587,111 @@ ${directivesFormatted}
                     ))}
                   </div>
                 </div>
+              </div>
+
+              {/* App Icon / Logo Customization Card */}
+              <div className="bg-white p-5 md:p-6 rounded-2xl border border-indigo-100 shadow-sm space-y-5 text-right">
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-b border-slate-100 pb-3.5">
+                  <div>
+                    <h3 className="text-sm font-extrabold text-slate-900 flex items-center gap-2">
+                      <Sparkles className="w-4 h-4 text-amber-500" />
+                      <span>تخصيص أيقونة وشعار التطبيق والبوابات (App Icon) 🎨</span>
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-1">
+                      يمكنك رفع شعار مدرستك الخاص أو اختيار أحد الشعارات الجاهزة. تتغير الأيقونة فوراً عبر كافة البوابات (المدير، المعلم، ولي الأمر) وشريط العنوان!
+                    </p>
+                  </div>
+
+                  {/* Live Preview Badge */}
+                  <div className="flex items-center gap-2 bg-slate-900 text-white p-2 px-3 rounded-xl border border-slate-800 shrink-0">
+                    <span className="text-[10px] text-slate-400 font-bold">المعاينة الحية:</span>
+                    <div className="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center overflow-hidden border border-white/20 shadow-xs">
+                      {schoolAppIcon ? (
+                        <img src={schoolAppIcon} alt="المعاينة" className="w-full h-full object-cover" />
+                      ) : (
+                        <Building className="w-4 h-4 text-white" />
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Upload Custom File & Image URL Row */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                  {/* Upload File */}
+                  <div className="p-3.5 bg-indigo-50/60 rounded-xl border border-indigo-100 flex flex-col justify-between gap-2">
+                    <label className="text-xs font-bold text-indigo-950 flex items-center gap-1.5">
+                      <Upload className="w-4 h-4 text-indigo-600" />
+                      <span>رفع صورة أو شعار من الجهاز (PNG/JPG/SVG):</span>
+                    </label>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          const reader = new FileReader();
+                          reader.onload = (evt) => {
+                            const res = evt.target?.result as string;
+                            if (res) {
+                              updateAppIcon(res);
+                              alert('🎉 تم تحديث شعار وأيقونة التطبيق بنجاح عبر كافة البوابات!');
+                            }
+                          };
+                          reader.readAsDataURL(file);
+                        }
+                      }}
+                      className="text-xs text-slate-600 file:mr-0 file:ml-2 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-indigo-600 file:text-white hover:file:bg-indigo-700 cursor-pointer"
+                    />
+                  </div>
+
+                  {/* Image URL Input */}
+                  <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 flex flex-col justify-between gap-2">
+                    <label className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                      <ImageIcon className="w-4 h-4 text-slate-600" />
+                      <span>أو لصق رابط صورة مباشر (URL):</span>
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="url"
+                        placeholder="https://example.com/logo.png"
+                        id="custom-icon-url-input"
+                        className="text-xs border border-slate-300 px-3 py-1.5 rounded-lg focus:border-indigo-600 focus:outline-none flex-1 font-mono text-left"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const input = document.getElementById('custom-icon-url-input') as HTMLInputElement;
+                          if (input && input.value.trim()) {
+                            updateAppIcon(input.value.trim());
+                            alert('🎉 تم تطبيق رابط الأيقونة بنجاح!');
+                            input.value = '';
+                          }
+                        }}
+                        className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition shrink-0 cursor-pointer"
+                      >
+                        تطبيق
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Reset Icon Button */}
+                {schoolAppIcon && (
+                  <div className="pt-2 border-t border-slate-100 flex justify-end">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (confirm('هل ترغب بإعادة الأيقونة الافتراضية للنظام؟')) {
+                          updateAppIcon('');
+                        }
+                      }}
+                      className="text-xs font-bold text-slate-500 hover:text-rose-600 flex items-center gap-1 transition cursor-pointer"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      <span>إعادة الأيقونة الافتراضية</span>
+                    </button>
+                  </div>
+                )}
               </div>
 
               {/* Director Security Settings */}

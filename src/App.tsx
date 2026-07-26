@@ -109,6 +109,10 @@ export default function App() {
     return saved || '123';
   });
 
+  const [appIcon, setAppIcon] = useState<string>(() => {
+    return localStorage.getItem('school_app_icon') || '';
+  });
+
   // Simulator Active Portal: 'director' | 'teacher' | 'parent'
   const [activePortal, setActivePortal] = useState<'director' | 'teacher' | 'parent'>(() => {
     const params = new URLSearchParams(window.location.search);
@@ -176,10 +180,15 @@ export default function App() {
           case 'school_director_password':
             setDirectorPassword(value);
             break;
+          case 'school_app_icon':
+            setAppIcon(value || '');
+            break;
         }
       } catch (err) {
         if (key === 'school_director_password') {
           setDirectorPassword(value);
+        } else if (key === 'school_app_icon') {
+          setAppIcon(value || '');
         } else {
           console.warn('Error parsing storage update in App.tsx', err);
         }
@@ -216,6 +225,11 @@ export default function App() {
       const savedPwd = localStorage.getItem('school_director_password');
       if (savedPwd) {
         setDirectorPassword(savedPwd);
+      }
+
+      const savedIcon = localStorage.getItem('school_app_icon');
+      if (savedIcon !== null) {
+        setAppIcon(savedIcon);
       }
     };
 
@@ -832,8 +846,12 @@ export default function App() {
         <div className="flex justify-between items-center w-full">
           {/* Logo & Platform Info */}
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center font-bold text-xl shadow-sm">
-              <div className="w-5 h-5 border-2 border-white rounded-sm"></div>
+            <div className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center font-bold text-xl shadow-sm overflow-hidden shrink-0 border border-indigo-500/20">
+              {appIcon ? (
+                <img src={appIcon} alt="شعار المدرسة" className="w-full h-full object-cover" />
+              ) : (
+                <div className="w-5 h-5 border-2 border-white rounded-sm"></div>
+              )}
             </div>
             <div className="text-right">
               <h1 className="text-sm md:text-lg font-bold tracking-tight text-slate-800 leading-tight">المدرسة الدولية</h1>

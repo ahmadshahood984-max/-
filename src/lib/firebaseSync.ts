@@ -26,7 +26,8 @@ const SYNC_KEYS = [
   'school_academic_years',
   'school_active_academic_year',
   'school_apk_mode',
-  'school_fcm_config'
+  'school_fcm_config',
+  'school_app_icon'
 ];
 
 let isRemoteSyncing = false;

@@ -85,6 +85,21 @@ export default function ParentPortal({
     return localStorage.getItem('parent_portal_student_id') || '';
   });
 
+  const [schoolAppIcon, setSchoolAppIcon] = useState<string>(() => {
+    return localStorage.getItem('school_app_icon') || '';
+  });
+
+  React.useEffect(() => {
+    const handleStorageUpdate = () => {
+      const savedIcon = localStorage.getItem('school_app_icon');
+      if (savedIcon !== null) {
+        setSchoolAppIcon(savedIcon);
+      }
+    };
+    window.addEventListener('school_storage_update', handleStorageUpdate);
+    return () => window.removeEventListener('school_storage_update', handleStorageUpdate);
+  }, []);
+
   // Track read state for various categories per parent
   const [readGradeIds, setReadGradeIds] = useState<string[]>(() => {
     try {
@@ -1868,8 +1883,12 @@ export default function ParentPortal({
       <div id="parent-login-screen" className="bg-slate-50 min-h-screen flex flex-col items-center justify-center p-4 space-y-4">
         <div className="w-full max-w-md bg-white rounded-3xl border border-slate-200 shadow-xl p-6 space-y-6">
           <div className="text-center space-y-2">
-            <div className="w-16 h-16 bg-indigo-600 rounded-2xl text-white shadow-md flex items-center justify-center mx-auto mb-4">
-              <User className="w-8 h-8" />
+            <div className="w-16 h-16 bg-indigo-600 rounded-2xl text-white shadow-md flex items-center justify-center mx-auto mb-4 overflow-hidden">
+              {schoolAppIcon ? (
+                <img src={schoolAppIcon} alt="الشعار" className="w-full h-full object-cover" />
+              ) : (
+                <User className="w-8 h-8" />
+              )}
             </div>
             <h2 className="text-xl font-bold text-slate-800">بوابة ولي الأمر الإلكترونية</h2>
             <p className="text-slate-500 text-xs leading-relaxed">
@@ -1934,8 +1953,12 @@ export default function ParentPortal({
           {/* Sidebar Header with Mobile Hamburger menu on Mobile */}
           <div className="flex items-center justify-between border-b border-slate-800 pb-4 mb-4 md:mb-6 md:pb-4">
             <div className="flex items-center gap-3">
-              <div className="p-2.5 bg-indigo-600 rounded-xl text-white shadow-sm">
-                <User className="w-5 h-5" />
+              <div className="w-9 h-9 bg-indigo-600 rounded-xl text-white shadow-sm overflow-hidden flex items-center justify-center shrink-0">
+                {schoolAppIcon ? (
+                  <img src={schoolAppIcon} alt="الشعار" className="w-full h-full object-cover" />
+                ) : (
+                  <User className="w-5 h-5" />
+                )}
               </div>
               <div className="text-right">
                 <h3 className="font-bold text-sm text-slate-100">{activeParent?.name}</h3>
