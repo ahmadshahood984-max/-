@@ -7589,9 +7589,9 @@ ${sampleEval}
             >
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div>
-                  <h1 className="text-2xl font-bold text-slate-800">الإعدادات والتحديثات الذكية</h1>
+                  <h1 className="text-2xl font-bold text-slate-800">إعدادات النظام</h1>
                   <p className="text-slate-500 text-sm mt-1">
-                    إدارة النظام، كلمات المرور، النسخ الاحتياطي، وحقن الترقية البرمجية الساخنة
+                    إدارة الحسابات، كلمات المرور، وتخصيص هوية المدرسة
                   </p>
                 </div>
               </div>
@@ -8117,134 +8117,7 @@ ${sampleEval}
 
 
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {/* Backup & Restore Card */}
-                <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm flex flex-col justify-between space-y-4">
-                  <div className="space-y-2">
-                    <h3 className="font-bold text-slate-800 text-base flex items-center gap-2 justify-end">
-                      <Database className="w-5 h-5 text-indigo-600" />
-                      <span>النسخ الاحتياطي واستعادة البيانات</span>
-                    </h3>
-                    <p className="text-xs text-slate-500 leading-relaxed">
-                      قم بتحميل وحفظ نسخة احتياطية كاملة من كافة بيانات المدرسة (معلمون، طلاب، أولياء أمور، درجات، سجلات الحضور) في ملف JSON آمن للرجوع إليه في أي وقت.
-                    </p>
-                  </div>
 
-                  {/* APK & Mobile Compatibility Switch */}
-                  <div className="bg-amber-50/50 border border-amber-100 rounded-2xl p-4 flex items-start justify-between gap-3 text-right">
-                    <div className="flex-1">
-                      <h4 className="text-xs font-bold text-amber-950 flex items-center gap-1 justify-end">
-                        <span>نمط التوافق للأجهزة الذكية والـ APK 📱</span>
-                      </h4>
-                      <p className="text-[10px] text-amber-800 leading-relaxed mt-0.5">
-                        يمنع حدوث "الشاشة البيضاء" في الهواتف عبر استبدال رفع/تنزيل الملفات بنسخ ولصق كود البيانات مباشرة للحافظة (Clipboard) مع استيراد نصي ذكي.
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => toggleApkMode(!apkCompatibilityMode)}
-                      className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                        apkCompatibilityMode ? 'bg-amber-600' : 'bg-slate-200'
-                      }`}
-                    >
-                      <span
-                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
-                          apkCompatibilityMode ? '-translate-x-5' : 'translate-x-0'
-                        }`}
-                      />
-                    </button>
-                  </div>
-
-                  <div className="space-y-3 pt-4 border-t border-slate-50">
-                    <button
-                      onClick={handleDownloadBackup}
-                      className="w-full text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 py-3 rounded-xl transition cursor-pointer flex items-center justify-center gap-2 shadow-md shadow-indigo-100"
-                    >
-                      <Download className="w-4 h-4" />
-                      <span>{apkCompatibilityMode ? '📋 نسخ كود النسخة الاحتياطية للحافظة' : 'تنزيل نسخة احتياطية كاملة (JSON)'}</span>
-                    </button>
-
-                    {apkCompatibilityMode ? (
-                      <div className="space-y-2">
-                        <button
-                          type="button"
-                          onClick={() => setShowPastedBackupInput(!showPastedBackupInput)}
-                          className="w-full text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 py-2.5 rounded-xl transition cursor-pointer flex items-center justify-center gap-2"
-                        >
-                          <span>📥 لصق واستعادة نسخة احتياطية من الحافظة</span>
-                        </button>
-                        
-                        {showPastedBackupInput && (
-                          <motion.div
-                            initial={{ opacity: 0, y: -5 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2"
-                          >
-                            <label className="block text-[11px] font-semibold text-slate-600">الصق الكود البرمجي للنسخة الاحتياطية هنا:</label>
-                            <textarea
-                              rows={4}
-                              value={pastedBackupData}
-                              onChange={e => setPastedBackupData(e.target.value)}
-                              placeholder='{"teachers":[...],"students":[...],"classes":[...], ...}'
-                              className="w-full text-[10px] border border-slate-200 p-2 rounded-lg focus:border-indigo-500 focus:outline-none font-mono"
-                              style={{ direction: 'ltr' }}
-                            />
-                            <button
-                              type="button"
-                              onClick={() => handleRestoreBackupFromText(pastedBackupData)}
-                              className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg transition cursor-pointer"
-                            >
-                              تأكيد استعادة البيانات من الكود الملصق 🔄
-                            </button>
-                          </motion.div>
-                        )}
-                      </div>
-                    ) : (
-                      <div className="relative">
-                        <input
-                          type="file"
-                          accept=".json"
-                          onChange={handleRestoreBackup}
-                          className="opacity-0 absolute inset-0 w-full h-full cursor-pointer"
-                        />
-                        <div className="w-full text-xs font-semibold text-center border-2 border-dashed border-slate-200 rounded-xl py-2.5 px-4 text-slate-500 hover:border-indigo-300 hover:text-indigo-600 transition cursor-pointer">
-                          <span>📤 رفع واستعادة نسخة احتياطية</span>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* Hot Patching Card */}
-                <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm flex flex-col justify-between space-y-4">
-                  <div className="space-y-2">
-                    <h3 className="font-bold text-slate-800 text-base flex items-center gap-2 justify-end">
-                      <RefreshCw className="w-5 h-5 text-amber-500 animate-spin-slow" />
-                      <span>مركز التحديث والترقية الذكي (Patches)</span>
-                    </h3>
-                    <p className="text-xs text-slate-500 leading-relaxed">
-                      الصق كود JavaScript مخصص لتطبيق ميزات برمجية جديدة أو ترقية سجلات المدرسة ديناميكياً بدون انقطاع وبدون الحاجة لإعادة تحميل التطبيق.
-                    </p>
-                  </div>
-
-                  <div className="space-y-3 pt-4 border-t border-slate-50">
-                    <textarea
-                      rows={3}
-                      value={patchInput}
-                      onChange={e => setPatchInput(e.target.value)}
-                      placeholder="// الصق كود JavaScript هنا لترقية النظام..."
-                      className="w-full text-xs border border-slate-200 p-3 rounded-xl focus:border-amber-500 focus:outline-none font-mono"
-                      style={{ direction: 'ltr' }}
-                    />
-                    <button
-                      onClick={handleApplyPatch}
-                      className="w-full text-xs font-bold text-white bg-amber-500 hover:bg-amber-600 py-3 rounded-xl transition cursor-pointer flex items-center justify-center gap-2 shadow-md shadow-amber-100"
-                    >
-                      <span>تطبيق التحديث البرمجي فوراً 🚀</span>
-                    </button>
-                  </div>
-                </div>
-              </div>
             </motion.div>
           )}
         </AnimatePresence>
