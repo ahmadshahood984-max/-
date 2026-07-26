@@ -1134,7 +1134,7 @@ ${directivesFormatted}
   });
   const [teacherAssignmentType, setTeacherAssignmentType] = useState<'full_class' | 'subject_multi_class'>('full_class');
   const [teacherSelectedClassId, setTeacherSelectedClassId] = useState<string>('');
-  const [teacherSelectedSubject, setTeacherSelectedSubject] = useState<string>('');
+  const [teacherSelectedSubjects, setTeacherSelectedSubjects] = useState<string[]>([]);
   const [teacherSelectedClassIds, setTeacherSelectedClassIds] = useState<string[]>([]);
   const [teacherNewSubjectInput, setTeacherNewSubjectInput] = useState<string>('');
 
@@ -2635,20 +2635,21 @@ ${directivesFormatted}
     if (isFullClass) {
       setTeacherAssignmentType('full_class');
       setTeacherSelectedClassId(teacher.classes[0] || '');
-      setTeacherSelectedSubject('');
+      setTeacherSelectedSubjects([]);
       setTeacherSelectedClassIds([]);
     } else {
       setTeacherAssignmentType('subject_multi_class');
       setTeacherSelectedClassId('');
       
-      const subject = teacher.subjects[0] || '';
-      if (customSubjects.includes(subject)) {
-        setTeacherSelectedSubject(subject);
-      } else {
-        setTeacherSelectedSubject('NEW_SUBJECT');
-        setTeacherNewSubjectInput(subject);
+      const teacherSubs = teacher.subjects || [];
+      const newCustoms = teacherSubs.filter(s => s && s !== 'عام - جميع المواد' && !customSubjects.includes(s));
+      if (newCustoms.length > 0) {
+        const updatedCustoms = [...customSubjects, ...newCustoms];
+        setCustomSubjects(updatedCustoms);
+        localStorage.setItem('school_custom_subjects', JSON.stringify(updatedCustoms));
       }
-      setTeacherSelectedClassIds(teacher.classes);
+      setTeacherSelectedSubjects(teacherSubs);
+      setTeacherSelectedClassIds(teacher.classes || []);
     }
     
     setShowTeacherForm(true);
@@ -2678,26 +2679,27 @@ ${directivesFormatted}
       finalClasses = [teacherSelectedClassId];
       finalSubjects = ['عام - جميع المواد'];
     } else {
-      let subject = teacherSelectedSubject;
-      if (subject === 'NEW_SUBJECT') {
-        subject = teacherNewSubjectInput.trim();
+      let subjects = [...teacherSelectedSubjects];
+      if (teacherNewSubjectInput.trim() && !subjects.includes(teacherNewSubjectInput.trim())) {
+        const newSub = teacherNewSubjectInput.trim();
+        subjects.push(newSub);
+        if (!customSubjects.includes(newSub)) {
+          const updated = [...customSubjects, newSub];
+          setCustomSubjects(updated);
+          localStorage.setItem('school_custom_subjects', JSON.stringify(updated));
+        }
       }
-      if (!subject) {
-        alert('الرجاء اختيار أو كتابة اسم المادة الدراسية');
+
+      if (subjects.length === 0) {
+        alert('الرجاء اختيار أو كتابة مادة دراسية واحدة على الأقل');
         return;
       }
       if (teacherSelectedClassIds.length === 0) {
-        alert('الرجاء اختيار صف واحد على الأقل للمادة الدراسية');
+        alert('الرجاء اختيار صف واحد على الأقل للمواد الدراسية المختارة');
         return;
       }
-      finalSubjects = [subject];
+      finalSubjects = subjects;
       finalClasses = teacherSelectedClassIds;
-
-      if (subject && !customSubjects.includes(subject)) {
-        const updated = [...customSubjects, subject];
-        setCustomSubjects(updated);
-        localStorage.setItem('school_custom_subjects', JSON.stringify(updated));
-      }
     }
 
     const generatedEmail = `${newTeacher.name.trim().replace(/\s+/g, "")}_${Date.now()}@school.com`;
@@ -2734,7 +2736,7 @@ ${directivesFormatted}
 
     setNewTeacher({ name: '', email: '', phone: '', subjectsStr: '', classId: '', password: '123' });
     setTeacherSelectedClassId('');
-    setTeacherSelectedSubject('');
+    setTeacherSelectedSubjects([]);
     setTeacherSelectedClassIds([]);
     setTeacherNewSubjectInput('');
     setTeacherAssignmentType('full_class');
@@ -3689,7 +3691,7 @@ ${directivesFormatted}
                       setEditingTeacher(null);
                       setNewTeacher({ name: '', email: '', phone: '', subjectsStr: '', classId: '', password: '123' });
                       setTeacherSelectedClassId('');
-                      setTeacherSelectedSubject('');
+                      setTeacherSelectedSubjects([]);
                       setTeacherSelectedClassIds([]);
                       setTeacherNewSubjectInput('');
                     } else {
@@ -3698,7 +3700,7 @@ ${directivesFormatted}
                         setEditingTeacher(null);
                         setNewTeacher({ name: '', email: '', phone: '', subjectsStr: '', classId: '', password: '123' });
                         setTeacherSelectedClassId('');
-                        setTeacherSelectedSubject('');
+                        setTeacherSelectedSubjects([]);
                         setTeacherSelectedClassIds([]);
                         setTeacherNewSubjectInput('');
                       }
@@ -3822,43 +3824,159 @@ ${directivesFormatted}
                           </select>
                         </div>
                       ) : (
-                        <div className="space-y-4">
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div>
-                              <label className="block text-xs font-bold text-slate-700 mb-1.5">المادة الدراسية (قائمة منسدلة) *</label>
-                              <select
-                                value={teacherSelectedSubject}
-                                onChange={e => setTeacherSelectedSubject(e.target.value)}
-                                className="w-full text-sm border border-slate-200 px-3.5 py-2.5 rounded-xl bg-white focus:border-indigo-500 focus:outline-none font-semibold"
-                                required={teacherAssignmentType === 'subject_multi_class'}
-                              >
-                                <option value="">-- اختر المادة الدراسية --</option>
-                                {customSubjects.map(sub => (
-                                  <option key={sub} value={sub}>{sub}</option>
-                                ))}
-                                <option value="NEW_SUBJECT" className="text-indigo-600 font-bold">+ إضافة مادة جديدة غير مسجلة...</option>
-                              </select>
+                        <div className="space-y-5">
+                          {/* Section 1: Multi-Subject Selection */}
+                          <div>
+                            <div className="flex items-center justify-between mb-1.5">
+                              <label className="block text-xs font-bold text-slate-800">
+                                اختر المواد الدراسية المسندة للمعلم (أكثر من مادة) *
+                              </label>
+                              {customSubjects.length > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (teacherSelectedSubjects.length === customSubjects.length) {
+                                      setTeacherSelectedSubjects([]);
+                                    } else {
+                                      setTeacherSelectedSubjects([...customSubjects]);
+                                    }
+                                  }}
+                                  className="text-[11px] font-semibold text-indigo-600 hover:underline cursor-pointer"
+                                >
+                                  {teacherSelectedSubjects.length === customSubjects.length ? 'إلغاء تحديد الكل' : 'تحديد جميع المواد'}
+                                </button>
+                              )}
+                            </div>
+                            <p className="text-[10px] text-slate-400 mb-2 font-sans">
+                              انقر على مادة أو أكثر لتحديدها (مثال: الرياضيات والعلوم للصفوف المختارة):
+                            </p>
+
+                            {/* Subjects Badges Grid */}
+                            <div className="flex flex-wrap gap-2 p-3 border border-slate-100 rounded-xl bg-slate-50/50 max-h-40 overflow-y-auto">
+                              {customSubjects.map(sub => {
+                                const isSelected = teacherSelectedSubjects.includes(sub);
+                                return (
+                                  <button
+                                    key={sub}
+                                    type="button"
+                                    onClick={() => {
+                                      if (isSelected) {
+                                        setTeacherSelectedSubjects(prev => prev.filter(s => s !== sub));
+                                      } else {
+                                        setTeacherSelectedSubjects(prev => [...prev, sub]);
+                                      }
+                                    }}
+                                    className={`px-3 py-1.5 rounded-lg border text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                                      isSelected
+                                        ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                                        : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
+                                    }`}
+                                  >
+                                    <span>{sub}</span>
+                                    {isSelected && <span className="text-[10px] font-bold">✓</span>}
+                                  </button>
+                                );
+                              })}
                             </div>
 
-                            {teacherSelectedSubject === 'NEW_SUBJECT' && (
-                              <div className="animate-fade-in">
-                                <label className="block text-xs font-bold text-indigo-700 mb-1.5">اسم المادة الجديدة المراد إضافتها وحفظها *</label>
-                                <input
-                                  type="text"
-                                  value={teacherNewSubjectInput}
-                                  onChange={e => setTeacherNewSubjectInput(e.target.value)}
-                                  placeholder="اكتب مادة جديدة مثلاً: التربية الأسرية"
-                                  className="w-full text-sm border border-indigo-200 px-3.5 py-2.5 rounded-xl focus:border-indigo-500 focus:outline-none bg-indigo-50/10"
-                                  required={teacherSelectedSubject === 'NEW_SUBJECT'}
-                                />
+                            {/* Active Selected Subjects Summary */}
+                            {teacherSelectedSubjects.length > 0 && (
+                              <div className="mt-2.5 flex items-center flex-wrap gap-1.5 bg-indigo-50/50 p-2.5 rounded-xl border border-indigo-100">
+                                <span className="text-[11px] font-bold text-indigo-900 ml-1">المواد المحددة ({teacherSelectedSubjects.length}):</span>
+                                {teacherSelectedSubjects.map(sub => (
+                                  <span
+                                    key={sub}
+                                    className="bg-indigo-600 text-white text-[10px] font-bold px-2 py-0.5 rounded-md flex items-center gap-1 shadow-2xs"
+                                  >
+                                    {sub}
+                                    <button
+                                      type="button"
+                                      onClick={() => setTeacherSelectedSubjects(prev => prev.filter(s => s !== sub))}
+                                      className="hover:text-red-200 transition font-mono font-bold cursor-pointer"
+                                    >
+                                      ×
+                                    </button>
+                                  </span>
+                                ))}
                               </div>
                             )}
+
+                            {/* Quick Add Custom Subject */}
+                            <div className="mt-3 flex items-center gap-2">
+                              <input
+                                type="text"
+                                value={teacherNewSubjectInput}
+                                onChange={e => setTeacherNewSubjectInput(e.target.value)}
+                                onKeyDown={e => {
+                                  if (e.key === 'Enter') {
+                                    e.preventDefault();
+                                    const val = teacherNewSubjectInput.trim();
+                                    if (val) {
+                                      if (!customSubjects.includes(val)) {
+                                        const updated = [...customSubjects, val];
+                                        setCustomSubjects(updated);
+                                        localStorage.setItem('school_custom_subjects', JSON.stringify(updated));
+                                      }
+                                      if (!teacherSelectedSubjects.includes(val)) {
+                                        setTeacherSelectedSubjects(prev => [...prev, val]);
+                                      }
+                                      setTeacherNewSubjectInput('');
+                                    }
+                                  }
+                                }}
+                                placeholder="إضافة مادة جديدة مثلاً: التربية البدنية..."
+                                className="flex-1 text-xs border border-slate-200 px-3 py-2 rounded-xl focus:border-indigo-500 focus:outline-none bg-white"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const val = teacherNewSubjectInput.trim();
+                                  if (val) {
+                                    if (!customSubjects.includes(val)) {
+                                      const updated = [...customSubjects, val];
+                                      setCustomSubjects(updated);
+                                      localStorage.setItem('school_custom_subjects', JSON.stringify(updated));
+                                    }
+                                    if (!teacherSelectedSubjects.includes(val)) {
+                                      setTeacherSelectedSubjects(prev => [...prev, val]);
+                                    }
+                                    setTeacherNewSubjectInput('');
+                                  }
+                                }}
+                                className="px-3.5 py-2 text-xs font-bold bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-xl hover:bg-indigo-100 transition whitespace-nowrap cursor-pointer"
+                              >
+                                + إضافة المادة
+                              </button>
+                            </div>
                           </div>
 
+                          {/* Section 2: Multi-Class Selection */}
                           <div>
-                            <label className="block text-xs font-bold text-slate-700 mb-1.5">اختر الفصول والشعب التي يدرسها المعلم (أكثر من صف) *</label>
-                            <p className="text-[10px] text-slate-400 mb-2 font-sans">بإمكانك تحديد صف واحد أو عدة صفوف تدرس بها هذه المادة:</p>
-                            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 max-h-40 overflow-y-auto p-2 border border-slate-100 rounded-xl bg-slate-50/50">
+                            <div className="flex items-center justify-between mb-1.5">
+                              <label className="block text-xs font-bold text-slate-800">
+                                اختر الفصول والشعب التي يدرسها المعلم (أكثر من صف) *
+                              </label>
+                              {classes.filter(matchesCohort).length > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const cohortClassIds = classes.filter(matchesCohort).map(c => c.id);
+                                    if (teacherSelectedClassIds.length === cohortClassIds.length) {
+                                      setTeacherSelectedClassIds([]);
+                                    } else {
+                                      setTeacherSelectedClassIds(cohortClassIds);
+                                    }
+                                  }}
+                                  className="text-[11px] font-semibold text-indigo-600 hover:underline cursor-pointer"
+                                >
+                                  {teacherSelectedClassIds.length === classes.filter(matchesCohort).length ? 'إلغاء تحديد الكل' : 'تحديد كافة الصفوف'}
+                                </button>
+                              )}
+                            </div>
+                            <p className="text-[10px] text-slate-400 mb-2 font-sans">
+                              حدد الصفوف والشعب التي سيدرّس فيها المعلم المواد المحددة أعلاه:
+                            </p>
+                            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 max-h-44 overflow-y-auto p-2 border border-slate-100 rounded-xl bg-slate-50/50">
                               {classes.filter(matchesCohort).map(c => {
                                 const isSelected = teacherSelectedClassIds.includes(c.id);
                                 return (
@@ -3872,14 +3990,14 @@ ${directivesFormatted}
                                         setTeacherSelectedClassIds(prev => [...prev, c.id]);
                                       }
                                     }}
-                                    className={`p-2 rounded-lg border text-right transition text-xs font-semibold flex items-center justify-between gap-2 cursor-pointer ${
+                                    className={`p-2.5 rounded-lg border text-right transition text-xs font-semibold flex items-center justify-between gap-2 cursor-pointer ${
                                       isSelected
                                         ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
                                         : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
                                     }`}
                                   >
                                     <span className="truncate">{c.name}</span>
-                                    <span className={`w-3.5 h-3.5 rounded-full flex items-center justify-center border text-[9px] font-bold ${
+                                    <span className={`w-4 h-4 rounded-full flex items-center justify-center border text-[9px] font-bold ${
                                       isSelected ? 'bg-white text-indigo-600 border-white' : 'border-slate-300 bg-slate-50'
                                     }`}>
                                       {isSelected ? '✓' : ''}
@@ -3900,7 +4018,7 @@ ${directivesFormatted}
                         onClick={() => {
                           setShowTeacherForm(false);
                           setTeacherSelectedClassId('');
-                          setTeacherSelectedSubject('');
+                          setTeacherSelectedSubjects([]);
                           setTeacherSelectedClassIds([]);
                           setTeacherNewSubjectInput('');
                         }}
