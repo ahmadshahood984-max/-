@@ -4,7 +4,7 @@
  */
 
 import { db } from './firebase';
-import { doc, onSnapshot, setDoc } from 'firebase/firestore';
+import { doc, onSnapshot, setDoc, getDoc } from 'firebase/firestore';
 import { trackFirestoreRead, trackFirestoreWrite } from './firestoreTracker';
 
 const SYNC_KEYS = [
@@ -38,6 +38,37 @@ export const STORAGE_UPDATE_EVENT = 'school_storage_update';
 // Keep reference to original methods
 const originalSetItem = localStorage.setItem.bind(localStorage);
 const originalRemoveItem = localStorage.removeItem.bind(localStorage);
+
+export async function forceRefreshDataFromFirestore(): Promise<boolean> {
+  if (!db) return false;
+  try {
+    for (const key of SYNC_KEYS) {
+      const docRef = doc(db, 'school_live_data', key);
+      const snap = await getDoc(docRef);
+      trackFirestoreRead(1);
+      if (snap.exists()) {
+        const docData = snap.data();
+        if (docData && docData.data !== undefined) {
+          const valueString = typeof docData.data === 'object' 
+            ? JSON.stringify(docData.data) 
+            : String(docData.data);
+          
+          isRemoteSyncing = true;
+          originalSetItem(key, valueString);
+          isRemoteSyncing = false;
+
+          window.dispatchEvent(new CustomEvent(STORAGE_UPDATE_EVENT, {
+            detail: { key, value: valueString }
+          }));
+        }
+      }
+    }
+    return true;
+  } catch (err) {
+    console.error('Error force refreshing data from Firestore:', err);
+    return false;
+  }
+}
 
 export function setupFirebaseSync() {
   console.log('Initializing Firebase real-time database synchronization...');

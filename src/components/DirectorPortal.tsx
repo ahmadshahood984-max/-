@@ -55,6 +55,7 @@ import * as XLSX from 'xlsx';
 import { db } from '../lib/firebase';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead } from '../lib/firestoreTracker';
+import { forceRefreshDataFromFirestore } from '../lib/firebaseSync';
 import { Bell, Activity, Info } from 'lucide-react';
 
 const getShareableOrigin = () => {
@@ -204,14 +205,17 @@ export default function DirectorPortal({
   const [isSyncingData, setIsSyncingData] = useState(false);
   const [syncSuccessMsg, setSyncSuccessMsg] = useState<string | null>(null);
 
-  const handleManualSync = () => {
+  const handleManualSync = async () => {
     setIsSyncingData(true);
     try {
-      // 1. Dispatch custom storage events so App.tsx and other portals reload immediately
+      // 1. Pull latest data from Firestore if available
+      await forceRefreshDataFromFirestore();
+
+      // 2. Dispatch custom storage events so App.tsx and other portals sync immediately
       window.dispatchEvent(new CustomEvent('school_storage_update'));
       window.dispatchEvent(new Event('storage'));
 
-      // 2. Reload local state hooks in Director Portal directly from localStorage
+      // 3. Reload local state hooks in Director Portal directly from updated localStorage
       const savedTeachers = localStorage.getItem('school_teachers');
       if (savedTeachers) {
         try { setTeachers(JSON.parse(savedTeachers)); } catch (e) {}
@@ -262,11 +266,11 @@ export default function DirectorPortal({
 
     setTimeout(() => {
       setIsSyncingData(false);
-      setSyncSuccessMsg('🎉 تم تحديث ومزامنة كافة البيانات بنجاح! تم نشر التغييرات والتأكد من توفرها لبوابتي المعلم وولي الأمر.');
+      setSyncSuccessMsg('🎉 تم تحديث ومزامنة كافة البيانات فقط في اللحظة دون إعادة تحميل الصفحة!');
       setTimeout(() => {
         setSyncSuccessMsg(null);
       }, 4000);
-    }, 600);
+    }, 400);
   };
 
   React.useEffect(() => {
