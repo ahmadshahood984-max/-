@@ -31,9 +31,15 @@ import {
   AlertTriangle,
   Check,
   Plus,
-  Trash2
+  Trash2,
+  Megaphone,
+  Phone,
+  ArrowLeft,
+  CheckCircle2
 } from 'lucide-react';
-import { Teacher, Student, Class, Attendance, Grade, Parent, Message } from '../types';
+import { buildWhatsAppUrl, openWhatsAppDirectly, getWhatsAppSentRecords, recordWhatsAppSent, WhatsAppSentRecord } from '../lib/whatsapp';
+import { WhatsAppMessageCustomizerModal } from './WhatsAppMessageCustomizerModal';
+import { Teacher, Student, Class, Attendance, Grade, Parent, Message, Announcement } from '../types';
 import { motion, AnimatePresence } from 'motion/react';
 
 interface TeacherPortalProps {
@@ -44,10 +50,13 @@ interface TeacherPortalProps {
   grades: Grade[];
   parents: Parent[];
   messages: Message[];
+  announcements: Announcement[];
   saveAttendance: (newAttendance: Omit<Attendance, 'id'>[]) => void;
   saveGrade: (grade: Omit<Grade, 'id' | 'date'>) => void;
   sendMessage: (message: Omit<Message, 'id' | 'date' | 'read'>) => void;
   setMessages?: React.Dispatch<React.SetStateAction<Message[]>>;
+  setGrades?: React.Dispatch<React.SetStateAction<Grade[]>>;
+  addAnnouncement?: (announceData: Omit<Announcement, 'id' | 'date'> & { authorName?: string; authorRole?: 'director' | 'teacher' }) => void;
 }
 
 export default function TeacherPortal({
@@ -58,14 +67,28 @@ export default function TeacherPortal({
   grades,
   parents,
   messages,
+  announcements,
   saveAttendance,
   saveGrade,
   sendMessage,
-  setMessages
+  setMessages,
+  setGrades,
+  addAnnouncement
 }: TeacherPortalProps) {
   // Simulator: active logged in teacher
   const [selectedTeacherId, setSelectedTeacherId] = useState<string>(teachers[0]?.id || 't1');
   const activeTeacher = teachers.find(t => t.id === selectedTeacherId);
+
+  // Sync selectedTeacherId to localStorage so other portals/App.tsx can read the active teacher
+  useEffect(() => {
+    if (selectedTeacherId) {
+      localStorage.setItem('school_active_teacher_id', selectedTeacherId);
+      // Dispatch storage update event so App.tsx can re-check unread counts in real-time
+      window.dispatchEvent(new CustomEvent('school_storage_update', {
+        detail: { key: 'school_active_teacher_id', value: selectedTeacherId }
+      }));
+    }
+  }, [selectedTeacherId]);
 
   const markAsRead = (msgId: string) => {
     if (setMessages) {
@@ -77,26 +100,105 @@ export default function TeacherPortal({
     }
   };
 
-  const handleDeleteTeacherMessage = (msgId: string) => {
-    if (window.confirm('هل تريد حذف هذه الرسالة/الإشعار نهائياً من العرض؟')) {
-      if (setMessages) {
-        setMessages(prev => {
-          const updated = prev.filter(m => m.id !== msgId);
-          localStorage.setItem('school_messages', JSON.stringify(updated));
-          return updated;
-        });
-      }
+  const markAllAsRead = () => {
+    if (setMessages) {
+      setMessages(prev => {
+        const updated = prev.map(m => m.receiverId === selectedTeacherId && !m.read ? { ...m, read: true } : m);
+        localStorage.setItem('school_messages', JSON.stringify(updated));
+        return updated;
+      });
     }
   };
 
+  const markAllAsReadForStudent = (studentId: string) => {
+    if (setMessages) {
+      setMessages(prev => {
+        const updated = prev.map(m => m.receiverId === selectedTeacherId && m.studentId === studentId && !m.read ? { ...m, read: true } : m);
+        localStorage.setItem('school_messages', JSON.stringify(updated));
+        return updated;
+      });
+    }
+  };
+
+  const handleDeleteTeacherMessage = (msgId: string) => {
+    setMessageToDelete(msgId);
+  };
+
+  const handleEditTeacherMessage = (msgId: string, currentContent: string) => {
+    setMessageToEdit({ id: msgId, content: currentContent });
+    setEditMessageContent(currentContent);
+  };
+
+  const handleDeleteGrade = (gradeId: string) => {
+    setGradeToDelete(gradeId);
+  };
+
+  const handleEditGrade = (grade: Grade) => {
+    setGradeToEdit(grade);
+    setEditGradeScore(grade.score.toString());
+  };
+
+  const confirmDeleteGrade = () => {
+    if (!gradeToDelete) return;
+    if (setGrades) {
+      setGrades(prev => {
+        const updated = prev.filter(g => g.id !== gradeToDelete);
+        localStorage.setItem('school_grades', JSON.stringify(updated));
+        return updated;
+      });
+    }
+    setGradeToDelete(null);
+  };
+
+  const confirmEditGrade = () => {
+    if (!gradeToEdit) return;
+    const newScore = parseFloat(editGradeScore);
+    const effectiveMax = Math.min(100, gradeToEdit.maxScore);
+    if (isNaN(newScore) || newScore < 0 || newScore > effectiveMax) {
+      alert(`❌ الرجاء إدخال درجة صالحة بين 0 و ${effectiveMax}`);
+      return;
+    }
+    if (setGrades) {
+      setGrades(prev => {
+        const updated = prev.map(g => g.id === gradeToEdit.id ? { ...g, score: newScore } : g);
+        localStorage.setItem('school_grades', JSON.stringify(updated));
+        return updated;
+      });
+      alert('🎉 تم تعديل الدرجة بنجاح وتحديثها لدى ولي الأمر فوراً!');
+    }
+    setGradeToEdit(null);
+    setEditGradeScore('');
+  };
+
   // Login states
-  const [isTeacherLoggedIn, setIsTeacherLoggedIn] = useState<boolean>(false);
+  const [isTeacherLoggedIn, setIsTeacherLoggedIn] = useState<boolean>(() => {
+    const saved = localStorage.getItem('school_teacher_is_logged_in');
+    return saved === 'true';
+  });
   const [teacherPasswordInput, setTeacherPasswordInput] = useState<string>('');
   const [teacherLoginError, setTeacherLoginError] = useState<string>('');
 
+  // Auto-restore teacher ID if logged in
+  useEffect(() => {
+    const savedLoggedIn = localStorage.getItem('school_teacher_is_logged_in');
+    const savedTeacherId = localStorage.getItem('school_teacher_logged_in_id') || localStorage.getItem('school_active_teacher_id');
+    if (savedLoggedIn === 'true') {
+      setIsTeacherLoggedIn(true);
+      if (savedTeacherId && teachers.some(t => t.id === savedTeacherId)) {
+        setSelectedTeacherId(savedTeacherId);
+      }
+    }
+  }, [teachers]);
+
   // Tabs
-  const [activeTab, setActiveTab] = useState<'grades' | 'students' | 'messages'>('grades');
+  const [activeTab, setActiveTab] = useState<'grades' | 'students' | 'messages' | 'announcements'>('grades');
+  const [gradingMode, setGradingMode] = useState<'single' | 'all'>('single');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+
+  // Announcement states for Teacher
+  const [announceTitle, setAnnounceTitle] = useState('');
+  const [announceContent, setAnnounceContent] = useState('');
+  const [announceTarget, setAnnounceTarget] = useState<'all' | 'parents'>('parents');
 
   // Student directory & Behavior state
   const [selectedStudentForBehavior, setSelectedStudentForBehavior] = useState<Student | null>(null);
@@ -106,6 +208,61 @@ export default function TeacherPortal({
   const [behaviorNotes, setBehaviorNotes] = useState<string>('');
   const [behaviorAttachedMedia, setBehaviorAttachedMedia] = useState<string | null>(null);
   const [behaviorAttachedMediaType, setBehaviorAttachedMediaType] = useState<'image' | 'video' | null>(null);
+
+  // WhatsApp tracking & Parent phone input
+  const [whatsappSentRecords, setWhatsappSentRecords] = useState<Record<string, WhatsAppSentRecord>>(() => getWhatsAppSentRecords());
+  const [parentPhoneInput, setParentPhoneInput] = useState<string>('');
+
+  const [waModalState, setWaModalState] = useState<{
+    isOpen: boolean;
+    studentName: string;
+    recipientPhone: string;
+    initialMessage: string;
+    defaultTemplateText: string;
+    waKey: string;
+    waKeyGeneral: string;
+    studentId: string;
+    nextStudent: Student | null;
+  } | null>(null);
+
+  const handleConfirmSendWhatsAppTeacher = (finalPhone: string, finalMessage: string, targetType: 'auto' | 'web' | 'app' = 'auto') => {
+    if (!waModalState) return;
+
+    try {
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(finalMessage);
+      }
+    } catch (e) {}
+
+    openWhatsAppDirectly(finalPhone, finalMessage, targetType);
+
+    const rec = recordWhatsAppSent(waModalState.waKey, waModalState.studentName, 'behavior');
+    recordWhatsAppSent(waModalState.waKeyGeneral, waModalState.studentName, 'behavior');
+
+    setWhatsappSentRecords(prev => ({
+      ...prev,
+      [waModalState.waKey]: rec,
+      [waModalState.waKeyGeneral]: rec
+    }));
+
+    if (waModalState.nextStudent) {
+      // Cleanly reset behavior selection and state so it does NOT return to message text
+      setBehaviorNotes('');
+      setBehaviorAttachedMedia(null);
+      setBehaviorAttachedMediaType(null);
+    } else {
+      stopCamera();
+      setSelectedStudentForBehavior(null);
+    }
+    setWaModalState(null);
+  };
+
+  useEffect(() => {
+    if (selectedStudentForBehavior) {
+      const parent = parents.find(p => p.childrenIds.includes(selectedStudentForBehavior.id) || p.id === selectedStudentForBehavior.parentId);
+      setParentPhoneInput(parent?.phone || '');
+    }
+  }, [selectedStudentForBehavior, parents]);
   
   // Real-time camera streaming & capture variables
   const [isCameraOn, setIsCameraOn] = useState<boolean>(false);
@@ -114,6 +271,76 @@ export default function TeacherPortal({
   // Grade attachment states
   const [gradeAttachedMedia, setGradeAttachedMedia] = useState<{ [studentId: string]: string | null }>({});
   const [gradeAttachedMediaType, setGradeAttachedMediaType] = useState<{ [studentId: string]: 'image' | 'video' | null }>({});
+
+  // "Grades of all subjects" modal states
+  const [selectedStudentForAllGrades, setSelectedStudentForAllGrades] = useState<Student | null>(null);
+  const [allGradesExamName, setAllGradesExamName] = useState<string>('');
+  const [allGradesMaxScore, setAllGradesMaxScore] = useState<number>(20);
+  const [allGradesExamType, setAllGradesExamType] = useState<'special' | 'monthly' | 'general'>('general');
+  const [allGradesScores, setAllGradesScores] = useState<{ [subjectName: string]: string }>({});
+
+  // Grade Edit / Delete modal states
+  const [gradeToDelete, setGradeToDelete] = useState<string | null>(null);
+  const [gradeToEdit, setGradeToEdit] = useState<Grade | null>(null);
+  const [editGradeScore, setEditGradeScore] = useState<string>('');
+
+  // Message Edit / Delete modal states
+  const [messageToDelete, setMessageToDelete] = useState<string | null>(null);
+  const [messageToEdit, setMessageToEdit] = useState<{ id: string; content: string } | null>(null);
+  const [editMessageContent, setEditMessageContent] = useState<string>('');
+
+  const handleSaveAllSubjectsGrades = () => {
+    if (!selectedStudentForAllGrades) return;
+    if (!allGradesExamName.trim()) {
+      alert('الرجاء إدخال اسم الاختبار أو التقييم لجميع المواد (مثال: اختبار نهاية الفصل الدراسي)');
+      return;
+    }
+    if (allGradesMaxScore <= 0 || allGradesMaxScore > 100) {
+      alert('الرجاء إدخال درجة عظمى صالحة بين 1 و 100');
+      return;
+    }
+
+    const enteredScores = Object.entries(allGradesScores).filter(([_, val]) => val !== undefined && String(val).trim() !== '');
+    if (enteredScores.length === 0) {
+      alert('الرجاء إدخال علامة واحدة على الأقل في أي مادة لحفظها!');
+      return;
+    }
+
+    const effectiveMax = Math.min(100, allGradesMaxScore);
+    // Validate scores are correct numbers
+    for (const [sub, val] of enteredScores) {
+      const numVal = Number(val);
+      if (isNaN(numVal) || numVal < 0 || numVal > effectiveMax) {
+        alert(`❌ الدرجة المدخلة للمادة (${sub}) غير صالحة. يجب أن تكون بين 0 و ${effectiveMax}`);
+        return;
+      }
+    }
+
+    const studentId = selectedStudentForAllGrades.id;
+    const studentParent = parents.find(p => p.childrenIds.includes(studentId));
+
+    // Save each grade
+    enteredScores.forEach(([sub, val]) => {
+      saveGrade({
+        studentId,
+        subject: sub,
+        examName: allGradesExamName,
+        score: Number(val),
+        maxScore: effectiveMax,
+        teacherId: selectedTeacherId,
+        examType: allGradesExamType
+      });
+
+    });
+
+    alert(`🎉 تم رصد درجات عدد ${enteredScores.length} مادة بنجاح للطالب (${selectedStudentForAllGrades.name}) وتم إرسال إشعار فوري لولي الأمر! 🔔`);
+    
+    // Clear state & Close modal
+    if (gradingMode !== 'all') {
+      setSelectedStudentForAllGrades(null);
+    }
+    setAllGradesScores({});
+  };
 
   // Selected class (for active teacher)
   const teacherClasses = classes.filter(c => activeTeacher?.classes.includes(c.id));
@@ -151,22 +378,100 @@ export default function TeacherPortal({
 
   // Grade state
   const [gradeSubject, setGradeSubject] = useState<string>('');
+  const [isCustomSubject, setIsCustomSubject] = useState<boolean>(false);
   const [examName, setExamName] = useState<string>('');
   const [maxScore, setMaxScore] = useState<number>(20);
+  const [examType, setExamType] = useState<'special' | 'monthly' | 'general'>('general');
   const [studentGrades, setStudentGrades] = useState<{ [studentId: string]: number | string }>({});
   
-  useEffect(() => {
-    if (activeTeacher && activeTeacher.subjects.length > 0) {
-      setGradeSubject(activeTeacher.subjects[0]);
+  // Get subjects assigned to the selected class based on the teachers teaching it
+  const classSubjects = React.useMemo(() => {
+    if (!selectedClassId) return [];
+    
+    const subjectsSet = new Set<string>();
+    let hasGeneralTeacher = false;
+    
+    // Find all teachers assigned to this class
+    const assignedTeachers = teachers.filter(t => t.classes.includes(selectedClassId));
+    
+    assignedTeachers.forEach(t => {
+      t.subjects.forEach(sub => {
+        if (sub === 'عام - جميع المواد' || sub.includes('جميع المواد')) {
+          hasGeneralTeacher = true;
+        } else {
+          subjectsSet.add(sub);
+        }
+      });
+    });
+    
+    // Fallback/General subjects when there is a general teacher or no teachers explicitly registered yet
+    if (hasGeneralTeacher || subjectsSet.size === 0) {
+      const defaultSubjects = ['الرياضيات', 'العلوم', 'اللغة العربية', 'التربية الإسلامية', 'اللغة الإنجليزية', 'الاجتماعيات'];
+      defaultSubjects.forEach(s => subjectsSet.add(s));
+      
+      // Also fetch custom subjects defined in the school settings
+      const saved = localStorage.getItem('school_custom_subjects');
+      if (saved) {
+        try {
+          const parsed = JSON.parse(saved);
+          if (Array.isArray(parsed)) {
+            parsed.forEach((s: string) => subjectsSet.add(s));
+          }
+        } catch (e) {
+          // ignore
+        }
+      }
     }
-  }, [selectedTeacherId]);
+    
+    return Array.from(subjectsSet);
+  }, [selectedClassId, teachers]);
+
+  // Get subjects assigned to the active teacher for this class
+  const teacherClassSubjects = React.useMemo(() => {
+    if (!activeTeacher) return [];
+    
+    const teacherSubjects = activeTeacher.subjects || [];
+    
+    // Check if the teacher is a general teacher who teaches all subjects
+    const isGeneralTeacher = teacherSubjects.some(sub => sub === 'عام - جميع المواد' || sub.includes('جميع المواد'));
+    
+    if (isGeneralTeacher) {
+      return classSubjects.filter(sub => sub !== 'عام - جميع المواد' && !sub.includes('جميع المواد'));
+    }
+    
+    // Return exactly the subjects assigned to this active teacher, excluding placeholder roles, filtered by classSubjects
+    return teacherSubjects.filter(sub => sub !== 'عام - جميع المواد' && !sub.includes('جميع المواد') && classSubjects.includes(sub));
+  }, [selectedClassId, activeTeacher, classSubjects]);
+
+  // Auto-update gradeSubject when class changes to ensure it matches one of the teacher's/class's assigned subjects
+  useEffect(() => {
+    if (teacherClassSubjects.length > 0) {
+      if (!teacherClassSubjects.includes(gradeSubject)) {
+        setGradeSubject(teacherClassSubjects[0]);
+        setIsCustomSubject(false);
+      }
+    } else {
+      setGradeSubject('');
+    }
+  }, [selectedClassId, teacherClassSubjects]);
 
   // Message state
   const [selectedParentId, setSelectedParentId] = useState<string>('');
   const [messageText, setMessageText] = useState<string>('');
   const [chatStudentId, setChatStudentId] = useState<string>('');
+  const [messageFilterType, setMessageFilterType] = useState<'all' | 'outgoing' | 'incoming'>('all');
   const [notificationType, setNotificationType] = useState<string>('عام');
   const [customTypeLabel, setCustomTypeLabel] = useState<string>('');
+
+  // Auto-mark student messages as read when selected or when new messages arrive
+  useEffect(() => {
+    if (chatStudentId) {
+      const hasUnread = messages.some(m => m.receiverId === selectedTeacherId && m.studentId === chatStudentId && !m.read);
+      if (hasUnread) {
+        markAllAsReadForStudent(chatStudentId);
+      }
+    }
+  }, [chatStudentId, selectedTeacherId, messages]);
 
   // Live Camera and Attachment Capture Functions
   const startCamera = async () => {
@@ -302,8 +607,9 @@ export default function TeacherPortal({
 
   const handleSaveGrades = (studentId: string) => {
     const score = studentGrades[studentId];
-    if (score === undefined || score === '' || Number(score) < 0 || Number(score) > 100) {
-      alert('الرجاء إدخال درجة صالحة بين 0 و 100');
+    const effectiveMax = Math.min(100, maxScore > 0 ? maxScore : 100);
+    if (score === undefined || score === '' || isNaN(Number(score)) || Number(score) < 0 || Number(score) > effectiveMax) {
+      alert(`الرجاء إدخال درجة صالحة بين 0 و ${effectiveMax}`);
       return;
     }
     if (!examName) {
@@ -316,43 +622,16 @@ export default function TeacherPortal({
       subject: gradeSubject,
       examName,
       score: Number(score),
-      maxScore,
-      teacherId: selectedTeacherId
+      maxScore: effectiveMax,
+      teacherId: selectedTeacherId,
+      examType
     });
 
-    // Auto-notify Parent
-    const student = students.find(s => s.id === studentId);
-    const studentParent = parents.find(p => p.childrenIds.includes(studentId));
-    if (student && studentParent) {
-      const mediaUrl = gradeAttachedMedia[studentId];
-      const mediaType = gradeAttachedMediaType[studentId];
-      
-      let attachmentText = '';
-      if (mediaUrl) {
-        if (mediaType === 'video') {
-          attachmentText = `\n[مرفق_فيديو: ${mediaUrl}]`;
-        } else {
-          attachmentText = `\n[مرفق_صورة: ${mediaUrl}]`;
-        }
-      }
+    // Clear the attachment after saving
+    setGradeAttachedMedia(prev => ({ ...prev, [studentId]: null }));
+    setGradeAttachedMediaType(prev => ({ ...prev, [studentId]: null }));
 
-      sendMessage({
-        senderId: selectedTeacherId,
-        senderName: activeTeacher?.name || 'المعلم',
-        senderRole: 'teacher',
-        receiverId: studentParent.id,
-        receiverName: studentParent.name,
-        receiverRole: 'parent',
-        content: `📢 [تصنيف الإشعار: رصد درجات]\nتم رصد درجة جديدة للطالب (${student.name}) في مادة (${gradeSubject}) للاختبار (${examName}).\nالدرجة المرصودة: ${score} من ${maxScore}.${attachmentText}`,
-        studentId: student.id,
-      });
-
-      // Clear the attachment after saving
-      setGradeAttachedMedia(prev => ({ ...prev, [studentId]: null }));
-      setGradeAttachedMediaType(prev => ({ ...prev, [studentId]: null }));
-    }
-
-    alert(`تم رصد درجة الطالب بنجاح! وتم إرسال إشعار فوري لولي الأمر عبر المنصة الموحدة 🔔`);
+    alert(`تم رصد درجة الطالب بنجاح وتم إرسال إشعار فوري لولي الأمر! 🔔`);
   };
 
   // Format notification type and custom text
@@ -471,6 +750,28 @@ export default function TeacherPortal({
     alert('تم إرسال الرسالة والإشعار لولي الأمر بنجاح، وستصله إشعارات فورية!');
   };
 
+  const handlePublishAnnouncement = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!announceTitle.trim() || !announceContent.trim()) {
+      alert('يرجى ملء جميع الحقول المطلوبة!');
+      return;
+    }
+    if (addAnnouncement) {
+      addAnnouncement({
+        title: announceTitle,
+        content: announceContent,
+        target: announceTarget,
+        authorName: activeTeacher?.name ? `المعلم ${activeTeacher.name}` : 'معلم الصف',
+        authorRole: 'teacher'
+      });
+      alert('🎉 تم نشر التعميم والإعلان بنجاح، وسيظهر فوراً لأولياء الأمور المعنيين!');
+      setAnnounceTitle('');
+      setAnnounceContent('');
+    } else {
+      alert('حدث خطأ أثناء محاولة الاتصال بالنظام لنشر الإعلان.');
+    }
+  };
+
   if (!isTeacherLoggedIn) {
     return (
       <div id="teacher-login-container" className="bg-white min-h-[500px] rounded-2xl border border-slate-200 shadow-md flex flex-col items-center justify-center p-8 max-w-md mx-auto my-12">
@@ -482,43 +783,46 @@ export default function TeacherPortal({
         
         <form onSubmit={(e) => {
           e.preventDefault();
-          const targetTeacher = teachers.find(t => t.id === selectedTeacherId);
-          if (teacherPasswordInput === (targetTeacher?.password || '123')) {
+          const enteredVal = teacherPasswordInput.trim();
+          if (!enteredVal) {
+            setTeacherLoginError('الرجاء إدخال الرقم الخاص بك.');
+            return;
+          }
+          // Find teacher whose phone matches, OR whose ID matches, OR whose password matches
+          const targetTeacher = teachers.find(t => 
+            t.phone === enteredVal || 
+            t.id === enteredVal || 
+            (t.phone && t.phone.replace(/[\s-]/g, '') === enteredVal.replace(/[\s-]/g, '')) ||
+            (t.password && t.password === enteredVal)
+          );
+
+          if (targetTeacher) {
+            setSelectedTeacherId(targetTeacher.id);
             setIsTeacherLoggedIn(true);
+            localStorage.setItem('school_teacher_is_logged_in', 'true');
+            localStorage.setItem('school_teacher_logged_in_id', targetTeacher.id);
+            localStorage.setItem('school_active_teacher_id', targetTeacher.id);
             setTeacherLoginError('');
             setTeacherPasswordInput('');
           } else {
-            setTeacherLoginError('كلمة المرور غير صحيحة، حاول مجدداً.');
+            setTeacherLoginError('رقم الهاتف أو المعرف المدخل غير مسجل لدينا، يرجى مراجعة إدارة المدرسة.');
           }
         }} className="w-full mt-6 space-y-4">
           <div>
-            <label className="block text-xs font-semibold text-slate-600 mb-1.5 text-right font-medium">اختر المعلم لتسجيل الدخول</label>
-            <select
-              value={selectedTeacherId}
-              onChange={e => {
-                setSelectedTeacherId(e.target.value);
-                setTeacherLoginError('');
-              }}
-              className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl bg-white focus:border-indigo-500 focus:outline-none text-right font-semibold text-slate-800"
-            >
-              {teachers.map(t => (
-                <option key={t.id} value={t.id}>{t.name} ({t.subjects.join(' / ')})</option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold text-slate-600 mb-1.5 text-right font-medium">كلمة مرور المعلم</label>
+            <label className="block text-xs font-semibold text-slate-600 mb-1.5 text-right font-medium">أدخل رقم الهاتف أو رقم المعرف الخاص بك *</label>
             <div className="relative">
               <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400">
-                <Lock className="w-4 h-4" />
+                <Users className="w-4 h-4" />
               </span>
               <input
-                type="password"
+                type="text"
                 value={teacherPasswordInput}
-                onChange={e => setTeacherPasswordInput(e.target.value)}
-                placeholder="أدخل كلمة المرور الخاصة بك..."
-                className="w-full text-xs border border-slate-200 pr-10 pl-4 py-2.5 rounded-xl focus:border-indigo-500 focus:outline-none text-center font-bold font-mono tracking-widest"
+                onChange={e => {
+                  setTeacherPasswordInput(e.target.value);
+                  setTeacherLoginError('');
+                }}
+                placeholder="أدخل رقم هاتفك أو معرف المعلم..."
+                className="w-full text-xs border border-slate-200 pr-10 pl-4 py-2.5 rounded-xl focus:border-indigo-500 focus:outline-none text-center font-bold tracking-wider"
                 required
               />
             </div>
@@ -531,15 +835,15 @@ export default function TeacherPortal({
             type="submit"
             className="w-full bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold py-3 px-4 rounded-xl transition shadow-sm cursor-pointer"
           >
-            تسجيل الدخول للمتابعة
+            فتح البوابة التعليمية 🚀
           </button>
           
           <div className="mt-4 p-3 bg-slate-50 border border-slate-100 rounded-xl text-right">
             <p className="text-[11px] text-slate-600 leading-relaxed">
-              🔒 <strong>تنبيه الأمان:</strong> يجب الحصول على كلمة المرور الخاصة بك من مدير المدرسة مباشرة. لا يمكن للمعلم تعديل كلمة المرور أو تعيينها بنفسه، بل يتم تحديدها وإدارتها حصراً عبر لوحة تحكم المدير العام للمدرسة الدولية.
+              🔒 <strong>تنبيه الأمان:</strong> قم بإدخال رقم الهاتف المسجل لدى إدارة المدرسة لفتح البوابة مباشرة ودون الحاجة لتحديد الاسم أو كتابة كلمات مرور معقدة.
             </p>
-            <p className="text-[10px] text-indigo-600 mt-2 text-center font-semibold">
-              (كلمة المرور التجريبية الافتراضية للمعلمين حالياً هي: <strong className="font-mono bg-indigo-50 px-1 py-0.5 rounded text-indigo-950 font-bold">123</strong>)
+            <p className="text-[10px] text-indigo-600 mt-2 text-center font-semibold leading-relaxed">
+              (إذا لم تكن تملك رقم هاتف مسجل، يمكنك استخدام المعرف الافتراضي للمعلم الأول لتسجيل الدخول السريع: <strong className="font-mono bg-indigo-50 px-1 py-0.5 rounded text-indigo-950 font-bold">t1</strong> أو استخدام رقمه المسجل)
             </p>
           </div>
         </form>
@@ -548,19 +852,19 @@ export default function TeacherPortal({
   }
 
   return (
-    <div id="teacher-portal-root" className="bg-slate-50 min-h-full rounded-2xl border border-slate-200 overflow-hidden shadow-md flex flex-col md:flex-row">
+    <div id="teacher-portal-root" className="bg-slate-50 min-h-screen rounded-2xl border border-slate-200 overflow-hidden shadow-md flex flex-col md:flex-row">
       {/* Teacher App Sidebar */}
-      <div id="teacher-sidebar" className="w-full md:w-64 bg-slate-950 text-white p-4 md:p-6 flex flex-col justify-between">
+      <div id="teacher-sidebar" className="w-full md:w-52 lg:w-56 bg-indigo-50/70 text-slate-900 p-3.5 flex flex-col justify-between border-b md:border-b-0 md:border-l border-indigo-100/80 md:sticky md:top-0 md:h-screen md:overflow-y-auto shrink-0">
         <div>
           {/* Sidebar Header with Hamburger button on Mobile */}
-          <div className="flex items-center justify-between border-b border-slate-800 pb-4 mb-4 md:mb-6 md:pb-4">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center font-bold shadow-sm">
+          <div className="flex items-center justify-between border-b border-indigo-100 pb-3 mb-3 md:mb-4 md:pb-3">
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-xl bg-indigo-600 text-white flex items-center justify-center font-black shadow-xs text-xs">
                 {activeTeacher?.name.replace('أ.', '').trim().charAt(0)}
               </div>
               <div className="text-right">
-                <h3 className="font-bold text-sm text-slate-100">{activeTeacher?.name}</h3>
-                <span className="text-[10px] text-indigo-400 font-bold block">بوابة المعلم الإلكترونية</span>
+                <h3 className="font-extrabold text-xs text-slate-950">{activeTeacher?.name}</h3>
+                <span className="text-[9px] text-indigo-700 font-bold block">بوابة المعلم الإلكترونية</span>
               </div>
             </div>
 
@@ -568,31 +872,33 @@ export default function TeacherPortal({
             <button
               type="button"
               onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-              className="md:hidden p-2 text-slate-300 hover:text-white hover:bg-slate-900 rounded-lg transition cursor-pointer"
+              className="md:hidden p-1.5 text-slate-700 hover:text-slate-950 hover:bg-indigo-100 rounded-lg transition cursor-pointer"
               aria-label="القائمة"
             >
-              {isMobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+              {isMobileMenuOpen ? <X className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
             </button>
           </div>
 
           {/* Navigation and Login Info - Collapsible on Mobile */}
-          <div className={`${isMobileMenuOpen ? 'block' : 'hidden md:block'} space-y-4`}>
+          <div className={`${isMobileMenuOpen ? 'block' : 'hidden md:block'} space-y-3`}>
             {/* Logged in Teacher Info & Logout */}
-            <div className="bg-slate-900/60 p-4 rounded-xl border border-slate-800/40 space-y-2.5">
-              <span className="text-[10px] text-emerald-400 font-bold flex items-center gap-1 justify-end">
-                <span>بوابة المعلم المعتمدة والآمنة</span>
+            <div className="bg-white p-3 rounded-xl border border-indigo-100/80 shadow-2xs space-y-2">
+              <span className="text-[9px] text-emerald-700 font-bold flex items-center gap-1 justify-end">
+                <span>بوابة المعلم الآمنة</span>
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
               </span>
               <button
                 onClick={() => {
                   setIsTeacherLoggedIn(false);
+                  localStorage.removeItem('school_teacher_is_logged_in');
+                  localStorage.removeItem('school_teacher_logged_in_id');
                   setTeacherPasswordInput('');
                   setIsMobileMenuOpen(false);
                 }}
-                className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-rose-950/40 text-rose-300 hover:bg-rose-950/75 border border-rose-900/30 rounded-xl text-[11px] font-bold transition cursor-pointer"
+                className="w-full flex items-center justify-center gap-1.5 px-2.5 py-1.5 bg-rose-50 text-rose-700 hover:bg-rose-100 border border-rose-200/80 rounded-xl text-[10px] font-extrabold transition cursor-pointer shadow-2xs"
               >
-                <LogOut className="w-3.5 h-3.5" />
-                <span>قفل الخروج (تسجيل خروج)</span>
+                <LogOut className="w-3 h-3" />
+                <span>تسجيل الخروج</span>
               </button>
             </div>
 
@@ -602,11 +908,11 @@ export default function TeacherPortal({
                   setActiveTab('grades');
                   setIsMobileMenuOpen(false);
                 }}
-                className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-right text-xs font-semibold transition-all duration-200 ${
-                  activeTab === 'grades' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-300 hover:bg-slate-900 hover:text-slate-100'
+                className={`w-full flex items-center gap-2 px-3 py-2 rounded-xl text-right text-[11px] font-bold transition-all duration-200 cursor-pointer ${
+                  activeTab === 'grades' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-900 hover:bg-white hover:text-indigo-900'
                 }`}
               >
-                <Award className="w-4.5 h-4.5 shrink-0" />
+                <Award className="w-4 h-4 shrink-0" />
                 <span>رصد الدرجات والتقييم</span>
               </button>
 
@@ -615,13 +921,15 @@ export default function TeacherPortal({
                   setActiveTab('students');
                   setIsMobileMenuOpen(false);
                 }}
-                className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-right text-xs font-semibold transition-all duration-200 ${
-                  activeTab === 'students' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-300 hover:bg-slate-900 hover:text-slate-100'
+                className={`w-full flex items-center gap-2 px-3 py-2 rounded-xl text-right text-[11px] font-bold transition-all duration-200 cursor-pointer ${
+                  activeTab === 'students' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-900 hover:bg-white hover:text-indigo-900'
                 }`}
               >
-                <Users className="w-4.5 h-4.5 shrink-0" />
+                <Users className="w-4 h-4 shrink-0" />
                 <span>أسماء ودليل الطلاب</span>
-                <span className="mr-auto bg-indigo-500/40 text-indigo-200 px-2 py-0.5 rounded-full text-[9px] font-bold">
+                <span className={`mr-auto px-1.5 py-0.5 rounded-full text-[8px] font-bold ${
+                  activeTab === 'students' ? 'bg-indigo-500/40 text-white' : 'bg-indigo-100 text-indigo-800 border border-indigo-200'
+                }`}>
                   {classStudents.length} طلاب
                 </span>
               </button>
@@ -631,30 +939,50 @@ export default function TeacherPortal({
                   setActiveTab('messages');
                   setIsMobileMenuOpen(false);
                 }}
-                className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-right text-xs font-semibold transition-all duration-200 ${
-                  activeTab === 'messages' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-300 hover:bg-slate-900 hover:text-slate-100'
+                className={`w-full flex items-center gap-2 px-3 py-2 rounded-xl text-right text-[11px] font-bold transition-all duration-200 cursor-pointer ${
+                  activeTab === 'messages' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-900 hover:bg-white hover:text-indigo-900'
                 }`}
               >
-                <MessageSquare className="w-4.5 h-4.5 shrink-0" />
+                <div className="relative shrink-0">
+                  <MessageSquare className="w-4 h-4" />
+                  {messages.filter(m => m.receiverId === selectedTeacherId && !m.read).length > 0 && (
+                    <span className="absolute -top-1.5 -right-1.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-rose-600 text-[8px] font-extrabold text-white ring-1 ring-white animate-bounce">
+                      {messages.filter(m => m.receiverId === selectedTeacherId && !m.read).length}
+                    </span>
+                  )}
+                </div>
                 <span>مراسلة أولياء الأمور</span>
                 {messages.filter(m => m.receiverId === selectedTeacherId && !m.read).length > 0 && (
-                  <span className="mr-auto bg-rose-500 text-white px-2 py-0.5 rounded-full text-[9px] font-bold animate-pulse">
+                  <span className="mr-auto bg-rose-600 text-white px-1.5 py-0.5 rounded-full text-[8px] font-bold animate-pulse">
                     {messages.filter(m => m.receiverId === selectedTeacherId && !m.read).length} جديدة
                   </span>
                 )}
+              </button>
+
+              <button
+                onClick={() => {
+                  setActiveTab('announcements');
+                  setIsMobileMenuOpen(false);
+                }}
+                className={`w-full flex items-center gap-2 px-3 py-2 rounded-xl text-right text-[11px] font-bold transition-all duration-200 cursor-pointer ${
+                  activeTab === 'announcements' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-900 hover:bg-white hover:text-indigo-900'
+                }`}
+              >
+                <Megaphone className="w-4 h-4 shrink-0" />
+                <span>نشر تعميم وإعلان</span>
               </button>
             </nav>
           </div>
         </div>
 
         {/* Portal Info - Collapsible on Mobile */}
-        <div className={`${isMobileMenuOpen ? 'block mt-6' : 'hidden md:block'} mt-8 border-t border-slate-800 pt-4 text-[10px] text-slate-400 text-right`}>
+        <div className={`${isMobileMenuOpen ? 'block mt-6' : 'hidden md:block'} mt-8 border-t border-indigo-100/80 pt-4 text-[10px] text-slate-700 font-bold text-right`}>
           <p>تطبيق المعلم المعتمد - الكادر التدريسي</p>
         </div>
       </div>
 
       {/* Main content */}
-      <div className="flex-1 p-6 md:p-8 overflow-y-auto max-h-[800px]">
+      <div className="flex-1 min-w-0 p-4 md:p-6 lg:p-8 overflow-y-auto w-full">
         {/* Class selector */}
         <div className="mb-6 bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
@@ -706,41 +1034,161 @@ export default function TeacherPortal({
                 <p className="text-slate-500 text-xs mt-1">سجل التقييمات للطلاب. يتم تحديث الشهادة وكشف الدرجات لدى ولي الأمر فوراً.</p>
               </div>
 
-              {/* Assessment Configurations */}
-              <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm grid grid-cols-1 md:grid-cols-4 gap-4">
+              {/* Grading Mode Selection Icons/Cards */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <button
+                  type="button"
+                  onClick={() => setGradingMode('single')}
+                  className={`p-4 rounded-2xl border text-right transition duration-200 flex items-start gap-4 cursor-pointer ${
+                    gradingMode === 'single'
+                      ? 'bg-indigo-50/60 border-indigo-200 shadow-xs text-indigo-900'
+                      : 'bg-white border-slate-100 hover:border-slate-200 hover:bg-slate-50 text-slate-700'
+                  }`}
+                >
+                  <div className={`p-2.5 rounded-xl shrink-0 ${gradingMode === 'single' ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                    <BookOpen className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-xs sm:text-sm">رصد مادة مفرَدة (لكافة الطلاب) 📚</h4>
+                    <p className="text-[10px] sm:text-xs text-slate-400 mt-0.5 leading-relaxed">رصد درجة مادة واحدة محددة لكافة طلاب الشعبة في جدول مجمع.</p>
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setGradingMode('all');
+                    if (!selectedStudentForAllGrades && classStudents.length > 0) {
+                      setSelectedStudentForAllGrades(classStudents[0]);
+                    }
+                  }}
+                  className={`p-4 rounded-2xl border text-right transition duration-200 flex items-start gap-4 cursor-pointer ${
+                    gradingMode === 'all'
+                      ? 'bg-emerald-50/60 border-emerald-200 shadow-xs text-emerald-900'
+                      : 'bg-white border-slate-100 hover:border-slate-200 hover:bg-slate-50 text-slate-700'
+                  }`}
+                >
+                  <div className={`p-2.5 rounded-xl shrink-0 ${gradingMode === 'all' ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                    <Award className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-xs sm:text-sm font-sans">رصد كافة المواد (لطالب محدد) 📊</h4>
+                    <p className="text-[10px] sm:text-xs text-slate-400 mt-0.5 leading-relaxed font-sans">رصد درجات كافة المواد المضافة بجانب بعضها دفعة واحدة وإرسالها مباشرة لولي الأمر.</p>
+                  </div>
+                </button>
+              </div>
+
+              {gradingMode === 'single' ? (
+                <>
+                  {/* Assessment Configurations */}
+              <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm grid grid-cols-1 md:grid-cols-5 gap-4">
                 <div>
                   <label className="block text-xs font-semibold text-slate-600 mb-1.5">المادة المرصودة</label>
-                  <select
-                    value={gradeSubject}
-                    onChange={e => setGradeSubject(e.target.value)}
-                    className="w-full text-xs border border-slate-200 px-3 py-2 rounded-lg bg-white focus:outline-none"
-                  >
-                    {activeTeacher?.subjects.map((sub, i) => (
-                      <option key={i} value={sub}>{sub}</option>
-                    ))}
-                  </select>
+                  {!isCustomSubject ? (
+                    <select
+                      value={gradeSubject}
+                      onChange={e => {
+                        if (e.target.value === '__custom__') {
+                          setIsCustomSubject(true);
+                          setGradeSubject('');
+                        } else {
+                          setGradeSubject(e.target.value);
+                        }
+                      }}
+                      className="w-full text-xs border border-slate-200 px-3 py-2 rounded-lg bg-white focus:outline-none font-semibold text-slate-700"
+                    >
+                      <optgroup label={`📚 موادك المسندة لشعبة (${classes.find(c => c.id === selectedClassId)?.name || 'هذا الصف'})`}>
+                        {teacherClassSubjects.map((sub, i) => (
+                          <option key={`class-sub-${i}`} value={sub}>{sub}</option>
+                        ))}
+                      </optgroup>
+                      {teacherClassSubjects.length === 0 && (
+                        <option value="">⚠️ لا توجد مواد مسندة لك في هذه الشعبة</option>
+                      )}
+                      
+                      <optgroup label="✍️ أخرى">
+                        <option value="__custom__">➕ كتابة مادة أخرى غير مدرجة...</option>
+                      </optgroup>
+                    </select>
+                  ) : (
+                    <div className="flex gap-1">
+                      <input
+                        type="text"
+                        value={gradeSubject}
+                        onChange={e => setGradeSubject(e.target.value)}
+                        placeholder="اكتب اسم المادة هنا..."
+                        className="w-full text-xs border border-indigo-200 px-3 py-2 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500 font-semibold"
+                        required
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsCustomSubject(false);
+                          if (teacherClassSubjects.length > 0) {
+                            setGradeSubject(teacherClassSubjects[0]);
+                          } else {
+                            setGradeSubject('اللغة العربية');
+                          }
+                        }}
+                        className="text-[10px] text-red-600 hover:text-red-700 font-bold px-2 bg-red-50 border border-red-100 rounded-lg transition shrink-0"
+                        title="إلغاء المادة المخصصة والعودة للقائمة"
+                      >
+                        إلغاء
+                      </button>
+                    </div>
+                  )}
                 </div>
-                <div className="md:col-span-2">
+                <div className="md:col-span-1">
                   <label className="block text-xs font-semibold text-slate-600 mb-1.5">عنوان الاختبار / التقييم *</label>
                   <input
                     type="text"
                     value={examName}
                     onChange={e => setExamName(e.target.value)}
                     placeholder="مثال: التقويم الشهري الأول، أو اختبار الإملاء"
-                    className="w-full text-xs border border-slate-200 px-3 py-2 rounded-lg focus:outline-none"
+                    className="w-full text-xs border border-slate-200 px-3 py-2 rounded-lg focus:outline-none font-semibold"
                   />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1.5">تصنيف الاختبار / التقييم *</label>
+                  <select
+                    value={examType}
+                    onChange={e => setExamType(e.target.value as any)}
+                    className="w-full text-xs border border-slate-200 px-3 py-2 rounded-lg focus:outline-none font-semibold bg-white text-slate-700"
+                  >
+                    <option value="general">✍️ اختبار عام من المعلم</option>
+                    <option value="monthly">📋 تقييم شهري معتمد من المدير</option>
+                    <option value="special">🌟 اختبار خاص</option>
+                  </select>
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-600 mb-1.5">الدرجة العظمى *</label>
                   <input
                     type="number"
-                    value={maxScore}
-                    onChange={e => setMaxScore(Number(e.target.value))}
+                    value={maxScore === 0 ? '' : maxScore}
+                    onFocus={e => e.target.select()}
+                    onClick={e => (e.target as HTMLInputElement).select()}
+                    onChange={e => {
+                      const val = e.target.value;
+                      if (val === '') {
+                        setMaxScore(0);
+                        return;
+                      }
+                      const num = Number(val);
+                      if (num > 100) {
+                        alert('❌ الدرجة العظمى لا يمكن أن تتجاوز 100');
+                        setMaxScore(100);
+                      } else {
+                        setMaxScore(num);
+                      }
+                    }}
                     min={1}
-                    className="w-full text-xs border border-slate-200 px-3 py-2 rounded-lg focus:outline-none"
+                    max={100}
+                    className="w-full text-xs border border-slate-200 px-3 py-2 rounded-lg focus:outline-none font-semibold"
                   />
                 </div>
               </div>
+
+
 
               {/* Students grade sheet */}
               <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
@@ -751,17 +1199,41 @@ export default function TeacherPortal({
 
                 <div className="divide-y divide-slate-100">
                   {classStudents.map(student => {
-                    const existingGrades = grades.filter(g => g.studentId === student.id && g.subject === gradeSubject);
+                    const existingGrades = grades.filter(g => 
+                      g.studentId === student.id && 
+                      g.subject === gradeSubject && 
+                      g.teacherId === selectedTeacherId && 
+                      g.teacherId !== 'director' && 
+                      g.examType !== 'monthly'
+                    );
                     return (
                       <div key={student.id} className="p-4 flex items-center justify-between hover:bg-slate-50/50 transition gap-4">
                         <div>
                           <span className="font-bold text-slate-800 text-xs block">{student.name}</span>
                           {existingGrades.length > 0 && (
-                            <div className="flex gap-1.5 mt-1">
+                            <div className="flex flex-wrap gap-1.5 mt-1 items-center">
                               <span className="text-[10px] text-slate-400">الدرجات السابقة:</span>
                               {existingGrades.map((g, idx) => (
-                                <span key={idx} className="text-[9px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded">
-                                  {g.examName}: {g.score}/{g.maxScore}
+                                <span key={idx} className="text-[9px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-md flex items-center gap-1 border border-slate-200">
+                                  <span>{g.examName}: {g.score}/{g.maxScore}</span>
+                                  <span className="text-slate-300">|</span>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleEditGrade(g)}
+                                    className="text-amber-600 hover:text-amber-800 font-bold px-0.5 cursor-pointer transition text-[9px]"
+                                    title="تعديل الدرجة"
+                                  >
+                                    تعديل
+                                  </button>
+                                  <span className="text-slate-300">|</span>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteGrade(g.id)}
+                                    className="text-rose-500 hover:text-rose-700 font-bold px-0.5 cursor-pointer transition text-[9px]"
+                                    title="حذف الدرجة"
+                                  >
+                                    حذف
+                                  </button>
                                 </span>
                               ))}
                             </div>
@@ -803,11 +1275,8 @@ export default function TeacherPortal({
                               min={0}
                               max={100}
                               value={studentGrades[student.id] !== undefined ? studentGrades[student.id] : ''}
-                              onFocus={() => {
-                                setStudentGrades({
-                                  ...studentGrades,
-                                  [student.id]: ''
-                                });
+                              onFocus={(e) => {
+                                e.target.select();
                               }}
                               onChange={e => {
                                 const val = e.target.value;
@@ -819,15 +1288,17 @@ export default function TeacherPortal({
                                   return;
                                 }
                                 const num = Number(val);
+                                const effectiveMax = Math.min(100, maxScore > 0 ? maxScore : 100);
                                 if (num < 0) {
                                   setStudentGrades({
                                     ...studentGrades,
                                     [student.id]: 0
                                   });
-                                } else if (num > 100) {
+                                } else if (num > effectiveMax) {
+                                  alert(`❌ لا يمكن إدخال درجة أعلى من ${effectiveMax}`);
                                   setStudentGrades({
                                     ...studentGrades,
-                                    [student.id]: 100
+                                    [student.id]: effectiveMax
                                   });
                                 } else {
                                   setStudentGrades({
@@ -861,6 +1332,195 @@ export default function TeacherPortal({
                   )}
                 </div>
               </div>
+                </>
+              ) : (
+                <div className="bg-white p-5 rounded-3xl border border-slate-100 shadow-xs space-y-6 text-right animate-fadeIn" style={{ direction: 'rtl' }}>
+                  {/* Mode header */}
+                  <div className="flex flex-col sm:flex-row gap-4 items-center justify-between border-b border-slate-100 pb-4">
+                    <div className="flex items-center gap-2.5">
+                      <div className="bg-emerald-100 text-emerald-800 p-2.5 rounded-2xl">
+                        <Users className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <h4 className="font-extrabold text-slate-800 text-sm">اختر الطالب لتسجيل علاماته 👤</h4>
+                        <p className="text-[11px] text-slate-400">سيتم تسجيل الدرجات للطالب المختار لكل المواد المضافة أدناه دفعة واحدة.</p>
+                      </div>
+                    </div>
+                    <select
+                      value={selectedStudentForAllGrades?.id || ''}
+                      onChange={e => {
+                        const student = classStudents.find(s => s.id === e.target.value);
+                        setSelectedStudentForAllGrades(student || null);
+                        setAllGradesScores({});
+                      }}
+                      className="text-xs font-bold border border-slate-200 px-4 py-2.5 rounded-xl bg-slate-50 focus:outline-none focus:ring-1 focus:ring-emerald-500 text-slate-700 min-w-[200px]"
+                    >
+                      <option value="">-- اختر طالباً من الصف --</option>
+                      {classStudents.map(student => (
+                        <option key={student.id} value={student.id}>{student.name}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {selectedStudentForAllGrades ? (
+                    <div className="space-y-6 pt-2">
+                      {/* Title and Max Score configuration */}
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 bg-slate-50/50 p-4 rounded-2xl border border-slate-100">
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-600 mb-1.5">العنوان الرئيسي للرصد (اسم الاختبار) *</label>
+                          <input
+                            type="text"
+                            value={allGradesExamName}
+                            onChange={e => setAllGradesExamName(e.target.value)}
+                            placeholder="مثال: اختبار الشهر الأول، تقويم منتصف الفصل"
+                            className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl bg-white focus:outline-none focus:border-indigo-500 font-semibold text-slate-700"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-600 mb-1.5">تصنيف الاختبار / التقييم الموحد *</label>
+                          <select
+                            value={allGradesExamType}
+                            onChange={e => setAllGradesExamType(e.target.value as any)}
+                            className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl bg-white focus:outline-none focus:border-indigo-500 font-semibold text-slate-700 text-right cursor-pointer"
+                          >
+                            <option value="general">✍️ اختبار عام من المعلم</option>
+                            <option value="monthly">📋 تقييم شهري معتمد من المدير</option>
+                            <option value="special">🌟 اختبار خاص</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-600 mb-1.5">الدرجة العظمى الموحدة للرصد *</label>
+                          <input
+                            type="number"
+                            value={allGradesMaxScore === 0 ? '' : allGradesMaxScore}
+                            onFocus={e => e.target.select()}
+                            onClick={e => (e.target as HTMLInputElement).select()}
+                            onChange={e => {
+                              const val = e.target.value;
+                              if (val === '') {
+                                setAllGradesMaxScore(0);
+                                return;
+                              }
+                              const num = Number(val);
+                              if (num > 100) {
+                                alert('❌ الدرجة العظمى لا يمكن أن تتجاوز 100');
+                                setAllGradesMaxScore(100);
+                              } else {
+                                setAllGradesMaxScore(num);
+                              }
+                            }}
+                            min={1}
+                            max={100}
+                            className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl bg-white focus:outline-none focus:border-indigo-500 font-semibold text-slate-700"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Subject List with empty inputs */}
+                      <div>
+                        <div className="flex justify-between items-center bg-indigo-50/40 p-3 rounded-xl border border-indigo-100/30 mb-3">
+                          <span className="text-[11px] text-slate-600 font-bold">📚 المواد المسندة لك لهذه الشعبة حالياً:</span>
+                          <button
+                            type="button"
+                            onClick={() => setAllGradesScores({})}
+                            className="text-[10px] text-rose-600 hover:text-rose-800 font-bold bg-white border border-rose-100 px-2.5 py-1 rounded-lg transition"
+                          >
+                            🗑️ إفراغ كافة الحقول
+                          </button>
+                        </div>
+
+                        <div className="border border-slate-100 rounded-2xl overflow-hidden shadow-2xs divide-y divide-slate-50 bg-white">
+                          {teacherClassSubjects.map((sub, index) => (
+                            <div key={index} className="p-4 flex items-center justify-between hover:bg-slate-50/30 transition gap-4">
+                              <div className="flex items-center gap-2">
+                                <span className="w-2.5 h-2.5 bg-emerald-500 rounded-full"></span>
+                                <span className="font-extrabold text-xs text-slate-700">{sub}</span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="number"
+                                  placeholder="حقل فارغ (أدخل الدرجة)"
+                                  value={allGradesScores[sub] !== undefined ? allGradesScores[sub] : ''}
+                                  onFocus={e => e.target.select()}
+                                  onClick={e => (e.target as HTMLInputElement).select()}
+                                  onChange={e => {
+                                    const val = e.target.value;
+                                    if (val === '') {
+                                      setAllGradesScores(prev => ({
+                                        ...prev,
+                                        [sub]: ''
+                                      }));
+                                      return;
+                                    }
+                                    const num = Number(val);
+                                    const effectiveMax = Math.min(100, allGradesMaxScore > 0 ? allGradesMaxScore : 100);
+                                    if (num < 0) {
+                                      setAllGradesScores(prev => ({
+                                        ...prev,
+                                        [sub]: '0'
+                                      }));
+                                    } else if (num > effectiveMax) {
+                                      alert(`❌ لا يمكن إدخال درجة أعلى من ${effectiveMax}`);
+                                      setAllGradesScores(prev => ({
+                                        ...prev,
+                                        [sub]: String(effectiveMax)
+                                      }));
+                                    } else {
+                                      setAllGradesScores(prev => ({
+                                        ...prev,
+                                        [sub]: val
+                                      }));
+                                    }
+                                  }}
+                                  className="w-36 text-center text-xs border border-slate-200 px-3 py-2 rounded-xl bg-slate-50/50 focus:bg-white focus:outline-none font-bold text-slate-800 focus:ring-1 focus:ring-emerald-500"
+                                  min={0}
+                                  max={Math.min(100, allGradesMaxScore > 0 ? allGradesMaxScore : 100)}
+                                />
+                                <span className="text-[11px] text-slate-400">من {Math.min(100, allGradesMaxScore > 0 ? allGradesMaxScore : 100)}</span>
+                              </div>
+                            </div>
+                          ))}
+
+                          {teacherClassSubjects.length === 0 && (
+                            <div className="p-8 text-center text-xs text-slate-400 italic">
+                              ⚠️ لم يتم إيجاد أي مواد مسندة لك في هذه الشعبة. يرجى مراجعة إدارة المدرسة.
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Submit Button */}
+                      {teacherClassSubjects.length > 0 && (
+                        <div className="pt-4 border-t border-slate-100 flex justify-end gap-3">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedStudentForAllGrades(null);
+                              setAllGradesScores({});
+                              setGradingMode('single');
+                            }}
+                            className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-6 py-3 rounded-2xl text-xs font-bold transition cursor-pointer"
+                          >
+                            إلغاء والتراجع ↩️
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleSaveAllSubjectsGrades}
+                            className="bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white px-8 py-3 rounded-2xl text-xs font-bold transition shadow-md flex items-center gap-2 cursor-pointer"
+                          >
+                            <Check className="w-4.5 h-4.5" />
+                            <span>حفظ الدرجات وإرسالها لولي الأمر 📱</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="p-12 text-center text-slate-400 text-xs italic bg-slate-50/50 rounded-2xl border border-dashed border-slate-100">
+                      يرجى تحديد طالب من القائمة المنسدلة في الأعلى للبدء في رصد درجات المواد له معاً.
+                    </div>
+                  )}
+                </div>
+              )}
             </motion.div>
           )}
 
@@ -965,12 +1625,19 @@ export default function TeacherPortal({
                           )}
                         </div>
 
-                        {/* Status (Present / Absent) */}
+                        {/* Status (Present / WhatsApp Sent Badge) */}
                         <div className="hidden sm:block sm:col-span-2 text-center">
-                          <span className="inline-flex items-center gap-1 text-[10px] bg-slate-100 text-slate-600 px-2 py-1 rounded-full font-semibold">
-                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-                            منتظم بالدراسة
-                          </span>
+                          {whatsappSentRecords[`${student.id}_last_whatsapp`] ? (
+                            <span className="inline-flex items-center gap-1 text-[10px] bg-emerald-50 text-emerald-800 border border-emerald-200 px-2.5 py-1 rounded-full font-bold shadow-2xs" title={`أرسل عبر الواتساب في: ${whatsappSentRecords[`${student.id}_last_whatsapp`].timeLabel}`}>
+                              <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                              تم الإرسال واتس ✅
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-[10px] bg-slate-100 text-slate-600 px-2 py-1 rounded-full font-semibold">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                              منتظم بالدراسة
+                            </span>
+                          )}
                         </div>
 
                         {/* Actions (Send Behavior, Record Exam) */}
@@ -1023,35 +1690,117 @@ export default function TeacherPortal({
               exit={{ opacity: 0, y: -10 }}
               className="space-y-6"
             >
-              <div>
-                <h2 className="text-xl font-bold text-slate-800">مراسلة أولياء الأمور</h2>
-                <p className="text-slate-500 text-xs mt-1">تواصل مباشرة مع والد الطالب لإرسال تقرير سلوكي، شكر وتقدير، أو ملاحظة أكاديمية.</p>
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                <div>
+                  <h2 className="text-xl font-bold text-slate-800">مراسلة أولياء الأمور</h2>
+                  <p className="text-slate-500 text-xs mt-1">تواصل مباشرة مع والد الطالب لإرسال تقرير سلوكي، شكر وتقدير، أو ملاحظة أكاديمية.</p>
+                </div>
+                {messages.filter(m => m.receiverId === selectedTeacherId && !m.read).length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      markAllAsRead();
+                      alert('👁️ تم تحديد جميع الرسائل الواردة كمقروءة بنجاح!');
+                    }}
+                    className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-xs font-bold px-4 py-2 rounded-xl transition flex items-center gap-1.5 cursor-pointer shadow-sm"
+                  >
+                    <span>👁️ تحديد كافة الوارد كمقروء</span>
+                  </button>
+                )}
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 {/* Send Message Form */}
-                <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm lg:col-span-2 space-y-4">
+                <div className={`bg-white p-5 rounded-2xl border border-slate-100 shadow-sm ${chatStudentId ? 'lg:col-span-2' : 'lg:col-span-3'} space-y-4`}>
                   <h3 className="font-bold text-slate-800 text-sm mb-2">إرسال تقرير/رسالة لولي الأمر</h3>
                   <form onSubmit={handleSendMessage} className="space-y-4">
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-600 mb-1.5">اختر الطالب المعني للتواصل بخصوصه *</label>
-                      <select
-                        value={chatStudentId}
-                        onChange={e => {
-                          const sId = e.target.value;
-                          setChatStudentId(sId);
-                          // Auto set parent linked to this student
-                          const s = students.find(stud => stud.id === sId);
-                          if (s) setSelectedParentId(s.parentId);
-                        }}
-                        className="w-full text-xs border border-slate-200 px-3 py-2 rounded-lg bg-white focus:outline-none"
-                        required
-                      >
-                        <option value="">اختر طالباً...</option>
-                        {classStudents.map(s => (
-                          <option key={s.id} value={s.id}>{s.name} (والده: {s.parentName})</option>
-                        ))}
-                      </select>
+                    {/* Visual Student Cards list with unread red badges */}
+                    <div className="bg-slate-50/60 p-4 rounded-xl border border-slate-100 space-y-2.5">
+                      <label className="block text-xs font-bold text-slate-700 text-right">الطلاب في هذا الصف (اضغط على بطاقة الطالب لعرض رسائله فوراً 📥):</label>
+                      <div className="flex flex-wrap gap-2 justify-start">
+                        {classStudents.map(s => {
+                          const isSelected = chatStudentId === s.id;
+                          const studentUnreadCount = messages.filter(
+                            m => m.receiverId === selectedTeacherId && m.studentId === s.id && !m.read
+                          ).length;
+
+                          return (
+                            <button
+                              key={s.id}
+                              type="button"
+                              onClick={() => {
+                                setChatStudentId(s.id);
+                                setSelectedParentId(s.parentId);
+                              }}
+                              className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-xs font-bold transition-all duration-200 border relative cursor-pointer ${
+                                isSelected
+                                  ? 'bg-indigo-600 text-white border-transparent shadow-md scale-[1.02]'
+                                  : 'bg-white text-slate-700 border-slate-200/80 hover:border-indigo-300 hover:bg-indigo-50/30'
+                              }`}
+                            >
+                              <div className="text-right">
+                                <span className="block font-bold">{s.name}</span>
+                                <span className={`block text-[9px] font-medium mt-0.5 ${isSelected ? 'text-indigo-200' : 'text-slate-400'}`}>
+                                  والده: {s.parentName}
+                                </span>
+                              </div>
+                              
+                              {studentUnreadCount > 0 && (
+                                <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-rose-500 text-[10px] font-black text-white px-1.5 shadow-sm animate-pulse">
+                                  {studentUnreadCount}
+                                </span>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-600 mb-1.5 text-right font-medium">أو اختر الطالب المعني من القائمة بخصوصه *</label>
+                        <select
+                          value={chatStudentId}
+                          onChange={e => {
+                            const sId = e.target.value;
+                            setChatStudentId(sId);
+                            // Auto set parent linked to this student
+                            const s = students.find(stud => stud.id === sId);
+                            if (s) {
+                              setSelectedParentId(s.parentId);
+                            } else {
+                              setSelectedParentId('');
+                            }
+                          }}
+                          className="w-full text-xs border border-slate-200 px-3 py-2 rounded-lg bg-white focus:outline-none font-semibold text-slate-700"
+                          required
+                        >
+                          <option value="">اختر طالباً...</option>
+                          {classStudents.map(s => {
+                            const unreadCount = messages.filter(m => m.receiverId === selectedTeacherId && m.studentId === s.id && !m.read).length;
+                            return (
+                              <option key={s.id} value={s.id}>
+                                {s.name} (والده: {s.parentName}){unreadCount > 0 ? ` 🔴 [${unreadCount} غير مقروء]` : ''}
+                              </option>
+                            );
+                          })}
+                        </select>
+                      </div>
+
+                      {chatStudentId && (
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-600 mb-1.5 text-right font-medium">عرض الرسائل بخصوص الطالب</label>
+                          <select
+                            value={messageFilterType}
+                            onChange={e => setMessageFilterType(e.target.value as 'all' | 'outgoing' | 'incoming')}
+                            className="w-full text-xs border border-indigo-200 px-3 py-2 rounded-lg bg-indigo-50/40 focus:bg-white focus:border-indigo-500 font-bold text-indigo-900 focus:outline-none transition"
+                          >
+                            <option value="all">📥📤 الكل (الصادرة والواردة)</option>
+                            <option value="outgoing">📤 الصادرة لولي الأمر</option>
+                            <option value="incoming">📥 الواردة من ولي الأمر</option>
+                          </select>
+                        </div>
+                      )}
                     </div>
 
                     <div>
@@ -1140,74 +1889,251 @@ export default function TeacherPortal({
                 </div>
 
                 {/* Messages Chat History Log */}
-                <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm flex flex-col justify-between">
-                  <div>
-                    <h3 className="font-bold text-slate-800 text-sm mb-3">سجل الرسائل الصادرة والواردة</h3>
-                    <div className="space-y-3 max-h-[320px] overflow-y-auto">
-                      {messages
-                        .filter(m => m.senderId === selectedTeacherId || m.receiverId === selectedTeacherId)
-                        .map(msg => {
-                          const isIncomingUnread = msg.receiverId === selectedTeacherId && !msg.read;
-                          return (
-                            <div
-                              key={msg.id}
-                              onClick={() => {
-                                if (isIncomingUnread) {
-                                  markAsRead(msg.id);
-                                }
-                              }}
-                              className={`p-3.5 rounded-xl border text-xs transition-all duration-200 ${
-                                msg.senderId === selectedTeacherId
-                                  ? 'bg-indigo-50/50 border-indigo-100/40 text-right mr-4'
-                                  : isIncomingUnread
-                                  ? 'bg-amber-50 border-amber-300 text-right ml-4 cursor-pointer shadow-xs ring-2 ring-amber-400 hover:bg-amber-100/80 animate-pulse'
-                                  : 'bg-slate-50 border-slate-100 text-right ml-4'
-                              }`}
-                              title={isIncomingUnread ? "انقر لتحديد هذه الرسالة كمقروءة" : undefined}
+                {chatStudentId && (() => {
+                  const filteredMessages = messages.filter(m => {
+                    const isRelatedToTeacher = m.senderId === selectedTeacherId || 
+                      m.receiverId === selectedTeacherId || 
+                      m.receiverRole === 'teacher' || 
+                      m.receiverId === 'teacher';
+                    if (!isRelatedToTeacher) return false;
+
+                    // Only show messages specifically for the selected student
+                    if (m.studentId !== chatStudentId) return false;
+
+                    // Filter by type
+                    if (messageFilterType === 'outgoing') {
+                      return m.senderId === selectedTeacherId;
+                    }
+                    if (messageFilterType === 'incoming') {
+                      return m.receiverId === selectedTeacherId;
+                    }
+
+                    return true;
+                  });
+
+                  return (
+                    <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm flex flex-col justify-between">
+                      <div>
+                        <div className="flex justify-between items-center mb-3 gap-3">
+                          <h3 className="font-bold text-slate-800 text-sm">سجل الرسائل الصادرة والواردة</h3>
+                          {messages.filter(m => m.receiverId === selectedTeacherId && m.studentId === chatStudentId && !m.read).length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => markAllAsReadForStudent(chatStudentId)}
+                              className="bg-emerald-50 hover:bg-emerald-100 text-emerald-700 px-2.5 py-1 rounded-lg border border-emerald-200 text-[10px] font-bold transition flex items-center gap-1 cursor-pointer"
                             >
-                              <div className="flex justify-between font-bold text-[10px] mb-1 text-slate-500 gap-4 items-center">
-                                <span className="flex items-center gap-1.5">
-                                  <span>{msg.senderId === selectedTeacherId ? 'أنت' : msg.senderName}</span>
-                                  {isIncomingUnread && (
-                                    <span className="bg-amber-500 text-white text-[8px] px-1.5 py-0.5 rounded font-bold">
-                                      غير مقروءة ✉️
-                                    </span>
-                                  )}
-                                </span>
-                                <div className="flex items-center gap-2">
-                                  {isIncomingUnread && (
+                              <span>تحديد الكل كمقروء 👁️</span>
+                            </button>
+                          )}
+                        </div>
+                        <div className="space-y-3 max-h-[320px] overflow-y-auto">
+                          {filteredMessages.map(msg => {
+                            const isIncomingUnread = msg.receiverId === selectedTeacherId && !msg.read;
+                            return (
+                              <div
+                                key={msg.id}
+                                onClick={() => {
+                                  if (isIncomingUnread) {
+                                    markAsRead(msg.id);
+                                  }
+                                }}
+                                className={`p-3.5 rounded-xl border text-xs transition-all duration-200 ${
+                                  msg.senderId === selectedTeacherId
+                                    ? 'bg-indigo-50/50 border-indigo-100/40 text-right mr-4'
+                                    : isIncomingUnread
+                                    ? 'bg-amber-50 border-amber-300 text-right ml-4 cursor-pointer shadow-xs ring-2 ring-amber-400 hover:bg-amber-100/80 animate-pulse'
+                                    : 'bg-slate-50 border-slate-100 text-right ml-4'
+                                }`}
+                                title={isIncomingUnread ? "انقر لتحديد هذه الرسالة كمقروءة" : undefined}
+                              >
+                                <div className="flex justify-between font-bold text-[10px] mb-1 text-slate-500 gap-4 items-center">
+                                  <span className="flex items-center gap-1.5">
+                                    <span>{msg.senderId === selectedTeacherId ? 'أنت' : msg.senderName}</span>
+                                    {isIncomingUnread && (
+                                      <span className="bg-amber-500 text-white text-[8px] px-1.5 py-0.5 rounded font-bold">
+                                        غير مقروءة ✉️
+                                      </span>
+                                    )}
+                                  </span>
+                                  <div className="flex items-center gap-2">
+                                    {isIncomingUnread && (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          markAsRead(msg.id);
+                                        }}
+                                        className="bg-emerald-600 hover:bg-emerald-700 text-white text-[9px] px-1.5 py-0.5 rounded font-bold transition shadow-xs"
+                                      >
+                                        تحديد كمقروءة 👁️
+                                      </button>
+                                    )}
+                                    <span className="font-mono text-[9px]">{new Date(msg.date).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
+                                  </div>
+                                </div>
+                                <div className="text-slate-700 font-medium">
+                                  {renderMessageContent(msg.content)}
+                                </div>
+                                {msg.studentId && (
+                                  <span className="text-[9px] bg-slate-200 text-slate-600 px-1 py-0.5 rounded font-medium mt-1.5 inline-block font-sans">
+                                    بخصوص: {students.find(s => s.id === msg.studentId)?.name || 'طالب'}
+                                  </span>
+                                )}
+                                {msg.senderId === selectedTeacherId && (
+                                  <div className="flex justify-end gap-2.5 mt-2 pt-1.5 border-t border-slate-100/50">
                                     <button
                                       type="button"
                                       onClick={(e) => {
                                         e.stopPropagation();
-                                        markAsRead(msg.id);
+                                        handleEditTeacherMessage(msg.id, msg.content);
                                       }}
-                                      className="bg-emerald-600 hover:bg-emerald-700 text-white text-[9px] px-1.5 py-0.5 rounded font-bold transition shadow-xs"
+                                      className="text-[10px] text-amber-600 hover:text-amber-800 font-bold flex items-center gap-0.5 cursor-pointer"
+                                      title="تعديل محتوى الرسالة أو السلوك"
                                     >
-                                      تحديد كمقروءة 👁️
+                                      ✏️ تعديل
                                     </button>
-                                  )}
-                                  <span className="font-mono text-[9px]">{new Date(msg.date).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
-                                </div>
+                                  </div>
+                                )}
                               </div>
-                              <div className="text-slate-700 font-medium">
-                                {renderMessageContent(msg.content)}
-                              </div>
-                              {msg.studentId && (
-                                <span className="text-[9px] bg-slate-200 text-slate-600 px-1 py-0.5 rounded font-medium mt-1.5 inline-block">
-                                  بخصوص: {students.find(s => s.id === msg.studentId)?.name || 'طالب'}
+                            );
+                          })}
+
+                          {filteredMessages.length === 0 && (
+                            <div className="text-center p-8 text-slate-400 text-xs italic">
+                              {messageFilterType === 'outgoing'
+                                ? 'لا توجد رسائل صادرة بخصوص هذا الطالب.'
+                                : messageFilterType === 'incoming'
+                                ? 'لا توجد رسائل واردة من ولي الأمر بخصوص هذا الطالب.'
+                                : 'لا توجد محادثات جارية بخصوص هذا الطالب حالياً.'}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            </motion.div>
+          )}
+
+          {/* Announcements Tab */}
+          {activeTab === 'announcements' && (
+            <motion.div
+              key="announcements"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              className="space-y-6"
+            >
+              <div>
+                <h2 className="text-xl font-bold text-slate-800">إدارة ونشر التعاميم والإعلانات</h2>
+                <p className="text-slate-500 text-xs mt-1">
+                  يمكنك نشر تعاميم وتنبيهات مباشرة لتصل فوراً على أجهزة أولياء الأمور المعنيين بالصف.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                {/* Publish Form */}
+                <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm space-y-4 lg:col-span-1">
+                  <h3 className="font-bold text-slate-800 text-sm flex items-center gap-2">
+                    <Megaphone className="w-4.5 h-4.5 text-indigo-600" />
+                    <span>نشر إعلان/تعميم جديد</span>
+                  </h3>
+                  
+                  <form onSubmit={handlePublishAnnouncement} className="space-y-4">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 mb-1.5">عنوان الإعلان *</label>
+                      <input
+                        type="text"
+                        value={announceTitle}
+                        onChange={e => setAnnounceTitle(e.target.value)}
+                        placeholder="مثال: موعد اختبار الشهر الأول، رحلة مدرسية..."
+                        className="w-full text-xs border border-slate-200 px-3.5 py-2 rounded-xl focus:outline-none focus:border-indigo-500"
+                        required
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 mb-1.5">المستهدفون بالإعلان</label>
+                      <select
+                        value={announceTarget}
+                        onChange={e => setAnnounceTarget(e.target.value as 'all' | 'parents')}
+                        className="w-full text-xs border border-slate-200 px-3 py-2 rounded-xl focus:outline-none focus:border-indigo-500 bg-white"
+                      >
+                        <option value="parents">أولياء الأمور بالصف فقط</option>
+                        <option value="all">الجميع (أولياء أمور ومعلمون)</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 mb-1.5">نص ومحتوى الإعلان بالتفصيل *</label>
+                      <textarea
+                        rows={4}
+                        value={announceContent}
+                        onChange={e => setAnnounceContent(e.target.value)}
+                        placeholder="اكتب هنا كافة تفاصيل التعميم والتعليمات الموجهة بدقة..."
+                        className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl focus:outline-none focus:border-indigo-500"
+                        required
+                      />
+                    </div>
+
+                    <button
+                      type="submit"
+                      className="w-full bg-indigo-600 text-white py-2.5 rounded-xl text-xs font-bold hover:bg-indigo-700 transition cursor-pointer flex items-center justify-center gap-1.5 shadow-sm"
+                    >
+                      <Megaphone className="w-4 h-4" />
+                      <span>نشر التعميم فوراً 📢</span>
+                    </button>
+                  </form>
+                </div>
+
+                {/* List of Published Announcements with Role Badge next to them */}
+                <div className="lg:col-span-2 space-y-4">
+                  <div className="bg-slate-50 border border-slate-100 p-4 rounded-xl flex justify-between items-center">
+                    <span className="text-xs font-bold text-slate-700">سجل التعاميم والإعلانات المنشورة</span>
+                    <span className="text-[10px] text-slate-400">إجمالي التعاميم: {announcements.length}</span>
+                  </div>
+
+                  <div className="space-y-4 max-h-[500px] overflow-y-auto pr-1">
+                    {announcements.map(ann => {
+                      const isDirector = ann.authorRole === 'director' || ann.authorName.includes('المدير');
+                      return (
+                        <div key={ann.id} className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition space-y-3">
+                          <div className="flex justify-between items-start gap-4">
+                            <h4 className="font-bold text-slate-800 text-sm">{ann.title}</h4>
+                            <span className="text-[10px] text-slate-400 font-mono shrink-0">{ann.date}</span>
+                          </div>
+                          
+                          <p className="text-xs text-slate-600 leading-relaxed">{ann.content}</p>
+                          
+                          <div className="pt-2.5 border-t border-slate-50 flex justify-between items-center text-[10px]">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-slate-400">الناشر:</span>
+                              <span className="font-semibold text-slate-700">{ann.authorName}</span>
+                            </div>
+
+                            {/* ROLE BADGE: Director vs Teacher */}
+                            <div>
+                              {isDirector ? (
+                                <span className="bg-rose-50 text-rose-700 border border-rose-100 px-2 py-0.5 rounded font-bold">
+                                  👑 إدارة المدرسة (المدير)
+                                </span>
+                              ) : (
+                                <span className="bg-teal-50 text-teal-700 border border-teal-100 px-2 py-0.5 rounded font-bold">
+                                  🏫 كادر التدريس (المعلم)
                                 </span>
                               )}
                             </div>
-                          );
-                        })}
-
-                      {messages.filter(m => m.senderId === selectedTeacherId || m.receiverId === selectedTeacherId).length === 0 && (
-                        <div className="text-center p-8 text-slate-400 text-xs italic">
-                          لا توجد محادثات جارية حالياً.
+                          </div>
                         </div>
-                      )}
-                    </div>
+                      );
+                    })}
+
+                    {announcements.length === 0 && (
+                      <div className="bg-white p-12 rounded-2xl border border-slate-100 text-center text-slate-400 text-xs italic">
+                        لم يتم نشر أي إعلانات أو تعاميم بعد.
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1228,16 +2154,45 @@ export default function TeacherPortal({
             >
               {/* Header */}
               <div className="flex items-center justify-between border-b border-slate-100 pb-4 mb-4">
-                <button
-                  type="button"
-                  onClick={() => {
-                    stopCamera();
-                    setSelectedStudentForBehavior(null);
-                  }}
-                  className="p-1.5 text-slate-400 hover:text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition cursor-pointer"
-                >
-                  <X className="w-4.5 h-4.5" />
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      stopCamera();
+                      setSelectedStudentForBehavior(null);
+                    }}
+                    className="p-1.5 text-slate-400 hover:text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition cursor-pointer"
+                  >
+                    <X className="w-4.5 h-4.5" />
+                  </button>
+
+                  {(() => {
+                    const currentIndex = classStudents.findIndex(s => s.id === selectedStudentForBehavior.id);
+                    const nextStudent = (currentIndex !== -1 && currentIndex < classStudents.length - 1)
+                      ? classStudents[currentIndex + 1]
+                      : null;
+                    if (nextStudent) {
+                      return (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedStudentForBehavior(nextStudent);
+                            setBehaviorNotes('');
+                            setBehaviorAttachedMedia(null);
+                            setBehaviorAttachedMediaType(null);
+                          }}
+                          className="text-indigo-700 hover:text-indigo-900 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1 cursor-pointer"
+                          title="الانتقال لتوثيق الطالب التالي"
+                        >
+                          <span>الطالب التالي: {nextStudent.name}</span>
+                          <ArrowLeft className="w-3.5 h-3.5" />
+                        </button>
+                      );
+                    }
+                    return null;
+                  })()}
+                </div>
+
                 <div className="flex items-center gap-2">
                   <div className="p-2 bg-rose-50 text-rose-600 rounded-xl">
                     <AlertCircle className="w-5 h-5" />
@@ -1248,6 +2203,44 @@ export default function TeacherPortal({
                   </div>
                 </div>
               </div>
+
+              {/* Parent & WhatsApp Phone Info Header Card */}
+              {(() => {
+                const parent = parents.find(p => p.childrenIds.includes(selectedStudentForBehavior.id) || p.id === selectedStudentForBehavior.parentId);
+                const waRecord = whatsappSentRecords[`${selectedStudentForBehavior.id}_behavior_${behaviorCategory}`] || whatsappSentRecords[`${selectedStudentForBehavior.id}_last_whatsapp`];
+
+                return (
+                  <div className="bg-emerald-50/60 border border-emerald-200/80 rounded-2xl p-3.5 mb-4 space-y-2">
+                    <div className="flex justify-between items-center text-xs">
+                      <span className="font-bold text-emerald-950 flex items-center gap-1">
+                        <Phone className="w-3.5 h-3.5 text-emerald-600" />
+                        <span>بيانات ولي الأمر والواتساب:</span>
+                      </span>
+                      <span className="text-[11px] font-bold text-slate-700">{parent?.name || selectedStudentForBehavior.parentName || 'ولي الأمر'}</span>
+                    </div>
+
+                    <div className="flex gap-2 items-center">
+                      <input
+                        type="tel"
+                        value={parentPhoneInput}
+                        onChange={e => setParentPhoneInput(e.target.value)}
+                        placeholder="أدخل رقم واتساب ولي الأمر (مثال: 0501234567)"
+                        className="grow text-xs border border-slate-200 bg-white px-3 py-2 rounded-xl focus:outline-none focus:border-emerald-600 text-right font-mono font-bold"
+                      />
+                    </div>
+
+                    {waRecord && (
+                      <div className="bg-white/80 border border-emerald-300 p-2 rounded-xl flex items-center justify-between text-[10px] font-bold text-emerald-800">
+                        <div className="flex items-center gap-1.5">
+                          <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                          <span>تم إرسال إشعار سلوك سابق عبر الواتس لهذه الجلسة ✅</span>
+                        </div>
+                        <span className="font-mono dir-ltr text-emerald-600">{waRecord.timeLabel}</span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* Form Body */}
               <form onSubmit={(e) => {
@@ -1364,33 +2357,13 @@ export default function TeacherPortal({
 
                 {/* Media Capture & Attachments */}
                 <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200/60">
-                  <span className="block text-xs font-bold text-slate-700 mb-2">إرفاق وسائط (صورة من كاميرا، فيديو، استوديو)</span>
+                  <span className="block text-xs font-bold text-slate-700 mb-2">إرفاق وسائط (من الألبوم/الاستوديو)</span>
                   
                   {/* Action buttons */}
-                  <div className="grid grid-cols-3 gap-2 mb-3">
-                    {/* Camera */}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (isCameraOn) {
-                          stopCamera();
-                        } else {
-                          startCamera();
-                        }
-                      }}
-                      className={`p-2.5 rounded-xl border text-[10px] font-bold flex flex-col items-center gap-1.5 transition cursor-pointer ${
-                        isCameraOn
-                          ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm'
-                          : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
-                      }`}
-                    >
-                      <Camera className="w-4 h-4" />
-                      <span>{isCameraOn ? 'إيقاف الكاميرا' : 'التقاط بالكاميرا'}</span>
-                    </button>
-
+                  <div className="grid grid-cols-1 gap-2 mb-3">
                     {/* Studio Upload */}
-                    <label className="p-2.5 rounded-xl border bg-white border-slate-200 text-slate-600 hover:bg-slate-50 text-[10px] font-bold flex flex-col items-center gap-1.5 transition cursor-pointer text-center justify-center">
-                      <Image className="w-4 h-4" />
+                    <label className="p-3 rounded-xl border bg-white border-slate-200 text-slate-600 hover:bg-slate-50 text-xs font-bold flex flex-col items-center gap-1.5 transition cursor-pointer text-center justify-center shadow-xs">
+                      <Image className="w-5 h-5 text-indigo-500" />
                       <span>ألبوم / استوديو</span>
                       <input
                         type="file"
@@ -1399,16 +2372,6 @@ export default function TeacherPortal({
                         className="hidden"
                       />
                     </label>
-
-                    {/* Video simulation */}
-                    <button
-                      type="button"
-                      onClick={useSimulatedVideo}
-                      className="p-2.5 rounded-xl border bg-white border-slate-200 text-slate-600 hover:bg-slate-50 text-[10px] font-bold flex flex-col items-center justify-center gap-1.5 transition cursor-pointer text-center"
-                    >
-                      <Video className="w-4 h-4 text-rose-500" />
-                      <span>تسجيل/إرفاق فيديو</span>
-                    </button>
                   </div>
 
                   {/* Camera Live Preview */}
@@ -1485,24 +2448,154 @@ export default function TeacherPortal({
                   )}
                 </div>
 
-                {/* Submit button */}
-                <div className="flex gap-2 justify-end pt-2 border-t border-slate-100">
+                {/* Submit buttons */}
+                <div className="flex flex-wrap gap-2 justify-end pt-3 border-t border-slate-100">
                   <button
                     type="button"
                     onClick={() => {
                       stopCamera();
                       setSelectedStudentForBehavior(null);
                     }}
-                    className="border border-slate-200 text-slate-500 px-4 py-2 rounded-xl text-xs font-bold hover:bg-slate-50 transition cursor-pointer"
+                    className="border border-slate-200 text-slate-500 px-3.5 py-2 rounded-xl text-xs font-bold hover:bg-slate-50 transition cursor-pointer"
                   >
-                    إلغاء التوثيق
+                    إلغاء
                   </button>
+
                   <button
                     type="submit"
-                    className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2 rounded-xl text-xs font-bold transition shadow-md cursor-pointer flex items-center gap-1"
+                    className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 px-4 py-2 rounded-xl text-xs font-bold transition cursor-pointer flex items-center gap-1"
                   >
-                    <Send className="w-4 h-4 animate-bounce" />
-                    <span>إرسال السلوك وإخطار ولي الأمر</span>
+                    <Send className="w-3.5 h-3.5" />
+                    <span>إرسال بالمنصة فقط 📩</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const student = selectedStudentForBehavior;
+                      let studentParent = parents.find(p => p.childrenIds.includes(student.id) || p.id === student.parentId);
+
+                      let phoneToUse = parentPhoneInput.trim() || studentParent?.phone || '';
+                      if (!phoneToUse) {
+                        alert('الرجاء إدخال رقم واتساب ولي الأمر لإرسال التنبيه عبر الواتس.');
+                        return;
+                      }
+
+                      // Update parent phone if provided/changed
+                      if (studentParent && studentParent.phone !== phoneToUse) {
+                        try {
+                          const storedParentsStr = localStorage.getItem('school_parents');
+                          const storedParents: Parent[] = storedParentsStr ? JSON.parse(storedParentsStr) : parents;
+                          const updatedParents = storedParents.map(p => (p.id === studentParent.id || p.childrenIds.includes(student.id)) ? { ...p, phone: phoneToUse } : p);
+                          localStorage.setItem('school_parents', JSON.stringify(updatedParents));
+                          studentParent.phone = phoneToUse;
+                        } catch (err) {
+                          console.error(err);
+                        }
+                      }
+
+                      // 1. Send platform message
+                      let finalContent = `📢 [إشعار سلوكي وتربوي]\nتم تسجيل سلوك (${behaviorType === 'positive' ? 'إيجابي متميز 🌟' : 'سلبي ويحتاج لمتابعة ⚠️'}) للطالب (${student.name}) في مادة (${gradeSubject || 'المادة الدراسية'}).\nالتصنيف: ${behaviorCategory}\nالتفاصيل والملاحظات: ${behaviorNotes || 'لا توجد ملاحظات إضافية.'}`;
+                      
+                      if (behaviorAttachedMedia) {
+                        finalContent += `\n[مرفق وسائط: ${behaviorAttachedMediaType === 'video' ? 'فيديو' : 'صورة'}]`;
+                      }
+
+                      if (studentParent) {
+                        sendMessage({
+                          senderId: selectedTeacherId,
+                          senderName: activeTeacher?.name || 'المعلم',
+                          senderRole: 'teacher',
+                          receiverId: studentParent.id,
+                          receiverName: studentParent.name,
+                          receiverRole: 'parent',
+                          content: finalContent,
+                          studentId: student.id
+                        });
+                      }
+
+                      // 2. Build WhatsApp text & open customizer modal
+                      const defaultGenerated = `💚 *المدرسة الدولية الخاصة* 💚\n📢 *إشعار وتنبيه سلوكي وتربوي*\n═════════════════════════\n\n🌹 *السلام عليكم ورحمة الله وبركاته*\nإلى ولي أمر الطالب/ة المحترم:\n\n👤 *اسم الطالب:* *${student.name}*\n👨‍🏫 *المعلم المشرف:* *${activeTeacher?.name || 'المعلم'}*\n📘 *المادة الدراسية:* *${gradeSubject || 'المادة الدراسية'}*\n\n📌 *تفاصيل التقرير السلوكي:*\n• *نوع السلوك:* ${behaviorType === 'positive' ? '🌟 إيجابي متميز' : '⚠️ يحتاج لمتابعة'}\n• *التصنيف:* *${behaviorCategory}*\n• *الملاحظات والتفاصيل:* ${behaviorNotes || 'لا توجد ملاحظات إضافية'}\n\n═════════════════════════\n✨ *شاكرين لكم حسن المتابعة لتعزيز تميز ابنكم*\n🏫 *إدارة المدرسة الدولية الخاصة*`;
+
+                      const savedTemplate = localStorage.getItem('school_whatsapp_behavior_template');
+                      let initialMsg = defaultGenerated;
+                      if (savedTemplate) {
+                        initialMsg = savedTemplate
+                          .replace(/{اسم_الطالب}/g, student.name)
+                          .replace(/{المعلم}/g, activeTeacher?.name || 'المعلم')
+                          .replace(/{المادة}/g, gradeSubject || 'المادة الدراسية')
+                          .replace(/{نوع_السلوك}/g, behaviorType === 'positive' ? 'إيجابي متميز 🌟' : 'سلبي ويحتاج لمتابعة ⚠️')
+                          .replace(/{التصنيف}/g, behaviorCategory)
+                          .replace(/{الملاحظات}/g, behaviorNotes || 'لا توجد ملاحظات إضافية');
+                      }
+
+                      const waKey = `${student.id}_behavior_${behaviorCategory}`;
+                      const waKeyGeneral = `${student.id}_last_whatsapp`;
+
+                      const currentIndex = classStudents.findIndex(s => s.id === student.id);
+                      const nextStudent = (currentIndex !== -1 && currentIndex < classStudents.length - 1)
+                        ? classStudents[currentIndex + 1]
+                        : null;
+
+                      setWaModalState({
+                        isOpen: true,
+                        studentName: student.name,
+                        recipientPhone: phoneToUse,
+                        initialMessage: initialMsg,
+                        defaultTemplateText: defaultGenerated,
+                        waKey,
+                        waKeyGeneral,
+                        studentId: student.id,
+                        nextStudent
+                      });
+                    }}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2 rounded-xl text-xs font-bold transition shadow-md cursor-pointer flex items-center gap-1.5"
+                  >
+                    <MessageSquare className="w-4 h-4" />
+                    <span>إرسال عبر الواتساب مباشرة 📲</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const student = selectedStudentForBehavior;
+                      const sampleName = student ? student.name : 'عبد الله الخالد';
+                      const sampleTeacher = activeTeacher?.name || 'المعلم';
+                      const sampleSubject = gradeSubject || 'المادة الدراسية';
+                      const sampleType = behaviorType === 'positive' ? 'إيجابي متميز 🌟' : 'سلبي ويحتاج لمتابعة ⚠️';
+                      const sampleCategory = behaviorCategory || 'المواظبة والانضباط';
+                      const sampleNotes = behaviorNotes || 'طالب متميز ومتفاعل دائماً في الصف.';
+
+                      const defaultGenerated = `💚 *المدرسة الدولية الخاصة* 💚\n📢 *إشعار وتنبيه سلوكي وتربوي*\n═════════════════════════\n\n🌹 *السلام عليكم ورحمة الله وبركاته*\nإلى ولي أمر الطالب/ة المحترم:\n\n👤 *اسم الطالب:* *${sampleName}*\n👨‍🏫 *المعلم المشرف:* *${sampleTeacher}*\n📘 *المادة الدراسية:* *${sampleSubject}*\n\n📌 *تفاصيل التقرير السلوكي:*\n• *نوع السلوك:* ${sampleType}\n• *التصنيف:* *${sampleCategory}*\n• *الملاحظات والتفاصيل:* ${sampleNotes}\n\n═════════════════════════\n✨ *شاكرين لكم حسن المتابعة لتعزيز تميز ابنكم*\n🏫 *إدارة المدرسة الدولية الخاصة*`;
+
+                      const savedTemplate = localStorage.getItem('school_whatsapp_behavior_template');
+                      let initialMsg = defaultGenerated;
+                      if (savedTemplate) {
+                        initialMsg = savedTemplate
+                          .replace(/{اسم_الطالب}/g, sampleName)
+                          .replace(/{المعلم}/g, sampleTeacher)
+                          .replace(/{المادة}/g, sampleSubject)
+                          .replace(/{نوع_السلوك}/g, sampleType)
+                          .replace(/{التصنيف}/g, sampleCategory)
+                          .replace(/{الملاحظات}/g, sampleNotes);
+                      }
+
+                      setWaModalState({
+                        isOpen: true,
+                        studentName: sampleName,
+                        recipientPhone: parentPhoneInput || '0501234567',
+                        initialMessage: initialMsg,
+                        defaultTemplateText: defaultGenerated,
+                        waKey: 'preview_behavior',
+                        waKeyGeneral: 'preview_behavior_general',
+                        studentId: student?.id || 'sample',
+                        nextStudent: null
+                      });
+                    }}
+                    className="bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 px-3.5 py-2 rounded-xl text-xs font-bold transition shadow-2xs cursor-pointer flex items-center gap-1.5"
+                    title="تخصيص صياغة وقالب رسائل الواتساب السلوكية"
+                  >
+                    <span>⚙️ تخصيص صياغة الرسالة</span>
                   </button>
                 </div>
               </form>
@@ -1555,14 +2648,17 @@ export default function TeacherPortal({
                         }`}
                       >
                         <div className="flex justify-between items-center font-bold text-[10px] mb-1 text-slate-500">
-                          <button
-                            onClick={() => handleDeleteTeacherMessage(msg.id)}
-                            className="text-rose-500 hover:bg-rose-50 p-1 rounded transition flex items-center gap-1 cursor-pointer font-sans"
-                            title="حذف الرسالة"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                            <span>حذف</span>
-                          </button>
+                          <div className="flex items-center gap-1.5">
+                            {isFromTeacher && (
+                              <button
+                                onClick={() => handleEditTeacherMessage(msg.id, msg.content)}
+                                className="text-amber-600 hover:bg-amber-50 p-1 rounded transition flex items-center gap-1 cursor-pointer font-sans"
+                                title="تعديل الرسالة/السلوك"
+                              >
+                                ✏️ <span>تعديل</span>
+                              </button>
+                            )}
+                          </div>
                           <span className="font-mono text-[9px]">
                             {new Date(msg.date).toLocaleString([], { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
                           </span>
@@ -1597,6 +2693,234 @@ export default function TeacherPortal({
             </div>
           );
         })()}
+
+        {gradeToDelete && (
+          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-[9999]">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200 text-right"
+              style={{ direction: 'rtl' }}
+            >
+              <h3 className="font-bold text-slate-800 text-base mb-2 flex items-center gap-2">
+                <span className="text-rose-500">⚠️</span>
+                <span>تأكيد حذف الدرجة المرصودة</span>
+              </h3>
+              <p className="text-xs text-slate-600 leading-relaxed mb-6">
+                هل تريد حذف هذه الدرجة المرصودة نهائياً؟ سيتم تحديث الشهادة وكشف الدرجات لدى ولي الأمر فوراً.
+              </p>
+              <div className="flex gap-2 justify-end">
+                <button
+                  type="button"
+                  onClick={() => setGradeToDelete(null)}
+                  className="px-4 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50 rounded-xl transition cursor-pointer"
+                >
+                  إلغاء التراجع
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmDeleteGrade}
+                  className="px-4 py-2 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-xl transition shadow-sm cursor-pointer"
+                >
+                  نعم، تأكيد الحذف 🗑️
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {gradeToEdit && (
+          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-[9999]">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200 text-right"
+              style={{ direction: 'rtl' }}
+            >
+              <h3 className="font-bold text-slate-800 text-base mb-2 flex items-center gap-2">
+                <span className="text-amber-500">✏️</span>
+                <span>تعديل درجة الاختبار</span>
+              </h3>
+              <p className="text-xs text-slate-500 mb-4 leading-relaxed">
+                تعديل درجة الاختبار (<strong className="text-indigo-600">{gradeToEdit.examName}</strong>) في مادة (<strong className="text-indigo-600">{gradeToEdit.subject}</strong>).
+                <br />
+                الدرجة الحالية: {gradeToEdit.score} من {gradeToEdit.maxScore}
+              </p>
+              
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1.5">الدرجة الجديدة:</label>
+                  <input
+                    type="number"
+                    step="any"
+                    value={editGradeScore}
+                    onFocus={e => e.target.select()}
+                    onClick={e => (e.target as HTMLInputElement).select()}
+                    onChange={e => {
+                      const val = e.target.value;
+                      if (val === '') {
+                        setEditGradeScore('');
+                        return;
+                      }
+                      const num = Number(val);
+                      const effectiveMax = Math.min(100, gradeToEdit.maxScore);
+                      if (num < 0) {
+                        setEditGradeScore('0');
+                      } else if (num > effectiveMax) {
+                        alert(`❌ لا يمكن إدخال درجة أعلى من ${effectiveMax}`);
+                        setEditGradeScore(String(effectiveMax));
+                      } else {
+                        setEditGradeScore(val);
+                      }
+                    }}
+                    className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl bg-white focus:border-indigo-500 focus:outline-none"
+                    placeholder={`أدخل الدرجة الجديدة من 0 إلى ${Math.min(100, gradeToEdit.maxScore)}`}
+                    min={0}
+                    max={Math.min(100, gradeToEdit.maxScore)}
+                  />
+                </div>
+              </div>
+              
+              <div className="flex gap-2 mt-6 justify-end">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setGradeToEdit(null);
+                    setEditGradeScore('');
+                  }}
+                  className="px-4 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50 rounded-xl transition cursor-pointer"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmEditGrade}
+                  className="px-4 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl transition shadow-sm cursor-pointer"
+                >
+                  حفظ التعديلات 💾
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {messageToDelete && (
+          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-[9999]">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200 text-right"
+              style={{ direction: 'rtl' }}
+            >
+              <h3 className="font-bold text-slate-800 text-base mb-2 flex items-center gap-2">
+                <span className="text-rose-500">⚠️</span>
+                <span>تأكيد حذف الرسالة/الإشعار</span>
+              </h3>
+              <p className="text-xs text-slate-600 leading-relaxed mb-6">
+                هل تريد حذف هذه الرسالة/الإشعار نهائياً من العرض؟
+              </p>
+              <div className="flex gap-2 justify-end">
+                <button
+                  type="button"
+                  onClick={() => setMessageToDelete(null)}
+                  className="px-4 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50 rounded-xl transition cursor-pointer"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (setMessages) {
+                      setMessages(prev => {
+                        const updated = prev.filter(m => m.id !== messageToDelete);
+                        localStorage.setItem('school_messages', JSON.stringify(updated));
+                        return updated;
+                      });
+                    }
+                    setMessageToDelete(null);
+                  }}
+                  className="px-4 py-2 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-xl transition shadow-sm cursor-pointer"
+                >
+                  نعم، تأكيد الحذف 🗑️
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {messageToEdit && (
+          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-[9999]">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-200 text-right"
+              style={{ direction: 'rtl' }}
+            >
+              <h3 className="font-bold text-slate-800 text-base mb-2 flex items-center gap-2">
+                <span className="text-amber-500">✏️</span>
+                <span>تعديل نص الرسالة / السلوك المرسل</span>
+              </h3>
+              <textarea
+                value={editMessageContent}
+                onChange={e => setEditMessageContent(e.target.value)}
+                className="w-full h-32 text-xs border border-slate-200 p-3 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500 font-semibold text-slate-700 mt-3"
+                placeholder="أدخل نص الرسالة الجديد هنا..."
+              />
+              <div className="flex gap-2 justify-end mt-6">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMessageToEdit(null);
+                    setEditMessageContent('');
+                  }}
+                  className="px-4 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50 rounded-xl transition cursor-pointer"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (editMessageContent.trim() === '') {
+                      alert('الرجاء إدخال نص للرسالة');
+                      return;
+                    }
+                    if (setMessages) {
+                      setMessages(prev => {
+                        const updated = prev.map(m => m.id === messageToEdit.id ? { ...m, content: editMessageContent.trim() } : m);
+                        localStorage.setItem('school_messages', JSON.stringify(updated));
+                        return updated;
+                      });
+                      alert('🎉 تم تعديل نص الرسالة/السلوك بنجاح وتحديثه فوراً!');
+                    }
+                    setMessageToEdit(null);
+                    setEditMessageContent('');
+                  }}
+                  className="px-4 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl transition shadow-sm cursor-pointer"
+                >
+                  حفظ التعديلات 💾
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+        {/* WhatsApp Customizer Modal for Teacher */}
+        {waModalState && (
+          <WhatsAppMessageCustomizerModal
+            isOpen={waModalState.isOpen}
+            onClose={() => setWaModalState(null)}
+            studentName={waModalState.studentName}
+            studentId={waModalState.studentId}
+            recipientPhone={waModalState.recipientPhone}
+            initialMessage={waModalState.initialMessage}
+            defaultTemplateText={waModalState.defaultTemplateText}
+            templateStorageKey="school_whatsapp_behavior_template"
+            onConfirmSend={handleConfirmSendWhatsAppTeacher}
+          />
+        )}
       </AnimatePresence>
     </div>
   );

@@ -20,11 +20,25 @@ window.addEventListener('beforeinstallprompt', (e) => {
 (window as any).getDeferredPrompt = () => deferredPrompt;
 (window as any).clearDeferredPrompt = () => { deferredPrompt = null; };
 
-// Register Progressive Web App (PWA) Service Worker
+// Clear any stale caches on app start so updates show immediately
+if ('caches' in window) {
+  caches.keys().then((names) => {
+    names.forEach((name) => {
+      if (name.includes('v1')) {
+        caches.delete(name);
+      }
+    });
+  });
+}
+
+// Register Progressive Web App (PWA) Service Worker with automatic update
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/service-worker.js')
-      .then((reg) => console.log('Service Worker registered successfully!', reg.scope))
+      .then((reg) => {
+        console.log('Service Worker registered successfully!', reg.scope);
+        reg.update();
+      })
       .catch((err) => console.warn('Service Worker registration failed:', err));
   });
 }

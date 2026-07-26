@@ -231,9 +231,6 @@ export default function App() {
     const saved = localStorage.getItem('school_teachers');
     const currentStr = JSON.stringify(teachers);
     if (saved !== currentStr) {
-      if (teachers.length === 0 && saved && saved !== '[]') {
-        return;
-      }
       localStorage.setItem('school_teachers', currentStr);
     }
   }, [teachers]);
@@ -242,9 +239,6 @@ export default function App() {
     const saved = localStorage.getItem('school_classes');
     const currentStr = JSON.stringify(classes);
     if (saved !== currentStr) {
-      if (classes.length === 0 && saved && saved !== '[]') {
-        return;
-      }
       localStorage.setItem('school_classes', currentStr);
     }
   }, [classes]);
@@ -253,9 +247,6 @@ export default function App() {
     const saved = localStorage.getItem('school_parents');
     const currentStr = JSON.stringify(parents);
     if (saved !== currentStr) {
-      if (parents.length === 0 && saved && saved !== '[]') {
-        return;
-      }
       localStorage.setItem('school_parents', currentStr);
     }
   }, [parents]);
@@ -264,9 +255,6 @@ export default function App() {
     const saved = localStorage.getItem('school_students');
     const currentStr = JSON.stringify(students);
     if (saved !== currentStr) {
-      if (students.length === 0 && saved && saved !== '[]') {
-        return;
-      }
       localStorage.setItem('school_students', currentStr);
     }
   }, [students]);
@@ -275,9 +263,6 @@ export default function App() {
     const saved = localStorage.getItem('school_attendance');
     const currentStr = JSON.stringify(attendance);
     if (saved !== currentStr) {
-      if (attendance.length === 0 && saved && saved !== '[]') {
-        return;
-      }
       localStorage.setItem('school_attendance', currentStr);
     }
   }, [attendance]);
@@ -286,9 +271,6 @@ export default function App() {
     const saved = localStorage.getItem('school_grades');
     const currentStr = JSON.stringify(grades);
     if (saved !== currentStr) {
-      if (grades.length === 0 && saved && saved !== '[]') {
-        return;
-      }
       localStorage.setItem('school_grades', currentStr);
     }
   }, [grades]);
@@ -297,9 +279,6 @@ export default function App() {
     const saved = localStorage.getItem('school_announcements');
     const currentStr = JSON.stringify(announcements);
     if (saved !== currentStr) {
-      if (announcements.length === 0 && saved && saved !== '[]') {
-        return;
-      }
       localStorage.setItem('school_announcements', currentStr);
     }
   }, [announcements]);
@@ -308,9 +287,6 @@ export default function App() {
     const saved = localStorage.getItem('school_messages');
     const currentStr = JSON.stringify(messages);
     if (saved !== currentStr) {
-      if (messages.length === 0 && saved && saved !== '[]') {
-        return;
-      }
       localStorage.setItem('school_messages', currentStr);
     }
   }, [messages]);
@@ -319,9 +295,6 @@ export default function App() {
     const saved = localStorage.getItem('school_excuses');
     const currentStr = JSON.stringify(excuses);
     if (saved !== currentStr) {
-      if (excuses.length === 0 && saved && saved !== '[]') {
-        return;
-      }
       localStorage.setItem('school_excuses', currentStr);
     }
   }, [excuses]);
@@ -375,6 +348,69 @@ export default function App() {
     return 'default';
   });
 
+  // --- PWA Installation states & hooks ---
+  const [pwaPrompt, setPwaPrompt] = useState<any>(() => {
+    if (typeof window !== 'undefined') {
+      return (window as any).getDeferredPrompt?.() || null;
+    }
+    return null;
+  });
+  const [showPwaBanner, setShowPwaBanner] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('school_pwa_banner_dismissed') !== 'true';
+    }
+    return true;
+  });
+
+  useEffect(() => {
+    const handlePwaPrompt = () => {
+      const prompt = (window as any).getDeferredPrompt?.();
+      if (prompt) {
+        console.log('[PWA App.tsx] Prompt loaded from custom event');
+        setPwaPrompt(prompt);
+      }
+    };
+
+    window.addEventListener('pwa-prompt-available', handlePwaPrompt);
+    // Periodically check if global prompt is populated
+    const interval = setInterval(() => {
+      const prompt = (window as any).getDeferredPrompt?.();
+      if (prompt && !pwaPrompt) {
+        setPwaPrompt(prompt);
+      }
+    }, 1500);
+
+    return () => {
+      window.removeEventListener('pwa-prompt-available', handlePwaPrompt);
+      clearInterval(interval);
+    };
+  }, [pwaPrompt]);
+
+  const handleInstallApp = async () => {
+    const isIframe = typeof window !== 'undefined' && window.self !== window.top;
+    if (isIframe) {
+      alert(
+        "🔔 لتتمكن من تثبيت التطبيق بنقرة واحدة مباشرة على هاتفك، يجب فتح التطبيق خارج نافذة المعاينة المؤطرة (Iframe).\n\n" +
+        "سنقوم الآن بفتح التطبيق في صفحة مستقلة كاملة، وعند فتحها ستتمكن من النقر على زر التثبيت وسيعمل مباشرة بنجاح! 🎉"
+      );
+      window.open(window.location.href, '_blank');
+      return;
+    }
+
+    if (pwaPrompt) {
+      pwaPrompt.prompt();
+      const { outcome } = await pwaPrompt.userChoice;
+      console.log(`[PWA] Install prompt outcome: ${outcome}`);
+      if (outcome === 'accepted') {
+        (window as any).clearDeferredPrompt?.();
+        setPwaPrompt(null);
+        alert('🎉 تهانينا! تم تثبيت تطبيق المدرسة الدولية بنجاح على الشاشة الرئيسية لجهازك.');
+      }
+    } else {
+      setShowNotificationHelper(true);
+    }
+  };
+
   const requestNotificationPermission = async () => {
     if (!('Notification' in window)) {
       alert('عذراً، متصفحك أو هذا الجهاز لا يدعم الإشعارات الخارجية حالياً. سنقوم بالاعتماد على محاكي التنبيهات الداخلي الذكي!');
@@ -410,6 +446,60 @@ export default function App() {
     });
   };
 
+  // --- Active Teacher and Parent tracking for accurate recipient counters ---
+  const [activeTeacherId, setActiveTeacherId] = useState<string>(() => localStorage.getItem('school_active_teacher_id') || '');
+  const [activeParentId, setActiveParentId] = useState<string>('');
+
+  useEffect(() => {
+    const updateActiveIds = () => {
+      const tId = localStorage.getItem('school_active_teacher_id') || '';
+      setActiveTeacherId(tId);
+
+      const sId = localStorage.getItem('parent_portal_student_id') || '';
+      if (sId) {
+        const student = students.find(s => s.id === sId || s.rollNo === sId);
+        if (student) {
+          setActiveParentId(student.parentId);
+        } else {
+          setActiveParentId('');
+        }
+      } else {
+        setActiveParentId('');
+      }
+    };
+
+    updateActiveIds();
+
+    const handleStorage = () => {
+      updateActiveIds();
+    };
+
+    window.addEventListener('storage', handleStorage);
+    window.addEventListener('school_storage_update', handleStorage);
+
+    return () => {
+      window.removeEventListener('storage', handleStorage);
+      window.removeEventListener('school_storage_update', handleStorage);
+    };
+  }, [students]);
+
+  const getTeacherUnreadCount = () => {
+    if (!activeTeacherId) return 0;
+    return messages.filter(m => m.receiverId === activeTeacherId && !m.read).length;
+  };
+
+  const getParentUnreadCount = () => {
+    if (!activeParentId) return 0;
+    return messages.filter(
+      m => m.receiverId === activeParentId && 
+           !m.read && 
+           !m.content.includes('سلوك') && 
+           !m.content.includes('تنبيه سلوكي') && 
+           !m.content.includes('تصنيف الإشعار: سلوك') && 
+           !m.content.includes('تقييم')
+    ).length;
+  };
+
   // --- Floating WhatsApp style toast state ---
   const [activeToast, setActiveToast] = useState<{
     id: string;
@@ -425,8 +515,15 @@ export default function App() {
     if (messages.length > lastMessageCount) {
       const latest = messages[messages.length - 1];
       
-      // Notify if sent to parent (meaning sender is teacher or director)
-      if (latest && latest.senderRole !== 'parent') {
+      // Notify only if the active portal is the intended receiver of the message
+      // AND receiver is not parent (as requested to cancel simulated alerts for parent)
+      // AND is the actual logged-in recipient (not another teacher/parent)
+      const isActualRecipient = 
+        (activePortal === 'director' && latest.receiverId === 'director') ||
+        (activePortal === 'teacher' && latest.receiverId === activeTeacherId) ||
+        (activePortal === 'parent' && latest.receiverId === activeParentId);
+
+      if (latest && latest.receiverRole === activePortal && latest.receiverRole !== 'parent' && isActualRecipient) {
         // Generate a clear message number (based on ID number or messages array index)
         const numericId = parseInt(latest.id.replace(/\D/g, ''), 10) || (messages.length + 100);
         const msgNumStr = `${numericId}`;
@@ -555,19 +652,23 @@ export default function App() {
     logEvent(`تم تسجيل الطالب: ${newStudent.name} وربطه بولي الأمر: ${parentData.name}`, 'success');
   };
 
-  // 3. Director publishes Announcement
-  const addAnnouncement = (announceData: Omit<Announcement, 'id' | 'date' | 'authorName'>) => {
+  // 3. Director or Teacher publishes Announcement
+  const addAnnouncement = (announceData: Omit<Announcement, 'id' | 'date'> & { authorName?: string; authorRole?: 'director' | 'teacher'; shift?: 'morning' | 'evening' }) => {
     const id = 'a' + (announcements.length + 1);
     const date = new Date().toISOString().split('T')[0];
     const newAnn: Announcement = {
-      ...announceData,
+      target: announceData.target,
+      title: announceData.title,
+      content: announceData.content,
       id,
       date,
-      authorName: 'المدير العام'
+      authorName: announceData.authorName || 'المدير العام',
+      authorRole: announceData.authorRole || 'director',
+      shift: announceData.shift || 'morning'
     };
 
     setAnnouncements(prev => [newAnn, ...prev]);
-    logEvent(`المدير العام نشر تعميماً جديداً: "${newAnn.title}" المستهدف: ${
+    logEvent(`${newAnn.authorName} نشر تعميماً جديداً: "${newAnn.title}" المستهدف: ${
       newAnn.target === 'all' ? 'الجميع' : newAnn.target === 'teachers' ? 'المعلمون' : 'أولياء الأمور'
     }`, 'primary');
   };
@@ -649,6 +750,26 @@ export default function App() {
     setGrades(prev => [newGrade, ...prev]);
     const student = students.find(s => s.id === gradeData.studentId);
     logEvent(`المعلم رصد درجة الطالب ${student?.name || ''} بمادة ${gradeData.subject}: ${gradeData.score}/${gradeData.maxScore}`, 'success');
+
+    // Send instant grade notification message to parent
+    const studentParent = parents.find(p => p.childrenIds.includes(gradeData.studentId));
+    if (studentParent && student) {
+      const teacher = teachers.find(t => t.id === gradeData.teacherId);
+      const msgId = 'm_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+      const newMsg: Message = {
+        id: msgId,
+        senderId: gradeData.teacherId || 'teacher',
+        senderName: teacher?.name || 'استاذ المادة',
+        senderRole: 'teacher',
+        receiverId: studentParent.id,
+        receiverName: studentParent.name,
+        receiverRole: 'parent',
+        content: `📢 [تصنيف الإشعار: رصد الدرجات الأكاديمية]\nتم رصد درجة جديدة للطالب (${student.name}) في مادة (${gradeData.subject}) - تقييم (${gradeData.examName}): الدرجة (${gradeData.score}/${gradeData.maxScore}).`,
+        date: new Date().toISOString(),
+        read: false
+      };
+      setMessages(prev => [newMsg, ...prev]);
+    }
   };
 
   // 7. Messaging
@@ -739,65 +860,79 @@ export default function App() {
               <button
                 id="app-switcher-teacher"
                 onClick={() => setActivePortal('teacher')}
-                className={`flex items-center justify-center gap-2 px-5 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                className={`flex items-center justify-center gap-2 px-5 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer relative ${
                   activePortal === 'teacher'
                     ? 'bg-indigo-600 text-white shadow-sm'
                     : 'text-slate-500 hover:text-slate-900'
                 }`}
               >
-                <Users className="w-4 h-4" />
+                <div className="relative">
+                  <Users className="w-4 h-4" />
+                  {getTeacherUnreadCount() > 0 && (
+                    <span className="absolute -top-1 -right-1 flex h-2 w-2 rounded-full bg-rose-500 ring-1 ring-white"></span>
+                  )}
+                </div>
                 <span>تطبيق المعلم</span>
+                {getTeacherUnreadCount() > 0 && (
+                  <span className="bg-rose-500 text-white text-[9px] px-1.5 py-0.5 rounded-full font-extrabold animate-pulse">
+                    {getTeacherUnreadCount()}
+                  </span>
+                )}
               </button>
 
               <button
                 id="app-switcher-parent"
                 onClick={() => setActivePortal('parent')}
-                className={`flex items-center justify-center gap-2 px-5 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                className={`flex items-center justify-center gap-2 px-5 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer relative ${
                   activePortal === 'parent'
                     ? 'bg-sky-500 text-white shadow-sm'
                     : 'text-slate-500 hover:text-slate-900'
                 }`}
               >
-                <GraduationCap className="w-4 h-4" />
+                <div className="relative">
+                  <GraduationCap className="w-4 h-4" />
+                  {getParentUnreadCount() > 0 && (
+                    <span className="absolute -top-1 -right-1 flex h-2 w-2 rounded-full bg-rose-500 ring-1 ring-white"></span>
+                  )}
+                </div>
                 <span>تطبيق ولي الأمر</span>
+                {getParentUnreadCount() > 0 && (
+                  <span className="bg-rose-500 text-white text-[9px] px-1.5 py-0.5 rounded-full font-extrabold animate-pulse">
+                    {getParentUnreadCount()}
+                  </span>
+                )}
               </button>
             </div>
-          ) : (
+          ) : activePortal === 'director' ? (
             <div className="hidden md:flex items-center gap-2 px-4 py-2 bg-indigo-50 text-indigo-700 rounded-xl border border-indigo-100 shadow-sm shrink-0">
               <Lock className="w-4 h-4 text-indigo-500 animate-pulse" />
               <span className="text-[11px] font-bold">
-                بوابة مخصصة وآمنة: {activePortal === 'teacher' ? 'تطبيق المعلم' : activePortal === 'parent' ? 'تطبيق ولي الأمر' : 'تطبيق المدير العام'}
+                بوابة مخصصة وآمنة: تطبيق المدير العام
               </span>
             </div>
-          )}
+          ) : null}
 
-          {/* Sync Status Badge and Reset Button - Desktop ONLY */}
-          <div className="hidden md:flex items-center gap-3">
-            <button
-              onClick={() => setShowNotificationHelper(true)}
-              className={`text-[11px] px-3 py-1 rounded-full font-bold transition flex items-center gap-1.5 cursor-pointer border ${
-                notificationPermission === 'granted'
-                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200 shadow-xs'
-                  : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border-indigo-200'
-              }`}
-            >
-              <span>🔔</span>
-              <span>{notificationPermission === 'granted' ? 'إشعارات الهاتف مفعّلة' : 'تفعيل إشعارات الهاتف'}</span>
-            </button>
-            
-            <div className="flex items-center gap-2 px-3 py-1 bg-green-50 text-green-700 rounded-full border border-green-200 shadow-sm shrink-0">
-              <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
-              <span className="text-[11px] font-semibold">متزامن أونلاين Cloud</span>
+          {/* Sync Status Badge and Notification Button - Desktop ONLY */}
+          {activePortal === 'director' && (
+            <div className="hidden md:flex items-center gap-3">
+              <button
+                onClick={requestNotificationPermission}
+                className={`text-[11px] px-3 py-1.5 rounded-full font-bold transition flex items-center gap-1.5 cursor-pointer border ${
+                  notificationPermission === 'granted'
+                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200 shadow-xs'
+                    : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border-indigo-200'
+                }`}
+              >
+                <span>🔔</span>
+                <span>{notificationPermission === 'granted' ? 'إشعارات الهاتف مفعّلة' : 'تفعيل إشعارات الهاتف'}</span>
+              </button>
+              
+              <div className="flex items-center gap-2 px-3 py-1.5 bg-green-50 text-green-700 rounded-full border border-green-200 shadow-sm shrink-0">
+                <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+                <span className="text-[11px] font-semibold">متزامن أونلاين Cloud</span>
+              </div>
             </div>
-            
-            <button
-              id="btn-reset-simulator"
-              onClick={handleResetData}
-              className="text-xs text-rose-600 hover:bg-rose-50 border border-rose-100 px-3.5 py-1.5 rounded-lg font-bold transition shrink-0 cursor-pointer"
-            >
-              إعادة الضبط
-            </button>
-          </div>
+          )}
 
           {/* Hamburger Menu Toggle Button - Mobile ONLY */}
           <button
@@ -851,6 +986,11 @@ export default function App() {
                 >
                   <span className="text-[10px] text-indigo-100">رصد الدرجات والتواصل</span>
                   <span className="flex items-center gap-2">
+                    {getTeacherUnreadCount() > 0 && (
+                      <span className="bg-rose-500 text-white text-[9px] px-1.5 py-0.5 rounded-full font-extrabold animate-pulse">
+                        {getTeacherUnreadCount()}
+                      </span>
+                    )}
                     <span>تطبيق المعلم</span>
                     <Users className="w-4.5 h-4.5 text-indigo-500" />
                   </span>
@@ -870,55 +1010,66 @@ export default function App() {
                 >
                   <span className="text-[10px] text-sky-100">متابعة الأقساط والغياب والشهادات</span>
                   <span className="flex items-center gap-2">
+                    {getParentUnreadCount() > 0 && (
+                      <span className="bg-rose-500 text-white text-[9px] px-1.5 py-0.5 rounded-full font-extrabold animate-pulse">
+                        {getParentUnreadCount()}
+                      </span>
+                    )}
                     <span>تطبيق ولي الأمر</span>
                     <GraduationCap className="w-4.5 h-4.5 text-indigo-500" />
                   </span>
                 </button>
               </div>
-            ) : (
+            ) : activePortal === 'director' ? (
               <div className="flex items-center gap-2 px-4 py-3 bg-indigo-50 text-indigo-700 rounded-xl border border-indigo-100 shadow-sm justify-end">
                 <span className="text-xs font-bold">
-                  بوابة مخصصة ومقفلة: {activePortal === 'teacher' ? 'تطبيق المعلم' : activePortal === 'parent' ? 'تطبيق ولي الأمر' : 'تطبيق المدير'}
+                  بوابة مخصصة ومقفلة: تطبيق المدير
                 </span>
                 <Lock className="w-4 h-4 text-indigo-500 animate-pulse" />
               </div>
-            )}
+            ) : null}
 
             {/* Utility Actions Stack */}
-            <div className="border-t border-slate-200 pt-3 space-y-2.5">
-              <div className="flex justify-between items-center">
-                <div className="flex items-center gap-1.5 px-3 py-1 bg-green-50 text-green-700 rounded-full border border-green-200 shadow-sm shrink-0">
-                  <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
-                  <span className="text-[10px] font-semibold">متزامن أونلاين Cloud</span>
+            {activePortal === 'director' && (
+              <div className="border-t border-slate-200 pt-3 space-y-2.5">
+                <div className="flex flex-col gap-2">
+                  <div className="flex justify-between items-center gap-2">
+                    <div className="flex items-center gap-1 px-2.5 py-1.5 bg-green-50 text-green-700 rounded-full border border-green-200 shadow-sm shrink-0">
+                      <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+                      <span className="text-[10px] font-semibold">متزامن Cloud</span>
+                    </div>
+
+                    <button
+                      onClick={() => {
+                        requestNotificationPermission();
+                        setIsPortalSelectorOpen(false);
+                      }}
+                      className={`text-[10px] px-2.5 py-1.5 rounded-full font-bold transition flex items-center gap-1 cursor-pointer border ${
+                        notificationPermission === 'granted'
+                          ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                          : 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                      }`}
+                    >
+                      <span>🔔</span>
+                      <span>{notificationPermission === 'granted' ? 'الإشعارات نشطة' : 'تفعيل إشعارات الهاتف'}</span>
+                    </button>
+                  </div>
                 </div>
 
-                <button
-                  onClick={() => {
-                    setShowNotificationHelper(true);
-                    setIsPortalSelectorOpen(false);
-                  }}
-                  className={`text-[10px] px-3 py-1.5 rounded-full font-bold transition flex items-center gap-1 cursor-pointer border ${
-                    notificationPermission === 'granted'
-                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                      : 'bg-indigo-50 text-indigo-700 border-indigo-200'
-                  }`}
-                >
-                  <span>🔔</span>
-                  <span>{notificationPermission === 'granted' ? 'إشعارات الهاتف نشطة' : 'تفعيل إشعارات الهاتف'}</span>
-                </button>
+                {activePortal === 'director' && (
+                  <button
+                    id="btn-reset-simulator-mobile"
+                    onClick={() => {
+                      handleResetData();
+                      setIsPortalSelectorOpen(false);
+                    }}
+                    className="w-full text-center text-xs text-rose-600 bg-rose-50/50 hover:bg-rose-50 border border-rose-100 py-2.5 rounded-xl font-bold transition cursor-pointer"
+                  >
+                    إعادة ضبط قاعدة بيانات المنصة (تصفير البيانات)
+                  </button>
+                )}
               </div>
-
-              <button
-                id="btn-reset-simulator-mobile"
-                onClick={() => {
-                  handleResetData();
-                  setIsPortalSelectorOpen(false);
-                }}
-                className="w-full text-center text-xs text-rose-600 bg-rose-50/50 hover:bg-rose-50 border border-rose-100 py-2.5 rounded-xl font-bold transition cursor-pointer"
-              >
-                إعادة ضبط قاعدة بيانات المنصة (تصفير البيانات)
-              </button>
-            </div>
+            )}
           </div>
         )}
       </header>
@@ -974,10 +1125,13 @@ export default function App() {
                 grades={grades}
                 parents={parents}
                 messages={messages}
+                announcements={announcements}
                 saveAttendance={saveAttendance}
                 saveGrade={saveGrade}
                 sendMessage={sendMessage}
                 setMessages={setMessages}
+                setGrades={setGrades}
+                addAnnouncement={addAnnouncement}
               />
             )}
 

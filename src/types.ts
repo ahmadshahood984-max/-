@@ -12,6 +12,7 @@ export interface Teacher {
   classes: string[]; // Class IDs
   joinDate: string;
   password?: string; // Teacher password set by Director
+  shift?: 'morning' | 'evening';
 }
 
 export interface Student {
@@ -23,6 +24,7 @@ export interface Student {
   gender: 'male' | 'female';
   dob: string;
   parentName: string;
+  shift?: 'morning' | 'evening';
 }
 
 export interface Parent {
@@ -39,6 +41,7 @@ export interface Class {
   grade: string; // e.g. "الأول", "الثاني"
   room: string;
   teacherId: string; // Class Advisor
+  shift?: 'morning' | 'evening';
 }
 
 export interface Attendance {
@@ -47,6 +50,7 @@ export interface Attendance {
   date: string; // YYYY-MM-DD
   status: 'present' | 'absent' | 'late' | 'excused';
   notes?: string;
+  shift?: 'morning' | 'evening';
 }
 
 export interface Grade {
@@ -58,6 +62,11 @@ export interface Grade {
   maxScore: number;
   date: string;
   teacherId: string;
+  examType?: 'special' | 'monthly' | 'general';
+  notes?: string;
+  attachedMedia?: string;
+  attachedMediaType?: 'image' | 'video';
+  shift?: 'morning' | 'evening';
 }
 
 export interface Announcement {
@@ -67,6 +76,8 @@ export interface Announcement {
   target: 'all' | 'teachers' | 'parents';
   date: string;
   authorName: string;
+  authorRole?: 'director' | 'teacher';
+  shift?: 'morning' | 'evening';
 }
 
 export interface Message {
@@ -81,6 +92,7 @@ export interface Message {
   date: string;
   read: boolean;
   studentId?: string; // If message is related to a specific student
+  shift?: 'morning' | 'evening';
 }
 
 export interface AbsenceExcuse {
@@ -93,4 +105,5 @@ export interface AbsenceExcuse {
   reason: string;
   status: 'pending' | 'approved' | 'rejected';
   notes?: string;
+  shift?: 'morning' | 'evening';
 }

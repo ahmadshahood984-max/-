@@ -7,5 +7,6 @@
   "storageBucket": "aesthetic-night-p8gvj.firebasestorage.app",
   "messagingSenderId": "600017099331",
   "measurementId": "",
-  "oAuthClientId": "600017099331-bohqtlr1mm5vos3483je30lohckdj5fe.apps.googleusercontent.com"
+  "oAuthClientId": "600017099331-bohqtlr1mm5vos3483je30lohckdj5fe.apps.googleusercontent.com",
+  "recaptchaSiteKey": ""
 }
