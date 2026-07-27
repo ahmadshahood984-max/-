@@ -8892,33 +8892,6 @@ ${sampleEval}
                     </p>
                   </div>
 
-                  {/* Highlights Grid */}
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1">
-                    <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl text-center space-y-1">
-                      <div className="w-8 h-8 bg-indigo-100 text-indigo-700 rounded-lg flex items-center justify-center mx-auto">
-                        <Activity className="w-4 h-4" />
-                      </div>
-                      <span className="block text-[11px] font-bold text-slate-800">إحصائيات مباشرة</span>
-                      <span className="block text-[9px] text-slate-500">حضور ونتائج الأبناء</span>
-                    </div>
-
-                    <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl text-center space-y-1">
-                      <div className="w-8 h-8 bg-emerald-100 text-emerald-700 rounded-lg flex items-center justify-center mx-auto">
-                        <Users className="w-4 h-4" />
-                      </div>
-                      <span className="block text-[11px] font-bold text-slate-800">إدارة الكادر</span>
-                      <span className="block text-[9px] text-slate-500">المعلمون والصفوف</span>
-                    </div>
-
-                    <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl text-center space-y-1">
-                      <div className="w-8 h-8 bg-amber-100 text-amber-700 rounded-lg flex items-center justify-center mx-auto">
-                        <Bell className="w-4 h-4" />
-                      </div>
-                      <span className="block text-[11px] font-bold text-slate-800">تواصل مباشر</span>
-                      <span className="block text-[9px] text-slate-500">إشعارات وواتساب</span>
-                    </div>
-                  </div>
-
                   {/* Action Button */}
                   <div className="pt-2">
                     <button
