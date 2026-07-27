@@ -59,6 +59,7 @@ import { db } from '../lib/firebase';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead } from '../lib/firestoreTracker';
 import { forceRefreshDataFromFirestore } from '../lib/firebaseSync';
+import { getStoredWelcomeMessages, saveWelcomeMessages, DEFAULT_WELCOME_MESSAGES, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { Bell, Activity, Info } from 'lucide-react';
 
 const getShareableOrigin = () => {
@@ -215,12 +216,18 @@ export default function DirectorPortal({
     return localStorage.getItem('school_app_icon') || '';
   });
 
+  const [welcomeMsgs, setWelcomeMsgs] = useState<WelcomeMessagesConfig>(getStoredWelcomeMessages);
+  const [editingWelcomeMsgs, setEditingWelcomeMsgs] = useState<WelcomeMessagesConfig>(getStoredWelcomeMessages);
+
   useEffect(() => {
     const handleStorageUpdate = (e: any) => {
       const savedIcon = localStorage.getItem('school_app_icon');
       if (savedIcon !== null) {
         setSchoolAppIcon(savedIcon);
       }
+      const loadedMsgs = getStoredWelcomeMessages();
+      setWelcomeMsgs(loadedMsgs);
+      setEditingWelcomeMsgs(loadedMsgs);
     };
     window.addEventListener('school_storage_update', handleStorageUpdate);
     return () => window.removeEventListener('school_storage_update', handleStorageUpdate);
@@ -3705,6 +3712,177 @@ ${directivesFormatted}
                     </button>
                   </div>
                 )}
+              </div>
+
+              {/* Portal Welcome Messages Customization Section */}
+              <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm space-y-4 text-right">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-100 pb-3 gap-2">
+                  <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-lg bg-amber-100 text-amber-700 flex items-center justify-center font-bold shrink-0">
+                      <Sparkles className="w-4 h-4 text-amber-600" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-800">تخصيص الرسائل الترحيبية للبوابات ✨</h3>
+                      <p className="text-[11px] text-slate-500">التحكم بالرسائل الترحيبية التي تظهر عند فتح تطبيق المدير والمعلم وولي الأمر</p>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (confirm('هل ترغب بإعادة الرسائل الترحيبية إلى النص الافتراضي الأصلي؟')) {
+                        setEditingWelcomeMsgs(DEFAULT_WELCOME_MESSAGES);
+                        saveWelcomeMessages(DEFAULT_WELCOME_MESSAGES);
+                        setWelcomeMsgs(DEFAULT_WELCOME_MESSAGES);
+                        alert('تمت إعادة الرسائل الترحيبية الافتراضية بنجاح!');
+                      }
+                    }}
+                    className="text-xs text-slate-500 hover:text-rose-600 flex items-center gap-1 transition cursor-pointer self-end sm:self-auto"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>الافتراضي</span>
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                  {/* Director Portal Welcome Edit */}
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2.5">
+                    <div className="flex items-center gap-1.5 text-xs font-bold text-indigo-900 border-b border-slate-200 pb-1.5">
+                      <Building className="w-4 h-4 text-indigo-600" />
+                      <span>رسالة بوابة المدير العام 🏫</span>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-600 mb-1">العنوان الرئيسي:</label>
+                      <input
+                        type="text"
+                        value={editingWelcomeMsgs.directorTitle}
+                        onChange={(e) => setEditingWelcomeMsgs({ ...editingWelcomeMsgs, directorTitle: e.target.value })}
+                        className="w-full text-xs border border-slate-200 rounded-lg p-2 bg-white focus:outline-none focus:border-indigo-500 font-bold"
+                        placeholder="العنوان الرئيسية..."
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-600 mb-1">العنوان الفرعي:</label>
+                      <input
+                        type="text"
+                        value={editingWelcomeMsgs.directorSubtitle}
+                        onChange={(e) => setEditingWelcomeMsgs({ ...editingWelcomeMsgs, directorSubtitle: e.target.value })}
+                        className="w-full text-xs border border-slate-200 rounded-lg p-2 bg-white focus:outline-none focus:border-indigo-500"
+                        placeholder="العنوان الفرعي..."
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-600 mb-1">نص الرسالة والترحيب:</label>
+                      <textarea
+                        rows={3}
+                        value={editingWelcomeMsgs.directorBody}
+                        onChange={(e) => setEditingWelcomeMsgs({ ...editingWelcomeMsgs, directorBody: e.target.value })}
+                        className="w-full text-xs border border-slate-200 rounded-lg p-2 bg-white focus:outline-none focus:border-indigo-500 resize-none"
+                        placeholder="نص الترحيب..."
+                      />
+                    </div>
+                  </div>
+
+                  {/* Teacher Portal Welcome Edit */}
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2.5">
+                    <div className="flex items-center gap-1.5 text-xs font-bold text-indigo-900 border-b border-slate-200 pb-1.5">
+                      <BookOpen className="w-4 h-4 text-emerald-600" />
+                      <span>رسالة بوابة المعلم 📚</span>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-600 mb-1">العنوان الرئيسي:</label>
+                      <input
+                        type="text"
+                        value={editingWelcomeMsgs.teacherTitle}
+                        onChange={(e) => setEditingWelcomeMsgs({ ...editingWelcomeMsgs, teacherTitle: e.target.value })}
+                        className="w-full text-xs border border-slate-200 rounded-lg p-2 bg-white focus:outline-none focus:border-indigo-500 font-bold"
+                        placeholder="العنوان الرئيسية..."
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-600 mb-1">العنوان الفرعي:</label>
+                      <input
+                        type="text"
+                        value={editingWelcomeMsgs.teacherSubtitle}
+                        onChange={(e) => setEditingWelcomeMsgs({ ...editingWelcomeMsgs, teacherSubtitle: e.target.value })}
+                        className="w-full text-xs border border-slate-200 rounded-lg p-2 bg-white focus:outline-none focus:border-indigo-500"
+                        placeholder="العنوان الفرعي..."
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-600 mb-1">نص الرسالة والترحيب:</label>
+                      <textarea
+                        rows={3}
+                        value={editingWelcomeMsgs.teacherBody}
+                        onChange={(e) => setEditingWelcomeMsgs({ ...editingWelcomeMsgs, teacherBody: e.target.value })}
+                        className="w-full text-xs border border-slate-200 rounded-lg p-2 bg-white focus:outline-none focus:border-indigo-500 resize-none"
+                        placeholder="نص الترحيب..."
+                      />
+                    </div>
+                  </div>
+
+                  {/* Parent Portal Welcome Edit */}
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2.5">
+                    <div className="flex items-center gap-1.5 text-xs font-bold text-indigo-900 border-b border-slate-200 pb-1.5">
+                      <Users className="w-4 h-4 text-amber-600" />
+                      <span>رسالة بوابة ولي الأمر 👨‍👩‍👧‍👦</span>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-600 mb-1">العنوان الرئيسي:</label>
+                      <input
+                        type="text"
+                        value={editingWelcomeMsgs.parentTitle}
+                        onChange={(e) => setEditingWelcomeMsgs({ ...editingWelcomeMsgs, parentTitle: e.target.value })}
+                        className="w-full text-xs border border-slate-200 rounded-lg p-2 bg-white focus:outline-none focus:border-indigo-500 font-bold"
+                        placeholder="العنوان الرئيسية..."
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-600 mb-1">العنوان الفرعي:</label>
+                      <input
+                        type="text"
+                        value={editingWelcomeMsgs.parentSubtitle}
+                        onChange={(e) => setEditingWelcomeMsgs({ ...editingWelcomeMsgs, parentSubtitle: e.target.value })}
+                        className="w-full text-xs border border-slate-200 rounded-lg p-2 bg-white focus:outline-none focus:border-indigo-500"
+                        placeholder="العنوان الفرعي..."
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-600 mb-1">نص الرسالة والترحيب:</label>
+                      <textarea
+                        rows={3}
+                        value={editingWelcomeMsgs.parentBody}
+                        onChange={(e) => setEditingWelcomeMsgs({ ...editingWelcomeMsgs, parentBody: e.target.value })}
+                        className="w-full text-xs border border-slate-200 rounded-lg p-2 bg-white focus:outline-none focus:border-indigo-500 resize-none"
+                        placeholder="نص الترحيب..."
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="pt-2 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      saveWelcomeMessages(editingWelcomeMsgs);
+                      setWelcomeMsgs(editingWelcomeMsgs);
+                      alert('تم حفظ الرسائل الترحيبية وتطبيقها بنجاح على كل البوابات! ✨');
+                    }}
+                    className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-5 py-2.5 rounded-xl transition cursor-pointer shadow-md shadow-indigo-100 flex items-center gap-2"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>حفظ وتعميم الرسائل الترحيبية</span>
+                  </button>
+                </div>
               </div>
 
               {/* Director Security Settings */}
@@ -8697,7 +8875,7 @@ ${sampleEval}
                       <span className="inline-block bg-amber-400/20 border border-amber-300/30 text-amber-300 text-[10px] font-bold px-2.5 py-0.5 rounded-full mb-1">
                         بوابة المدير العام 🏫
                       </span>
-                      <h3 className="font-extrabold text-lg text-white">أهلاً وسهلاً بكم في المنصة المدرسية</h3>
+                      <h3 className="font-extrabold text-lg text-white">{welcomeMsgs.directorTitle}</h3>
                       <p className="text-xs text-indigo-200 mt-0.5">المدرسة الدولية - حلب / مارع</p>
                     </div>
                   </div>
@@ -8707,10 +8885,10 @@ ${sampleEval}
                 <div className="p-6 space-y-4">
                   <div className="bg-indigo-50/70 border border-indigo-100 rounded-2xl p-4 text-xs text-indigo-950 leading-relaxed space-y-2">
                     <p className="font-extrabold text-sm text-indigo-900">
-                      مرحباً بكم حضرتكم في لوحة التحكم الإدارية المركزية ✨
+                      {welcomeMsgs.directorSubtitle}
                     </p>
-                    <p className="text-slate-700">
-                      نتمنى لكم يوماً حافلاً بالإنجاز والنجاح في إشراف وتوجيه مسيرة المدرسة، متابعة التقارير الأكاديمية والتواصل مع الكادر التعليمي وأولياء الأمور بكل سهولة وسرعة.
+                    <p className="text-slate-700 whitespace-pre-line">
+                      {welcomeMsgs.directorBody}
                     </p>
                   </div>
 

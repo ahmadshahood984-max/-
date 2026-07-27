@@ -40,6 +40,7 @@ import {
 import { buildWhatsAppUrl, openWhatsAppDirectly, getWhatsAppSentRecords, recordWhatsAppSent, WhatsAppSentRecord } from '../lib/whatsapp';
 import { WhatsAppMessageCustomizerModal } from './WhatsAppMessageCustomizerModal';
 import { Teacher, Student, Class, Attendance, Grade, Parent, Message, Announcement } from '../types';
+import { getStoredWelcomeMessages, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { motion, AnimatePresence } from 'motion/react';
 
 interface TeacherPortalProps {
@@ -87,12 +88,15 @@ export default function TeacherPortal({
     return localStorage.getItem('school_app_icon') || '';
   });
 
+  const [welcomeMsgs, setWelcomeMsgs] = useState<WelcomeMessagesConfig>(getStoredWelcomeMessages);
+
   useEffect(() => {
     const handleStorageUpdate = () => {
       const savedIcon = localStorage.getItem('school_app_icon');
       if (savedIcon !== null) {
         setSchoolAppIcon(savedIcon);
       }
+      setWelcomeMsgs(getStoredWelcomeMessages());
     };
     window.addEventListener('school_storage_update', handleStorageUpdate);
     return () => window.removeEventListener('school_storage_update', handleStorageUpdate);
@@ -2990,7 +2994,7 @@ export default function TeacherPortal({
                     <span className="inline-block bg-amber-400/20 border border-amber-300/30 text-amber-300 text-[10px] font-bold px-2.5 py-0.5 rounded-full mb-1">
                       بوابة المعلم 📚
                     </span>
-                    <h3 className="font-extrabold text-lg text-white">أهلاً بك أستاذنا الفاضل ✨</h3>
+                    <h3 className="font-extrabold text-lg text-white">{welcomeMsgs.teacherTitle}</h3>
                     <p className="text-xs text-indigo-200 mt-0.5">{activeTeacher?.name || 'المعلم الموقر'}</p>
                   </div>
                 </div>
@@ -3000,10 +3004,10 @@ export default function TeacherPortal({
               <div className="p-6 space-y-4">
                 <div className="bg-indigo-50/70 border border-indigo-100 rounded-2xl p-4 text-xs text-indigo-950 leading-relaxed space-y-2">
                   <p className="font-extrabold text-sm text-indigo-900">
-                    نثمن عالياً جهودكم الجبارة في تنشئة ورعاية أجيال المستقبل 🌟
+                    {welcomeMsgs.teacherSubtitle}
                   </p>
-                  <p className="text-slate-700">
-                    يسعدنا تقديم كافة التسهيلات لكم لرصد درجات الطلاب، تسجيل الحضور والغياب اليومي، وإرسال الملاحظات والتنبيهات التعليمية بكل سلاسة.
+                  <p className="text-slate-700 whitespace-pre-line">
+                    {welcomeMsgs.teacherBody}
                   </p>
                 </div>
 
