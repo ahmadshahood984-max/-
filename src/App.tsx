@@ -45,7 +45,11 @@ import {
   ExternalLink,
   Copy,
   Share2,
-  Menu
+  Menu,
+  Laptop,
+  Monitor,
+  Download,
+  CheckCircle2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -140,6 +144,7 @@ export default function App() {
 
   // Help modal for configuring and testing notifications
   const [showNotificationHelper, setShowNotificationHelper] = useState<boolean>(false);
+  const [showDesktopInstallModal, setShowDesktopInstallModal] = useState<boolean>(false);
 
   // Listen to remote changes via Firebase Sync and update React states in real-time
   useEffect(() => {
@@ -404,7 +409,7 @@ export default function App() {
     const isIframe = typeof window !== 'undefined' && window.self !== window.top;
     if (isIframe) {
       alert(
-        "🔔 لتتمكن من تثبيت التطبيق بنقرة واحدة مباشرة على هاتفك، يجب فتح التطبيق خارج نافذة المعاينة المؤطرة (Iframe).\n\n" +
+        "🔔 لتتمكن من تثبيت التطبيق بنقرة واحدة مباشرة على جهازك، يجب فتح التطبيق خارج نافذة المعاينة المؤطرة (Iframe).\n\n" +
         "سنقوم الآن بفتح التطبيق في صفحة مستقلة كاملة، وعند فتحها ستتمكن من النقر على زر التثبيت وسيعمل مباشرة بنجاح! 🎉"
       );
       window.open(window.location.href, '_blank');
@@ -422,6 +427,31 @@ export default function App() {
       }
     } else {
       setShowNotificationHelper(true);
+    }
+  };
+
+  const handleInstallDesktopApp = async () => {
+    const isIframe = typeof window !== 'undefined' && window.self !== window.top;
+    if (isIframe) {
+      alert(
+        "💻 لتثبيت التطبيق بنقرة واحدة كأيقونة على سطح مكتب الكمبيوتر (Desktop):\n\n" +
+        "يجب فتح التطبيق في تبويب مستقل خارج إطار المعاينة.\n" +
+        "سنفتح لك التطبيق بتبويب جديد الآن، واضغط هناك على زر 'تثبيت على الكمبيوتر' وسينشئ أيقونة سطح المكتب فوراً! 🚀"
+      );
+      window.open(window.location.href, '_blank');
+      return;
+    }
+
+    if (pwaPrompt) {
+      pwaPrompt.prompt();
+      const { outcome } = await pwaPrompt.userChoice;
+      if (outcome === 'accepted') {
+        (window as any).clearDeferredPrompt?.();
+        setPwaPrompt(null);
+        alert('🎉 تهانينا! تم تثبيت تطبيق المدرسة الدولية بنجاح كبرنامج وأيقونة على سطح مكتب الكمبيوتر.');
+      }
+    } else {
+      setShowDesktopInstallModal(true);
     }
   };
 
@@ -930,27 +960,40 @@ export default function App() {
             </div>
           ) : null}
 
-          {/* Sync Status Badge and Notification Button - Desktop ONLY */}
-          {activePortal === 'director' && (
-            <div className="hidden md:flex items-center gap-3">
-              <button
-                onClick={requestNotificationPermission}
-                className={`text-[11px] px-3 py-1.5 rounded-full font-bold transition flex items-center gap-1.5 cursor-pointer border ${
-                  notificationPermission === 'granted'
-                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200 shadow-xs'
-                    : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border-indigo-200'
-                }`}
-              >
-                <span>🔔</span>
-                <span>{notificationPermission === 'granted' ? 'إشعارات الهاتف مفعّلة' : 'تفعيل إشعارات الهاتف'}</span>
-              </button>
-              
-              <div className="flex items-center gap-2 px-3 py-1.5 bg-green-50 text-green-700 rounded-full border border-green-200 shadow-sm shrink-0">
-                <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
-                <span className="text-[11px] font-semibold">متزامن أونلاين Cloud</span>
-              </div>
-            </div>
-          )}
+          {/* Sync Status Badge, Desktop Install Button, and Notification Button - Desktop ONLY */}
+          <div className="hidden md:flex items-center gap-2.5">
+            <button
+              type="button"
+              onClick={handleInstallDesktopApp}
+              className="bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] px-3.5 py-1.5 rounded-full font-bold transition flex items-center gap-1.5 cursor-pointer shadow-sm shrink-0 border border-indigo-500/30"
+              title="تثبيت المنصة كأيقونة وبرنامج على سطح مكتب الكمبيوتر"
+            >
+              <Laptop className="w-3.5 h-3.5 text-amber-300" />
+              <span>تثبيت على الكمبيوتر 💻</span>
+            </button>
+
+            {activePortal === 'director' && (
+              <>
+                <button
+                  type="button"
+                  onClick={requestNotificationPermission}
+                  className={`text-[11px] px-3 py-1.5 rounded-full font-bold transition flex items-center gap-1.5 cursor-pointer border ${
+                    notificationPermission === 'granted'
+                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200 shadow-xs'
+                      : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border-indigo-200'
+                  }`}
+                >
+                  <span>🔔</span>
+                  <span>{notificationPermission === 'granted' ? 'إشعارات الهاتف مفعّلة' : 'تفعيل إشعارات الهاتف'}</span>
+                </button>
+                
+                <div className="flex items-center gap-2 px-3 py-1.5 bg-green-50 text-green-700 rounded-full border border-green-200 shadow-sm shrink-0">
+                  <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+                  <span className="text-[11px] font-semibold">متزامن أونلاين Cloud</span>
+                </div>
+              </>
+            )}
+          </div>
 
           {/* Hamburger Menu Toggle Button - Mobile ONLY */}
           <button
@@ -1391,6 +1434,147 @@ export default function App() {
                   className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition cursor-pointer"
                 >
                   حسناً، فهمت
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {/* Desktop PC Installation Guide Modal */}
+        {showDesktopInstallModal && (
+          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-[10000]">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 15 }}
+              className="bg-white rounded-3xl max-w-lg w-full shadow-2xl border border-indigo-100 overflow-hidden text-right"
+              style={{ direction: 'rtl' }}
+            >
+              {/* Header */}
+              <div className="bg-gradient-to-r from-indigo-900 via-indigo-800 to-slate-900 text-white p-5 flex justify-between items-center relative overflow-hidden">
+                <div className="flex items-center gap-3 relative z-10">
+                  <div className="w-11 h-11 bg-amber-400/20 border border-amber-300/30 rounded-2xl flex items-center justify-center shrink-0">
+                    <Laptop className="w-6 h-6 text-amber-300" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-base text-white">🖥️ تثبيت المنصة على جهاز الكمبيوتر</h3>
+                    <p className="text-[11px] text-indigo-200 mt-0.5">إنشاء أيقونة واختصار مباشر على سطح المكتب للوصول السريع</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowDesktopInstallModal(false)}
+                  className="text-white/80 hover:text-white p-1 hover:bg-white/10 rounded-lg transition cursor-pointer relative z-10"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Body Content */}
+              <div className="p-6 space-y-5 max-h-[75vh] overflow-y-auto">
+                {/* One-Click Action Trigger */}
+                <div className="bg-indigo-50 border border-indigo-100 p-4 rounded-2xl text-center space-y-3">
+                  <div className="space-y-1">
+                    <span className="inline-block bg-indigo-600 text-white text-[10px] font-extrabold px-2.5 py-0.5 rounded-full">
+                      تثبيت تلقائي بنقرة واحدة
+                    </span>
+                    <h4 className="font-extrabold text-sm text-indigo-950">
+                      هل تريد إضافة أيقونة المنصة إلى سطح المكتب الآن؟
+                    </h4>
+                    <p className="text-[11px] text-slate-600 leading-relaxed">
+                      عند التثبيت، ستظهر أيقونة المنصة المدرسية الموحدة على سطح مكتب الكمبيوتر وقائمة ابدأ (Start) لفتحها بنقرة واحدة كأي برنامج آخر.
+                    </p>
+                  </div>
+
+                  <button
+                    onClick={async () => {
+                      const isIframe = typeof window !== 'undefined' && window.self !== window.top;
+                      if (isIframe) {
+                        alert("💻 سنقوم بفتح المنصة في تبويب مستقل جديد الآن، ثم انقر على 'تثبيت التطبيق' لتنزيله فوراً!");
+                        window.open(window.location.href, '_blank');
+                        return;
+                      }
+                      if (pwaPrompt) {
+                        pwaPrompt.prompt();
+                        const { outcome } = await pwaPrompt.userChoice;
+                        if (outcome === 'accepted') {
+                          (window as any).clearDeferredPrompt?.();
+                          setPwaPrompt(null);
+                          setShowDesktopInstallModal(false);
+                          alert('🎉 تهانينا! تم تثبيت المنصة المدرسية بنجاح على سطح مكتب الكمبيوتر.');
+                        }
+                      } else {
+                        alert("💡 يرجى اتباع الطرق الموضحة بالأسفل لتثبيت الأيقونة من شريط عنوان المتصفح أو القائمة الرئيسية!");
+                      }
+                    }}
+                    className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-5 rounded-xl shadow-md shadow-indigo-200 transition cursor-pointer flex items-center justify-center gap-2 text-xs"
+                  >
+                    <Download className="w-4 h-4 text-amber-300" />
+                    <span>تثبيت التطبيق الآن على الكمبيوتر 💻</span>
+                  </button>
+                </div>
+
+                {/* Clear Visual Step-by-Step Instructions */}
+                <div className="space-y-3">
+                  <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wider flex items-center gap-2 border-b border-slate-100 pb-2">
+                    <Monitor className="w-4 h-4 text-indigo-600" />
+                    <span>طرق تثبيت الأيقونة على الكمبيوتر (Windows / Mac / Chrome / Edge)</span>
+                  </h4>
+
+                  {/* Method 1: Address Bar Icon */}
+                  <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200/80 space-y-2">
+                    <div className="flex items-center gap-2 font-bold text-xs text-slate-900">
+                      <span className="w-5 h-5 rounded-full bg-indigo-600 text-white flex items-center justify-center text-[10px] shrink-0">1</span>
+                      <span>عبر شريط العنوان أعلى المتصفح (Chrome أو Edge):</span>
+                    </div>
+                    <p className="text-[11px] text-slate-600 leading-relaxed pr-7">
+                      في أعلى شاشة الكمبيوتر في شريط عنوان الموقع (URL) بجانب القفل 🔐، ابحث عن أيقونة الكمبيوتر وبداخلها سهم لأسفل 💻⬇️ أو علامة ➕ ورسالة <strong className="text-indigo-900 font-bold">"تثبيت التطبيق" (Install)</strong> واضغط عليها فوراً!
+                    </p>
+                  </div>
+
+                  {/* Method 2: Browser 3-Dots Menu */}
+                  <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200/80 space-y-2">
+                    <div className="flex items-center gap-2 font-bold text-xs text-slate-900">
+                      <span className="w-5 h-5 rounded-full bg-indigo-600 text-white flex items-center justify-center text-[10px] shrink-0">2</span>
+                      <span>عبر قائمة المتصفح الرئيسية (النقاط الثلاث ⚙️):</span>
+                    </div>
+                    <ol className="list-decimal list-inside text-[11px] text-slate-600 space-y-1 pr-7 leading-relaxed">
+                      <li>اضغط على زر النقاط الثلاث <strong>⋮</strong> أو <strong>⋯</strong> في أعلى يمين أو يسار المتصفح.</li>
+                      <li>اختر خيار <strong>"تثبيت المنصة المدرسية" (Install)</strong>.</li>
+                      <li>إذا لم تظهر، اختر <strong>"الحفظ والمشاركة" (Save and Share)</strong> ثم <strong>"إنشاء اختصار..." (Create Shortcut)</strong>.</li>
+                      <li>تأكد من وضع إشارة صح ✅ على خيار <strong>"فتح كنافذة مستقلة" (Open as window)</strong> واضغط <strong>إنشاء</strong>.</li>
+                    </ol>
+                  </div>
+
+                  {/* Benefit Banner */}
+                  <div className="bg-emerald-50 border border-emerald-100 p-3 rounded-xl flex items-start gap-2.5 text-xs text-emerald-950">
+                    <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+                    <div>
+                      <span className="font-extrabold text-emerald-900 block">مميزات فتح المنصة من أيقونة الكمبيوتر:</span>
+                      <p className="text-[11px] text-emerald-800 mt-0.5 leading-relaxed">
+                        تفتح المنصة في شاشة كاملة وبدون أشرطة متصفح، مع سرعة فائقة في استجابة المزامنة والوصول الفوري لبيانات المدرسة.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Footer */}
+              <div className="bg-slate-50 p-4 border-t border-slate-100 flex justify-between items-center">
+                <button
+                  type="button"
+                  onClick={() => window.open(window.location.href, '_blank')}
+                  className="text-xs font-bold text-indigo-700 hover:text-indigo-900 underline flex items-center gap-1 cursor-pointer"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  <span>فتح في تبويب جديد مستقل</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowDesktopInstallModal(false)}
+                  className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition cursor-pointer"
+                >
+                  إغلاق
                 </button>
               </div>
             </motion.div>

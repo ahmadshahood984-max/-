@@ -1,22 +1,24 @@
 {
   "short_name": "المدرسة الدولية",
-  "name": "المدرسة الدولية - بوابة أولياء الأمور والمعلمين",
+  "name": "المدرسة الدولية - المنصة المدرسية الموحدة",
+  "description": "تطبيق المنصة المدرسية الموحدة لإدارة المدرسة والتواصل مع الكادر والطلاب وأولياء الأمور",
   "icons": [
     {
-      "src": "icon.png",
+      "src": "/icon.png",
       "type": "image/png",
       "sizes": "192x192"
     },
     {
-      "src": "icon.png",
+      "src": "/icon.png",
       "type": "image/png",
       "sizes": "512x512",
       "purpose": "any maskable"
     }
   ],
   "start_url": "/",
-  "background_color": "#4338ca",
+  "scope": "/",
+  "background_color": "#0f172a",
   "theme_color": "#4338ca",
   "display": "standalone",
-  "orientation": "portrait"
+  "orientation": "any"
 }
