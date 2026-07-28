@@ -434,9 +434,8 @@ export default function App() {
     const isIframe = typeof window !== 'undefined' && window.self !== window.top;
     if (isIframe) {
       alert(
-        "💻 لتثبيت التطبيق بنقرة واحدة كأيقونة على سطح مكتب الكمبيوتر (Desktop):\n\n" +
-        "يجب فتح التطبيق في تبويب مستقل خارج إطار المعاينة.\n" +
-        "سنفتح لك التطبيق بتبويب جديد الآن، واضغط هناك على زر 'تثبيت على الكمبيوتر' وسينشئ أيقونة سطح المكتب فوراً! 🚀"
+        "💻 لتثبيت التطبيق أو تنزيل اختصار سطح المكتب للكمبيوتر (Desktop):\n\n" +
+        "سنفتح لك المنصة في تبويب جديد مستقل الآن، ومن هناك يمكنك تنزيل ملف الاختصار أو تثبيت الأيقونة بنقرة واحدة! 🚀"
       );
       window.open(window.location.href, '_blank');
       return;
@@ -449,10 +448,25 @@ export default function App() {
         (window as any).clearDeferredPrompt?.();
         setPwaPrompt(null);
         alert('🎉 تهانينا! تم تثبيت تطبيق المدرسة الدولية بنجاح كبرنامج وأيقونة على سطح مكتب الكمبيوتر.');
+        return;
       }
-    } else {
-      setShowDesktopInstallModal(true);
     }
+    setShowDesktopInstallModal(true);
+  };
+
+  const downloadDesktopShortcut = () => {
+    const currentUrl = window.location.href;
+    const fileContent = `[InternetShortcut]\nURL=${currentUrl}\nIDList=\nHotKey=0\n[{000214A0-0000-0000-C000-00000000046C}]\nProp3=19,11\n`;
+    const blob = new Blob([fileContent], { type: 'application/x-mswinurl' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'المدرسة_الدولية.url';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    alert('✅ تم تنزيل ملف الاختصار (المدرسة_الدولية.url) بنجاح!\n\nانقل الملف إلى سطح المكتب على جهازك، ويمكنك الآن ضغطه مرتين لفتح المنصة فوراً وبسرعة.');
   };
 
   const requestNotificationPermission = async () => {
@@ -1471,25 +1485,51 @@ export default function App() {
 
               {/* Body Content */}
               <div className="p-6 space-y-5 max-h-[75vh] overflow-y-auto">
-                {/* One-Click Action Trigger */}
-                <div className="bg-indigo-50 border border-indigo-100 p-4 rounded-2xl text-center space-y-3">
-                  <div className="space-y-1">
-                    <span className="inline-block bg-indigo-600 text-white text-[10px] font-extrabold px-2.5 py-0.5 rounded-full">
-                      تثبيت تلقائي بنقرة واحدة
+                {/* Method A: Instant Direct Download of Desktop Shortcut (.url file) */}
+                <div className="bg-gradient-to-br from-amber-50 via-indigo-50/50 to-blue-50 border border-amber-200/80 p-4 rounded-2xl space-y-3">
+                  <div className="flex items-center gap-2">
+                    <span className="bg-amber-500 text-white text-[10px] font-black px-2.5 py-0.5 rounded-full shadow-xs">
+                      الخيار الأسرع ⚡
                     </span>
-                    <h4 className="font-extrabold text-sm text-indigo-950">
-                      هل تريد إضافة أيقونة المنصة إلى سطح المكتب الآن؟
+                    <h4 className="font-extrabold text-xs text-slate-900">
+                      1. تنزيل ملف اختصار سطح المكتب (تثبيت فوري)
                     </h4>
+                  </div>
+                  <p className="text-[11px] text-slate-700 leading-relaxed">
+                    اضغط على الزر أدناه لتنزيل ملف اختصار مخصص <strong className="text-indigo-900">(المدرسة_الدولية.url)</strong>، ثم انقل الملف إلى سطح مكتب جهازك أو اضغطه مرتين لفتح المنصة فوراً من الكمبيوتر.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={downloadDesktopShortcut}
+                    className="w-full bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-slate-950 font-black py-3 px-4 rounded-xl shadow-md transition cursor-pointer flex items-center justify-center gap-2 text-xs border border-amber-400"
+                  >
+                    <Download className="w-4 h-4 text-slate-950" />
+                    <span>تنزيل اختصار سطح المكتب الآن (.url) 📥</span>
+                  </button>
+                </div>
+
+                {/* Method B: PWA Browser App Installation */}
+                <div className="bg-slate-50 border border-slate-200 p-4 rounded-2xl space-y-3">
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <span className="bg-indigo-600 text-white text-[10px] font-extrabold px-2.5 py-0.5 rounded-full">
+                        الخيار المتقدم 💻
+                      </span>
+                      <h4 className="font-extrabold text-xs text-slate-900">
+                        2. تثبيت كبرنامج وأيقونة عبر المتصفح (Chrome / Edge)
+                      </h4>
+                    </div>
                     <p className="text-[11px] text-slate-600 leading-relaxed">
-                      عند التثبيت، ستظهر أيقونة المنصة المدرسية الموحدة على سطح مكتب الكمبيوتر وقائمة ابدأ (Start) لفتحها بنقرة واحدة كأي برنامج آخر.
+                      تحويل الموقع إلى برنامج مستقل يظهر على سطح المكتب وقائمة ابدأ (Start) بدون أشرطة المتصفح.
                     </p>
                   </div>
 
                   <button
+                    type="button"
                     onClick={async () => {
                       const isIframe = typeof window !== 'undefined' && window.self !== window.top;
                       if (isIframe) {
-                        alert("💻 سنقوم بفتح المنصة في تبويب مستقل جديد الآن، ثم انقر على 'تثبيت التطبيق' لتنزيله فوراً!");
+                        alert("💻 سنقوم بفتح المنصة في تبويب جديد الآن، ومن هناك يمكنك النقر على تثبيت لإنشاء الأيقونة فوراً!");
                         window.open(window.location.href, '_blank');
                         return;
                       }
@@ -1500,60 +1540,36 @@ export default function App() {
                           (window as any).clearDeferredPrompt?.();
                           setPwaPrompt(null);
                           setShowDesktopInstallModal(false);
-                          alert('🎉 تهانينا! تم تثبيت المنصة المدرسية بنجاح على سطح مكتب الكمبيوتر.');
+                          alert('🎉 تهانينا! تم تثبيت المنصة المدرسية بنجاح كبرنامج وأيقونة على سطح مكتب الكمبيوتر.');
                         }
                       } else {
-                        alert("💡 يرجى اتباع الطرق الموضحة بالأسفل لتثبيت الأيقونة من شريط عنوان المتصفح أو القائمة الرئيسية!");
+                        alert("💡 يرجى اتباع خطوات المتصفح البسيطة الموضحة في الأسفل لإنشاء الاختصار!");
                       }
                     }}
-                    className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-5 rounded-xl shadow-md shadow-indigo-200 transition cursor-pointer flex items-center justify-center gap-2 text-xs"
+                    className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 px-4 rounded-xl shadow-xs transition cursor-pointer flex items-center justify-center gap-2 text-xs"
                   >
-                    <Download className="w-4 h-4 text-amber-300" />
-                    <span>تثبيت التطبيق الآن على الكمبيوتر 💻</span>
+                    <Laptop className="w-4 h-4 text-amber-300" />
+                    <span>تثبيت الأيقونة عبر المتصفح ⚙️</span>
                   </button>
-                </div>
 
-                {/* Clear Visual Step-by-Step Instructions */}
-                <div className="space-y-3">
-                  <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wider flex items-center gap-2 border-b border-slate-100 pb-2">
-                    <Monitor className="w-4 h-4 text-indigo-600" />
-                    <span>طرق تثبيت الأيقونة على الكمبيوتر (Windows / Mac / Chrome / Edge)</span>
-                  </h4>
-
-                  {/* Method 1: Address Bar Icon */}
-                  <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200/80 space-y-2">
-                    <div className="flex items-center gap-2 font-bold text-xs text-slate-900">
-                      <span className="w-5 h-5 rounded-full bg-indigo-600 text-white flex items-center justify-center text-[10px] shrink-0">1</span>
-                      <span>عبر شريط العنوان أعلى المتصفح (Chrome أو Edge):</span>
-                    </div>
-                    <p className="text-[11px] text-slate-600 leading-relaxed pr-7">
-                      في أعلى شاشة الكمبيوتر في شريط عنوان الموقع (URL) بجانب القفل 🔐، ابحث عن أيقونة الكمبيوتر وبداخلها سهم لأسفل 💻⬇️ أو علامة ➕ ورسالة <strong className="text-indigo-900 font-bold">"تثبيت التطبيق" (Install)</strong> واضغط عليها فوراً!
-                    </p>
-                  </div>
-
-                  {/* Method 2: Browser 3-Dots Menu */}
-                  <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200/80 space-y-2">
-                    <div className="flex items-center gap-2 font-bold text-xs text-slate-900">
-                      <span className="w-5 h-5 rounded-full bg-indigo-600 text-white flex items-center justify-center text-[10px] shrink-0">2</span>
-                      <span>عبر قائمة المتصفح الرئيسية (النقاط الثلاث ⚙️):</span>
-                    </div>
-                    <ol className="list-decimal list-inside text-[11px] text-slate-600 space-y-1 pr-7 leading-relaxed">
-                      <li>اضغط على زر النقاط الثلاث <strong>⋮</strong> أو <strong>⋯</strong> في أعلى يمين أو يسار المتصفح.</li>
-                      <li>اختر خيار <strong>"تثبيت المنصة المدرسية" (Install)</strong>.</li>
-                      <li>إذا لم تظهر، اختر <strong>"الحفظ والمشاركة" (Save and Share)</strong> ثم <strong>"إنشاء اختصار..." (Create Shortcut)</strong>.</li>
-                      <li>تأكد من وضع إشارة صح ✅ على خيار <strong>"فتح كنافذة مستقلة" (Open as window)</strong> واضغط <strong>إنشاء</strong>.</li>
+                  <div className="bg-white p-3 rounded-xl border border-slate-200 text-[11px] text-slate-600 space-y-1.5 leading-relaxed">
+                    <p className="font-bold text-slate-800">خطوات تثبيت الأيقونة من متصفح الكمبيوتر بنفسك:</p>
+                    <ol className="list-decimal list-inside space-y-1 pr-1 text-[10.5px]">
+                      <li>في أعلى متصفح Chrome أو Edge بجانب رابط الموقع 🔐، اضغط على أيقونة (تثبيت التطبيق 💻⬇️).</li>
+                      <li>أو اضغط زر النقاط الثلاث (<strong>⋮</strong>) في أقصى يمين المتصفح ➔ اختر <strong>"الحفظ والمشاركة" (Save and share)</strong> ➔ ثم <strong>"إنشاء اختصار" (Create shortcut...)</strong>.</li>
+                      <li>ضع علامة صح (✅) على خيار <strong>"فتح كنافذة" (Open as window)</strong> واضغط <strong>إنشاء (Create)</strong>.</li>
                     </ol>
                   </div>
+                </div>
 
-                  {/* Benefit Banner */}
-                  <div className="bg-emerald-50 border border-emerald-100 p-3 rounded-xl flex items-start gap-2.5 text-xs text-emerald-950">
-                    <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
-                    <div>
-                      <span className="font-extrabold text-emerald-900 block">مميزات فتح المنصة من أيقونة الكمبيوتر:</span>
-                      <p className="text-[11px] text-emerald-800 mt-0.5 leading-relaxed">
-                        تفتح المنصة في شاشة كاملة وبدون أشرطة متصفح، مع سرعة فائقة في استجابة المزامنة والوصول الفوري لبيانات المدرسة.
-                      </p>
-                    </div>
+                {/* Benefit Banner */}
+                <div className="bg-emerald-50 border border-emerald-100 p-3 rounded-xl flex items-start gap-2.5 text-xs text-emerald-950">
+                  <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-extrabold text-emerald-900 block">مميزات الفتح من أيقونة سطح المكتب:</span>
+                    <p className="text-[11px] text-emerald-800 mt-0.5 leading-relaxed">
+                      وصول سريع وسهل بضغطة واحدة، مزامنة حية وفورية للمدرسة، وتجربة سلسة دون الحاجة للبحث عن الرابط كل مرة.
+                    </p>
                   </div>
                 </div>
               </div>
