@@ -1084,6 +1084,148 @@ ${directivesFormatted}
     });
   };
 
+  const handleSendDirectMessageWhatsApp = () => {
+    if (!directorChatRecipientId) {
+      alert('الرجاء اختيار المستلم أولاً.');
+      return;
+    }
+    if (!directorMessageText.trim()) {
+      alert('الرجاء كتابة مضمون الرسالة أولاً.');
+      return;
+    }
+
+    let recipientName = '';
+    let recipientPhone = '';
+
+    if (directorChatRecipientRole === 'teacher') {
+      const teacher = teachers.find(t => t.id === directorChatRecipientId);
+      recipientName = teacher?.name || 'المعلم';
+      recipientPhone = teacher?.phone || '';
+    } else {
+      const parent = parents.find(p => p.id === directorChatRecipientId);
+      recipientName = parent?.name || 'ولي الأمر';
+      recipientPhone = parent?.phone || '';
+    }
+
+    const finalType = directorNotificationType === 'custom' ? directorCustomTypeLabel || 'إشعار مخصص' : directorNotificationType;
+
+    const defaultGenerated = `💚 *المدرسة الدولية الخاصة* 💚\n📢 *إشعار رسالة إدارية رسمية*\n═════════════════════════\n\n🌹 *السلام عليكم ورحمة الله وبركاته*\nإلى المحترم/ة: *{اسم_المستلم}*\n\n📌 *نوع الإشعار:* *{نوع_الإشعار}*\n\n📝 *مضمون الرسالة:*\n{مضمون_الرسالة}\n\n═════════════════════════\n✨ *شاكرين لكم حسن التعاون*\n🏫 *إدارة المدرسة الدولية الخاصة*`;
+
+    const savedTemplate = localStorage.getItem('school_whatsapp_direct_message_template');
+    let initialMsg = savedTemplate || defaultGenerated;
+
+    initialMsg = initialMsg
+      .replace(/{اسم_المستلم}/g, recipientName)
+      .replace(/{نوع_الإشعار}/g, finalType)
+      .replace(/{مضمون_الرسالة}/g, directorMessageText.trim());
+
+    const waKey = `dir_msg_${directorChatRecipientId}_${Date.now()}`;
+
+    setWaModalState({
+      isOpen: true,
+      title: `تعديل وصياغة إشعار الواتساب إلى (${recipientName})`,
+      studentName: recipientName,
+      recipientPhone: recipientPhone,
+      initialMessage: initialMsg,
+      defaultTemplateText: defaultGenerated,
+      templateStorageKey: 'school_whatsapp_direct_message_template',
+      waKey: waKey,
+      studentId: directorChatRecipientId,
+      quickTags: [
+        { label: '+ اسم المستلم', textToInsert: ' {اسم_المستلم} ' },
+        { label: '+ نوع الإشعار', textToInsert: ' {نوع_الإشعار} ' },
+        { label: '+ مضمون الرسالة', textToInsert: ' {مضمون_الرسالة} ' },
+      ]
+    });
+  };
+
+  const handleCustomizeDirectMessageTemplate = () => {
+    const sampleName = 'أحمد محمود العلي';
+    const sampleType = 'توجيه إداري';
+    const sampleContent = 'يرجى مراجعة إدارة المدرسة لمتابعة الترتيبات الرسمية والتوجيهات الإدارية.';
+
+    const defaultGenerated = `💚 *المدرسة الدولية الخاصة* 💚\n📢 *إشعار رسالة إدارية رسمية*\n═════════════════════════\n\n🌹 *السلام عليكم ورحمة الله وبركاته*\nإلى المحترم/ة: *{اسم_المستلم}*\n\n📌 *نوع الإشعار:* *{نوع_الإشعار}*\n\n📝 *مضمون الرسالة:*\n{مضمون_الرسالة}\n\n═════════════════════════\n✨ *شاكرين لكم حسن التعاون*\n🏫 *إدارة المدرسة الدولية الخاصة*`;
+
+    const savedTemplate = localStorage.getItem('school_whatsapp_direct_message_template');
+    const initialMsg = savedTemplate || defaultGenerated;
+
+    setWaModalState({
+      isOpen: true,
+      title: 'تخصيص القالب الافتراضي لمراسلات الواتساب المباشرة',
+      studentName: sampleName,
+      recipientPhone: '',
+      initialMessage: initialMsg
+        .replace(/{اسم_المستلم}/g, sampleName)
+        .replace(/{نوع_الإشعار}/g, sampleType)
+        .replace(/{مضمون_الرسالة}/g, sampleContent),
+      defaultTemplateText: defaultGenerated,
+      templateStorageKey: 'school_whatsapp_direct_message_template',
+      waKey: `template_direct_msg_preview`,
+      studentId: 'sample',
+      quickTags: [
+        { label: '+ اسم المستلم', textToInsert: ' {اسم_المستلم} ' },
+        { label: '+ نوع الإشعار', textToInsert: ' {نوع_الإشعار} ' },
+        { label: '+ مضمون الرسالة', textToInsert: ' {مضمون_الرسالة} ' },
+      ]
+    });
+  };
+
+  const handleReplyWhatsAppForMessageItem = (msg: any) => {
+    let targetPhone = '';
+    let targetName = '';
+
+    if (msg.senderRole === 'teacher') {
+      const teacher = teachers.find(t => t.id === msg.senderId);
+      targetName = teacher?.name || msg.senderName;
+      targetPhone = teacher?.phone || '';
+    } else if (msg.senderRole === 'parent') {
+      const parent = parents.find(p => p.id === msg.senderId);
+      targetName = parent?.name || msg.senderName;
+      targetPhone = parent?.phone || '';
+    } else if (msg.receiverRole === 'teacher') {
+      const teacher = teachers.find(t => t.id === msg.receiverId);
+      targetName = teacher?.name || msg.receiverName;
+      targetPhone = teacher?.phone || '';
+    } else if (msg.receiverRole === 'parent') {
+      const parent = parents.find(p => p.id === msg.receiverId);
+      targetName = parent?.name || msg.receiverName;
+      targetPhone = parent?.phone || '';
+    } else {
+      targetName = msg.senderName || msg.receiverName;
+    }
+
+    const cleanContent = msg.content.replace(/\[مرفق_صورة:\s*([^\]]+)\]/g, '').replace(/\[مرفق_فيديو:\s*([^\]]+)\]/g, '');
+
+    const defaultGenerated = `💚 *المدرسة الدولية الخاصة* 💚\n📢 *إشعار رسالة إدارية رسمية*\n═════════════════════════\n\n🌹 *السلام عليكم ورحمة الله وبركاته*\nإلى المحترم/ة: *{اسم_المستلم}*\n\n📌 *نوع الإشعار:* *متابعة مراسلة*\n\n📝 *مضمون الرسالة:*\n{مضمون_الرسالة}\n\n═════════════════════════\n✨ *إدارة المدرسة الدولية الخاصة*`;
+
+    const savedTemplate = localStorage.getItem('school_whatsapp_direct_message_template');
+    let initialMsg = savedTemplate || defaultGenerated;
+
+    initialMsg = initialMsg
+      .replace(/{اسم_المستلم}/g, targetName)
+      .replace(/{نوع_الإشعار}/g, 'متابعة مراسلة')
+      .replace(/{مضمون_الرسالة}/g, cleanContent);
+
+    const waKey = `dir_reply_msg_${msg.id}`;
+
+    setWaModalState({
+      isOpen: true,
+      title: `تعديل وصياغة رسالة الواتساب إلى (${targetName})`,
+      studentName: targetName,
+      recipientPhone: targetPhone,
+      initialMessage: initialMsg,
+      defaultTemplateText: defaultGenerated,
+      templateStorageKey: 'school_whatsapp_direct_message_template',
+      waKey: waKey,
+      studentId: msg.senderId || msg.receiverId,
+      quickTags: [
+        { label: '+ اسم المستلم', textToInsert: ' {اسم_المستلم} ' },
+        { label: '+ نوع الإشعار', textToInsert: ' {نوع_الإشعار} ' },
+        { label: '+ مضمون الرسالة', textToInsert: ' {مضمون_الرسالة} ' },
+      ]
+    });
+  };
+
   // Forms states
   const [showTeacherForm, setShowTeacherForm] = useState(false);
   const [editingTeacher, setEditingTeacher] = useState<Teacher | null>(null);
@@ -7174,40 +7316,63 @@ ${sampleEval}
                       />
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (!directorChatRecipientId) {
-                          alert('الرجاء اختيار مستلم أولاً');
-                          return;
-                        }
-                        if (!directorMessageText.trim()) {
-                          alert('الرجاء كتابة محتوى الرسالة');
-                          return;
-                        }
+                    <div className="space-y-2 pt-2">
+                      <button
+                        type="button"
+                        onClick={handleSendDirectMessageWhatsApp}
+                        className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs py-3 rounded-xl transition cursor-pointer flex items-center justify-center gap-2 shadow-md shadow-emerald-100"
+                      >
+                        <MessageSquare className="w-4 h-4 text-emerald-200" />
+                        <span>مراسلة عبر الواتساب (مع التخصيص) 💬</span>
+                      </button>
 
-                        const recipientName = directorChatRecipientRole === 'teacher'
-                          ? teachers.find(t => t.id === directorChatRecipientId)?.name || 'معلم'
-                          : parents.find(p => p.id === directorChatRecipientId)?.name || 'ولي أمر';
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (!directorChatRecipientId) {
+                              alert('الرجاء اختيار مستلم أولاً');
+                              return;
+                            }
+                            if (!directorMessageText.trim()) {
+                              alert('الرجاء كتابة محتوى الرسالة');
+                              return;
+                            }
 
-                        const finalType = directorNotificationType === 'custom' ? directorCustomTypeLabel : directorNotificationType;
-                        const finalContent = finalType !== 'عام' ? `[${finalType}] ${directorMessageText}` : directorMessageText;
+                            const recipientName = directorChatRecipientRole === 'teacher'
+                              ? teachers.find(t => t.id === directorChatRecipientId)?.name || 'معلم'
+                              : parents.find(p => p.id === directorChatRecipientId)?.name || 'ولي أمر';
 
-                        addNotification({
-                          receiverId: directorChatRecipientId,
-                          receiverName: recipientName,
-                          receiverRole: directorChatRecipientRole,
-                          content: finalContent
-                        }).then(() => {
-                          setDirectorMessageText('');
-                          alert('تم إرسال الرسالة وتسليمها فوراً للمستلم بنجاح! 📤');
-                        });
-                      }}
-                      className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs py-3 rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5 shadow-md shadow-indigo-100"
-                    >
-                      <Send className="w-4 h-4" />
-                      <span>إرسال الرسالة الإدارية</span>
-                    </button>
+                            const finalType = directorNotificationType === 'custom' ? directorCustomTypeLabel : directorNotificationType;
+                            const finalContent = finalType !== 'عام' ? `[${finalType}] ${directorMessageText}` : directorMessageText;
+
+                            addNotification({
+                              receiverId: directorChatRecipientId,
+                              receiverName: recipientName,
+                              receiverRole: directorChatRecipientRole,
+                              content: finalContent
+                            }).then(() => {
+                              setDirectorMessageText('');
+                              alert('تم إرسال الرسالة وتسليمها فوراً للمستلم بنجاح! 📤');
+                            });
+                          }}
+                          className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[11px] py-2.5 px-2 rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5 shadow-sm"
+                        >
+                          <Send className="w-3.5 h-3.5" />
+                          <span>إرسال بالمنصة 📤</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={handleCustomizeDirectMessageTemplate}
+                          className="bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 font-bold text-[11px] py-2.5 px-2 rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5 shadow-2xs"
+                          title="تعديل صياغة والقالب الافتراضي لمراسلات الواتساب"
+                        >
+                          <Settings className="w-3.5 h-3.5 text-amber-400" />
+                          <span>تخصيص القالب ⚙️</span>
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 </div>
 
@@ -7349,9 +7514,21 @@ ${sampleEval}
                                     }}
                                     className="bg-indigo-50 text-indigo-700 hover:bg-indigo-100 px-2.5 py-1 rounded-lg transition text-[10px] font-bold border border-indigo-100 cursor-pointer shadow-xs"
                                   >
-                                    ↩️ رد على الرسالة
+                                    ↩️ رد على المنصة
                                   </button>
                                 )}
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleReplyWhatsAppForMessageItem(msg);
+                                  }}
+                                  className="bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 hover:border-emerald-300 px-2.5 py-1 rounded-lg transition text-[10px] font-bold cursor-pointer shadow-2xs flex items-center gap-1"
+                                  title="مراسلة وتخصيص نص الرسالة عبر الواتساب"
+                                >
+                                  <MessageSquare className="w-3 h-3 text-emerald-600" />
+                                  <span>مراسلة واتساب 💬</span>
+                                </button>
                                 {isUnread && (
                                   <button
                                     onClick={(e) => {
