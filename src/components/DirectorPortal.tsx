@@ -722,10 +722,13 @@ export default function DirectorPortal({
   // WhatsApp Customizer Modal State
   const [waModalState, setWaModalState] = useState<{
     isOpen: boolean;
+    title?: string;
     studentName: string;
     recipientPhone: string;
     initialMessage: string;
     defaultTemplateText: string;
+    templateStorageKey?: string;
+    quickTags?: { label: string; textToInsert: string }[];
     waKey: string;
     studentId: string;
   } | null>(null);
@@ -957,7 +960,8 @@ ${directivesFormatted}
 
     openWhatsAppDirectly(finalPhone, finalMessage, targetType);
 
-    const record = recordWhatsAppSent(waModalState.waKey, waModalState.studentName, 'monthly_eval');
+    const category = waModalState.waKey.includes('_att_') ? 'attendance' : 'monthly_eval';
+    const record = recordWhatsAppSent(waModalState.waKey, waModalState.studentName, category);
     setWhatsappSentRecords(prev => ({
       ...prev,
       [waModalState.waKey]: record
@@ -976,6 +980,108 @@ ${directivesFormatted}
     }
 
     setWaModalState(null);
+  };
+
+  const handleSendAttendanceWhatsApp = (
+    student: Student,
+    record: { status: 'present' | 'absent' | 'late' | 'excused'; notes?: string }
+  ) => {
+    const parentObj = parents.find(p => p.childrenIds.includes(student.id) || p.id === student.parentId);
+    const targetPhone = parentObj?.phone || '';
+    const studentClass = classes.find(c => c.id === student.classId);
+
+    let statusText = 'حاضر ✅';
+    if (record.status === 'absent') statusText = 'غائب ⚠️';
+    else if (record.status === 'late') statusText = 'متأخر ⏰';
+    else if (record.status === 'excused') statusText = 'غائب بعذر مقبول 📄';
+
+    const defaultGenerated = `💚 *المدرسة الدولية الخاصة* 💚\n📢 *إشعار رصد الحضور والغياب اليومي*\n═════════════════════════\n\n🌹 *السلام عليكم ورحمة الله وبركاته*\nإلى ولي أمر الطالب/ة المحترم/ة:\n\n👤 *اسم الطالب:* *${student.name}*\n🏫 *الصف والشعبة:* *${studentClass?.name || 'الصف الدراسي'}*\n📅 *تاريخ الرصد:* *${attendanceDateForDir}*\n📌 *حالة الحضور اليوم:* *${statusText}*\n${record.notes && record.notes.trim() ? `📝 *ملاحظات الإدارة:* ${record.notes.trim()}\n` : ''}\n═════════════════════════\n✨ *شاكرين لكم حسن التعاون مع إدارة المدرسة*\n🏫 *إدارة المدرسة الدولية الخاصة*`;
+
+    const savedTemplate = localStorage.getItem('school_whatsapp_attendance_template');
+    let initialMsg = defaultGenerated;
+    if (savedTemplate) {
+      initialMsg = savedTemplate
+        .replace(/{اسم_الطالب}/g, student.name)
+        .replace(/{الصف}/g, studentClass?.name || 'الصف الدراسي')
+        .replace(/{التاريخ}/g, attendanceDateForDir)
+        .replace(/{حالة_الحضور}/g, statusText)
+        .replace(/{الملاحظات}/g, record.notes?.trim() || 'لا توجد ملاحظات إضافية');
+    }
+
+    const waKey = `${student.id}_att_${attendanceDateForDir}`;
+
+    setWaModalState({
+      isOpen: true,
+      title: `تعديل وصياغة إشعار الحضور والغياب (${student.name})`,
+      studentName: student.name,
+      recipientPhone: targetPhone,
+      initialMessage: initialMsg,
+      defaultTemplateText: defaultGenerated,
+      templateStorageKey: 'school_whatsapp_attendance_template',
+      waKey: waKey,
+      studentId: student.id,
+      quickTags: [
+        { label: '+ اسم الطالب', textToInsert: ' {اسم_الطالب} ' },
+        { label: '+ الصف', textToInsert: ' {الصف} ' },
+        { label: '+ التاريخ', textToInsert: ' {التاريخ} ' },
+        { label: '+ حالة الحضور', textToInsert: ' {حالة_الحضور} ' },
+        { label: '+ الملاحظات', textToInsert: ' {الملاحظات} ' }
+      ]
+    });
+  };
+
+  const handleSendAllAbsentWhatsApp = () => {
+    if (!selectedClassForAttendance) {
+      alert('الرجاء تحديد الصف الدراسي أولاً.');
+      return;
+    }
+    const classStudents = students.filter(s => s.classId === selectedClassForAttendance);
+    const absentOrLateStudents = classStudents.filter(s => {
+      const record = localAttendanceForDir[s.id] || { status: 'present' };
+      return record.status === 'absent' || record.status === 'late' || record.status === 'excused';
+    });
+
+    if (absentOrLateStudents.length === 0) {
+      alert('جميع الطلاب في هذا الصف حاضرون بحالة "حاضر"! لا يوجد طلاب غائبين أو متأخرين لمراسلتهم حالياً.');
+      return;
+    }
+
+    const firstStudent = absentOrLateStudents[0];
+    const record = localAttendanceForDir[firstStudent.id] || { status: 'absent' };
+    handleSendAttendanceWhatsApp(firstStudent, record);
+  };
+
+  const handleCustomizeAttendanceTemplate = () => {
+    const sampleStudentName = 'محمد أحمد علي';
+    const sampleClassName = 'الصف الخامس - الشعبة أ';
+    const defaultGenerated = `💚 *المدرسة الدولية الخاصة* 💚\n📢 *إشعار رصد الحضور والغياب اليومي*\n═════════════════════════\n\n🌹 *السلام عليكم ورحمة الله وبركاته*\nإلى ولي أمر الطالب/ة المحترم/ة:\n\n👤 *اسم الطالب:* *{اسم_الطالب}*\n🏫 *الصف والشعبة:* *{الصف}*\n📅 *تاريخ الرصد:* *{التاريخ}*\n📌 *حالة الحضور اليوم:* *{حالة_الحضور}*\n📝 *ملاحظات الإدارة:* {الملاحظات}\n\n═════════════════════════\n✨ *شاكرين لكم حسن التعاون مع إدارة المدرسة*\n🏫 *إدارة المدرسة الدولية الخاصة*`;
+
+    const savedTemplate = localStorage.getItem('school_whatsapp_attendance_template');
+    const initialMsg = savedTemplate || defaultGenerated;
+
+    setWaModalState({
+      isOpen: true,
+      title: 'تخصيص القالب الافتراضي لرسائل الحضور والغياب (الواتساب)',
+      studentName: sampleStudentName,
+      recipientPhone: '',
+      initialMessage: initialMsg
+        .replace(/{اسم_الطالب}/g, sampleStudentName)
+        .replace(/{الصف}/g, sampleClassName)
+        .replace(/{التاريخ}/g, attendanceDateForDir)
+        .replace(/{حالة_الحضور}/g, 'غائب ⚠️')
+        .replace(/{الملاحظات}/g, 'لم يحضر في الموعد المترتب بدون إذن سابق'),
+      defaultTemplateText: defaultGenerated,
+      templateStorageKey: 'school_whatsapp_attendance_template',
+      waKey: `template_att_preview`,
+      studentId: 'sample',
+      quickTags: [
+        { label: '+ اسم الطالب', textToInsert: ' {اسم_الطالب} ' },
+        { label: '+ الصف', textToInsert: ' {الصف} ' },
+        { label: '+ التاريخ', textToInsert: ' {التاريخ} ' },
+        { label: '+ حالة الحضور', textToInsert: ' {حالة_الحضور} ' },
+        { label: '+ الملاحظات', textToInsert: ' {الملاحظات} ' }
+      ]
+    });
   };
 
   // Forms states
@@ -6078,6 +6184,26 @@ ${sampleEval}
                   </div>
                   <div className="flex flex-wrap gap-2 justify-end">
                     <button
+                      type="button"
+                      onClick={handleCustomizeAttendanceTemplate}
+                      className="bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 text-xs font-semibold py-2 px-3.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-2xs"
+                      title="تعديل القالب المعتمد وإضافة التنسيقات الخاصة"
+                    >
+                      <Settings className="w-4 h-4 text-amber-400" />
+                      <span>تخصيص قالب الواتساب ⚙️</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSendAllAbsentWhatsApp}
+                      disabled={!selectedClassForAttendance}
+                      className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white border border-emerald-500 text-xs font-bold py-2 px-4 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-xs"
+                      title="مراسلة أولياء أمور الطلاب الغائبين والمتأخرين بالواتساب"
+                    >
+                      <MessageSquare className="w-4 h-4 text-emerald-200" />
+                      <span>مراسلة الغائبين بالواتساب 💬</span>
+                    </button>
+                    <button
+                      type="button"
                       onClick={handleExportAttendanceToExcel}
                       disabled={!selectedClassForAttendance}
                       className="bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 border border-slate-700 text-xs font-semibold py-2 px-4 rounded-xl transition cursor-pointer flex items-center gap-1.5"
@@ -6227,11 +6353,12 @@ ${sampleEval}
                         <table className="w-full border-collapse text-right">
                           <thead>
                             <tr className="bg-slate-50/30 text-slate-500 text-xs font-bold border-b border-slate-100">
-                              <th className="p-4 w-24 text-right">رقم القيد</th>
+                              <th className="p-4 w-20 text-right">رقم القيد</th>
                               <th className="p-4 text-right">اسم الطالب</th>
                               <th className="p-4 hidden sm:table-cell text-right">ولي الأمر والتواصل</th>
-                              <th className="p-4 text-center w-80">حالة الحضور والغياب</th>
-                              <th className="p-4 text-right w-72">ملاحظات إضافية</th>
+                              <th className="p-4 text-center w-72">حالة الحضور والغياب</th>
+                              <th className="p-4 text-right w-60">ملاحظات إضافية</th>
+                              <th className="p-4 text-center w-48">إشعار الواتساب 💬</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-slate-100 text-xs text-slate-700">
@@ -6348,13 +6475,49 @@ ${sampleEval}
                                       className="w-full bg-slate-50 border border-slate-200 hover:border-slate-300 rounded-lg px-2.5 py-1.5 text-xs text-slate-600 focus:outline-none focus:ring-2 focus:ring-indigo-100 focus:bg-white transition text-right"
                                     />
                                   </td>
+
+                                  {/* WhatsApp Action Button */}
+                                  <td className="p-4 text-center">
+                                    {(() => {
+                                      const attWaKey = `${student.id}_att_${attendanceDateForDir}`;
+                                      const sentRecord = whatsappSentRecords[attWaKey];
+
+                                      return (
+                                        <div className="flex flex-col items-center justify-center gap-1">
+                                          <button
+                                            type="button"
+                                            onClick={() => handleSendAttendanceWhatsApp(student, record)}
+                                            className="bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 hover:border-emerald-300 text-[11px] font-bold py-1.5 px-3 rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5 shadow-2xs hover:shadow-xs"
+                                            title="تخصيص وصياغة إشعار الواتساب وإرساله لولي الأمر"
+                                          >
+                                            <MessageSquare className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                                            <span>مراسلة واتساب 💬</span>
+                                          </button>
+                                          {sentRecord ? (
+                                            <span className="inline-flex items-center gap-1 text-[9.5px] font-bold text-emerald-700 bg-emerald-100/60 px-2 py-0.5 rounded-full border border-emerald-200" title={`تم الإرسال بتاريخ: ${sentRecord.dateLabel}`}>
+                                              <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                                              تم الإرسال {sentRecord.timeLabel} 🟢
+                                            </span>
+                                          ) : parent?.phone ? (
+                                            <span className="text-[9.5px] text-slate-400 font-mono">
+                                              📱 {parent.phone}
+                                            </span>
+                                          ) : (
+                                            <span className="text-[9.5px] text-amber-600 font-medium">
+                                              ⚠️ لا يوجد رقم
+                                            </span>
+                                          )}
+                                        </div>
+                                      );
+                                    })()}
+                                  </td>
                                 </tr>
                               );
                             })}
 
                             {classStudents.length === 0 && (
                               <tr>
-                                <td colSpan={5} className="p-8 text-center text-slate-400 italic">
+                                <td colSpan={6} className="p-8 text-center text-slate-400 italic">
                                   لا يوجد طلاب مضافين لهذا الصف بعد. يمكنك إضافة طلاب من صفحة "شؤون الطلاب".
                                 </td>
                               </tr>
@@ -8831,12 +8994,14 @@ ${sampleEval}
           <WhatsAppMessageCustomizerModal
             isOpen={waModalState.isOpen}
             onClose={() => setWaModalState(null)}
+            title={waModalState.title || 'تعديل وصياغة رسالة الواتساب لولي الأمر'}
             studentName={waModalState.studentName}
             studentId={waModalState.studentId}
             recipientPhone={waModalState.recipientPhone}
             initialMessage={waModalState.initialMessage}
             defaultTemplateText={waModalState.defaultTemplateText}
-            templateStorageKey="school_whatsapp_monthly_template"
+            templateStorageKey={waModalState.templateStorageKey || 'school_whatsapp_monthly_template'}
+            quickTags={waModalState.quickTags}
             onConfirmSend={handleConfirmSendWhatsAppDirector}
           />
         )}

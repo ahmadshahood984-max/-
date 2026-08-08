@@ -7,7 +7,7 @@ export interface WhatsAppSentRecord {
   timeLabel: string; // e.g. "10:15 ص"
   dateLabel: string; // e.g. "2026/07/22"
   studentName: string;
-  type: 'monthly_eval' | 'behavior' | 'grade' | 'general';
+  type: 'monthly_eval' | 'behavior' | 'grade' | 'general' | 'attendance';
   contextKey: string;
 }
 
@@ -102,7 +102,7 @@ export function getWhatsAppSentRecords(): Record<string, WhatsAppSentRecord> {
 export function recordWhatsAppSent(
   key: string,
   studentName: string,
-  type: 'monthly_eval' | 'behavior' | 'grade' | 'general'
+  type: 'monthly_eval' | 'behavior' | 'grade' | 'general' | 'attendance'
 ): WhatsAppSentRecord {
   const now = new Date();
   const timeLabel = now.toLocaleTimeString('ar-SA', { hour: '2-digit', minute: '2-digit' });
