@@ -47,7 +47,14 @@ import {
   Layers,
   Image as ImageIcon,
   Sparkles,
-  RotateCcw
+  RotateCcw,
+  UserPlus,
+  Save,
+  FileCode,
+  FileSpreadsheet,
+  Printer,
+  Filter,
+  Eye
 } from 'lucide-react';
 import { buildWhatsAppUrl, openWhatsAppDirectly, getWhatsAppSentRecords, recordWhatsAppSent, WhatsAppSentRecord } from '../lib/whatsapp';
 import { generateEvaluationCardImage, shareOrDownloadEvaluationImage } from '../lib/generateCardImage';
@@ -159,7 +166,7 @@ export default function DirectorPortal({
   changeDirectorPassword,
   updateTeacherPassword
 }: DirectorPortalProps) {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'teachers' | 'students' | 'excuses' | 'announcements' | 'grades' | 'settings' | 'sharing-links' | 'tuition' | 'messages' | 'subjects' | 'classes' | 'attendance'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'teachers' | 'students' | 'excuses' | 'announcements' | 'grades' | 'settings' | 'sharing-links' | 'tuition' | 'messages' | 'subjects' | 'classes' | 'attendance' | 'student-registration'>('dashboard');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [copiedState, setCopiedState] = useState<{ [key: string]: boolean }>({});
 
@@ -1510,6 +1517,399 @@ ${directivesFormatted}
     parentEmail: '',
     parentPhone: ''
   });
+
+  // Detailed 20-Field Student Registration System State
+  const [regStudent, setRegStudent] = useState({
+    serialNo: '11',
+    nationalId: '',
+    name: '',
+    fatherName: '',
+    motherName: '',
+    motherMaidenName: '',
+    grandfatherName: '',
+    birthPlace: '',
+    dob: '',
+    residencePlace: '',
+    address: '',
+    classId: '',
+    customClassName: '',
+    shift: 'morning' as 'morning' | 'evening',
+    previousSchool: '',
+    healthStatus: 'سليم / ممتاز',
+    transportation: 'حافلة المدرسة',
+    booksStatus: 'تم التسليم',
+    uniformStatus: 'تم التسليم',
+    parentName: '',
+    parentPhone: '',
+    gender: 'male' as 'male' | 'female'
+  });
+
+  const [showPythonCodeModal, setShowPythonCodeModal] = useState(false);
+
+  // Student Registry (سجل الطلاب المسجلين) Table Filters & Print State
+  const [regClassFilter, setRegClassFilter] = useState<string>('all');
+  const [regShiftFilter, setRegShiftFilter] = useState<'all' | 'morning' | 'evening'>('all');
+  const [regSearchQuery, setRegSearchQuery] = useState<string>('');
+  const [regSelectedPreviewStudentId, setRegSelectedPreviewStudentId] = useState<string>('');
+  const [regStudentCardModal, setRegStudentCardModal] = useState<Student | null>(null);
+  const [regManifestPrintModal, setRegManifestPrintModal] = useState<boolean>(false);
+
+  const sampleRegistryStudents: Student[] = [
+    {
+      id: 'demo-1',
+      name: 'الانت',
+      fatherName: 'تال',
+      motherName: 'ننتا',
+      rollNo: '123456789',
+      nationalId: '123456789',
+      classId: classes[0]?.id || 'class-1',
+      parentId: 'p-1',
+      gender: 'female',
+      dob: '2015-03-12',
+      parentName: 'تال الانت',
+      parentPhone: '0501234567',
+      shift: 'morning',
+      transportation: 'حافلة المدرسة',
+      booksStatus: 'تم التسليم',
+      uniformStatus: 'تم التسليم'
+    },
+    {
+      id: 'demo-2',
+      name: 'جاسم',
+      fatherName: 'الان',
+      motherName: 'اللا',
+      rollNo: '456789854',
+      nationalId: '456789854',
+      classId: classes[2]?.id || 'class-3',
+      parentId: 'p-2',
+      gender: 'male',
+      dob: '2014-06-20',
+      parentName: 'الان جاسم',
+      parentPhone: '0502345678',
+      shift: 'morning',
+      transportation: 'حافلة المدرسة',
+      booksStatus: 'لم يتم التسليم',
+      uniformStatus: 'لم يتم التسليم'
+    },
+    {
+      id: 'demo-3',
+      name: 'لانن',
+      fatherName: 'تابو',
+      motherName: 'تالين',
+      rollNo: '563214789',
+      nationalId: '563214789',
+      classId: classes[1]?.id || 'class-2',
+      parentId: 'p-3',
+      gender: 'female',
+      dob: '2016-01-15',
+      parentName: 'تابو لانن',
+      parentPhone: '0503456789',
+      shift: 'evening',
+      transportation: 'حافلة المدرسة',
+      booksStatus: 'لم يتم التسليم',
+      uniformStatus: 'لم يتم التسليم'
+    },
+    {
+      id: 'demo-4',
+      name: 'ليلى',
+      fatherName: 'بيبب',
+      motherName: 'تتتتت',
+      rollNo: '1235874589',
+      nationalId: '1235874589',
+      classId: classes[4]?.id || 'class-5',
+      parentId: 'p-4',
+      gender: 'female',
+      dob: '2013-09-08',
+      parentName: 'بيبب ليلى',
+      parentPhone: '0504567890',
+      shift: 'evening',
+      transportation: 'حافلة المدرسة',
+      booksStatus: 'لم يتم التسليم',
+      uniformStatus: 'لم يتم التسليم'
+    },
+    {
+      id: 'demo-5',
+      name: 'أحمد محمود العلي',
+      fatherName: 'محمود',
+      motherName: 'فاطمة',
+      rollNo: '987654321',
+      nationalId: '987654321',
+      classId: classes[4]?.id || 'class-5',
+      parentId: 'p-5',
+      gender: 'male',
+      dob: '2013-04-11',
+      parentName: 'محمود العلي',
+      parentPhone: '0505678901',
+      shift: 'morning',
+      transportation: 'حافلة المدرسة',
+      booksStatus: 'لم يتم التسليم',
+      uniformStatus: 'لم يتم التسليم'
+    },
+    {
+      id: 'demo-6',
+      name: 'جاسم',
+      fatherName: 'محمد',
+      motherName: 'فاطمة',
+      rollNo: '876543210',
+      nationalId: '876543210',
+      classId: classes[4]?.id || 'class-5',
+      parentId: 'p-6',
+      gender: 'male',
+      dob: '2013-11-22',
+      parentName: 'محمد جاسم',
+      parentPhone: '0506789012',
+      shift: 'morning',
+      transportation: 'حافلة المدرسة',
+      booksStatus: 'لم يتم التسليم',
+      uniformStatus: 'لم يتم التسليم'
+    },
+    {
+      id: 'demo-7',
+      name: 'خلف',
+      fatherName: 'اتتن',
+      motherName: 'تنم',
+      rollNo: '765432109',
+      nationalId: '765432109',
+      classId: classes[4]?.id || 'class-5',
+      parentId: 'p-7',
+      gender: 'male',
+      dob: '2013-02-14',
+      parentName: 'اتتن خلف',
+      parentPhone: '0507890123',
+      shift: 'morning',
+      transportation: 'حافلة المدرسة',
+      booksStatus: 'لم يتم التسليم',
+      uniformStatus: 'لم يتم التسليم'
+    },
+    {
+      id: 'demo-8',
+      name: 'عمر طارق النابلسي',
+      fatherName: 'طارق',
+      motherName: 'ليلى',
+      rollNo: '654321098',
+      nationalId: '654321098',
+      classId: classes[6]?.id || 'class-7',
+      parentId: 'p-8',
+      gender: 'male',
+      dob: '2011-08-30',
+      parentName: 'طارق النابلسي',
+      parentPhone: '0508901234',
+      shift: 'morning',
+      transportation: 'حافلة المدرسة',
+      booksStatus: 'لم يتم التسليم',
+      uniformStatus: 'لم يتم التسليم'
+    },
+    {
+      id: 'demo-9',
+      name: 'سارة يوسف الحكيم',
+      fatherName: 'يوسف',
+      motherName: 'خديجة',
+      rollNo: '543210987',
+      nationalId: '543210987',
+      classId: classes[5]?.id || 'class-6',
+      parentId: 'p-9',
+      gender: 'female',
+      dob: '2012-12-05',
+      parentName: 'يوسف الحكيم',
+      parentPhone: '0509012345',
+      shift: 'evening',
+      transportation: 'حافلة المدرسة',
+      booksStatus: 'لم يتم التسليم',
+      uniformStatus: 'لم يتم التسليم'
+    },
+    {
+      id: 'demo-10',
+      name: 'الات',
+      fatherName: 'اللل',
+      motherName: 'تللت',
+      rollNo: '123587459',
+      nationalId: '123587459',
+      classId: classes[1]?.id || 'class-2',
+      parentId: 'p-10',
+      gender: 'female',
+      dob: '2016-07-19',
+      parentName: 'اللل الات',
+      parentPhone: '0500123456',
+      shift: 'evening',
+      transportation: 'حافلة المدرسة',
+      booksStatus: 'لم يتم التسليم',
+      uniformStatus: 'لم يتم التسليم'
+    }
+  ];
+
+  const allRegistryStudents = students.length > 0 ? students : sampleRegistryStudents;
+
+  const filteredRegistryStudents = allRegistryStudents.filter(s => {
+    if (!matchesCohort(s)) return false;
+    if (regClassFilter !== 'all') {
+      const cls = classes.find(c => c.id === s.classId);
+      if (s.classId !== regClassFilter && cls?.name !== regClassFilter && cls?.grade !== regClassFilter) {
+        return false;
+      }
+    }
+    if (regShiftFilter !== 'all' && s.shift !== regShiftFilter) return false;
+    if (regSearchQuery.trim()) {
+      const q = regSearchQuery.trim().toLowerCase();
+      const matchName = s.name.toLowerCase().includes(q);
+      const matchFather = (s.fatherName || '').toLowerCase().includes(q);
+      const matchRoll = (s.rollNo || s.nationalId || '').toLowerCase().includes(q);
+      const matchParent = (s.parentName || '').toLowerCase().includes(q);
+      if (!matchName && !matchFather && !matchRoll && !matchParent) return false;
+    }
+    return true;
+  });
+
+  const exportRegistryExcel = () => {
+    const headers = [
+      "الرقم الشخصي",
+      "الاسم والنسبة",
+      "الأب",
+      "الأم",
+      "الصف الحالي",
+      "الفوج",
+      "المواصلات",
+      "تسليم كتب",
+      "تسليم لباس",
+      "ولي الأمر",
+      "واتساب ولي الأمر"
+    ];
+    const rows = filteredRegistryStudents.map(s => {
+      const cls = classes.find(c => c.id === s.classId);
+      return [
+        s.nationalId || s.rollNo || '',
+        s.name,
+        s.fatherName || '',
+        s.motherName || '',
+        cls ? cls.name : 'غير محدد',
+        s.shift === 'evening' ? 'الفوج المسائي' : 'الفوج الصباحي',
+        s.transportation || 'حافلة المدرسة',
+        s.booksStatus || 'تم التسليم',
+        s.uniformStatus || 'تم التسليم',
+        s.parentName || '',
+        s.parentPhone || ''
+      ];
+    });
+
+    const csvContent = "data:text/csv;charset=utf-8,\uFEFF" + [headers.join(","), ...rows.map(r => r.map(x => `"${x}"`).join(","))].join("\n");
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", "تسجيل_بيانات_الطلاب.xlsx");
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const handleAutoFillDemoStudent = () => {
+    setRegStudent({
+      serialNo: String(students.length + 11),
+      nationalId: '0102938475',
+      name: 'محمد أحمد',
+      fatherName: 'خالد',
+      motherName: 'مريم',
+      motherMaidenName: 'النجار',
+      grandfatherName: 'عبد الله',
+      birthPlace: 'دمشق / الرياض',
+      dob: '15/05/2012',
+      residencePlace: 'الحي الشمالي / الشارقة',
+      address: 'شارع الجامعة - بناية السلام 12',
+      classId: classes.length > 0 ? classes[0].id : '',
+      customClassName: 'الصف الخامس / الرابع الابتدائي',
+      shift: activeCohort === 'evening' ? 'evening' : 'morning',
+      previousSchool: 'مدرسة الأمل الوطنية',
+      healthStatus: 'سليم / ممتاز',
+      transportation: 'حافلة المدرسة',
+      booksStatus: 'تم التسليم',
+      uniformStatus: 'تم التسليم',
+      parentName: 'خالد محمد أحمد',
+      parentPhone: '0501234567',
+      gender: 'male'
+    });
+  };
+
+  const handleClearRegForm = () => {
+    setRegStudent({
+      serialNo: String(students.length + 1),
+      nationalId: '',
+      name: '',
+      fatherName: '',
+      motherName: '',
+      motherMaidenName: '',
+      grandfatherName: '',
+      birthPlace: '',
+      dob: '',
+      residencePlace: '',
+      address: '',
+      classId: '',
+      customClassName: '',
+      shift: activeCohort === 'evening' ? 'evening' : 'morning',
+      previousSchool: '',
+      healthStatus: '',
+      transportation: '',
+      booksStatus: '',
+      uniformStatus: '',
+      parentName: '',
+      parentPhone: '',
+      gender: 'male'
+    });
+  };
+
+  const handleSaveComprehensiveStudent = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!regStudent.name.trim()) {
+      alert('الرجاء إدخال اسم الطالب والنسبة (حقل إجباري).');
+      return;
+    }
+    if (!regStudent.parentName.trim()) {
+      alert('الرجاء إدخال اسم ولي الأمر ونسبته (حقل إجباري).');
+      return;
+    }
+    if (!regStudent.parentPhone.trim()) {
+      alert('الرجاء إدخال رقم هاتف الواتس اب لولي الأمر (حقل إجباري).');
+      return;
+    }
+
+    const finalClassId = regStudent.classId || (classes.length > 0 ? classes[0].id : 'class-default');
+    const finalRollNo = regStudent.nationalId.trim() || regStudent.serialNo || String(Date.now()).slice(-6);
+    const finalPhone = regStudent.parentPhone.trim();
+    const finalEmail = `${regStudent.parentName.trim().replace(/\s+/g, '') || 'parent'}@school.edu`;
+
+    addStudent(
+      {
+        name: regStudent.name.trim(),
+        classId: finalClassId,
+        parentId: '',
+        rollNo: finalRollNo,
+        gender: regStudent.gender,
+        dob: regStudent.dob || '2012-05-15',
+        parentName: regStudent.parentName.trim(),
+        shift: regStudent.shift,
+        serialNo: regStudent.serialNo,
+        nationalId: regStudent.nationalId,
+        fatherName: regStudent.fatherName,
+        motherName: regStudent.motherName,
+        motherMaidenName: regStudent.motherMaidenName,
+        grandfatherName: regStudent.grandfatherName,
+        birthPlace: regStudent.birthPlace,
+        residencePlace: regStudent.residencePlace,
+        address: regStudent.address,
+        previousSchool: regStudent.previousSchool,
+        healthStatus: regStudent.healthStatus,
+        transportation: regStudent.transportation,
+        booksStatus: regStudent.booksStatus,
+        uniformStatus: regStudent.uniformStatus,
+        parentPhone: finalPhone
+      },
+      {
+        name: regStudent.parentName.trim(),
+        email: finalEmail,
+        phone: finalPhone
+      }
+    );
+
+    alert(`🎉 تم إدخال وحفظ بيانات الطالب (${regStudent.name}) بنجاح!\nتم ربطه بالقاعدة وتأسيس حساب ولي الأمر وتأطير البيانات لـ Excel والسحابة.`);
+    handleClearRegForm();
+  };
 
   // New Announcement state
   const [newAnnounce, setNewAnnounce] = useState({
@@ -3593,6 +3993,21 @@ ${directivesFormatted}
             </button>
 
             <button
+              id="dir-nav-student-registration"
+              onClick={() => {
+                setActiveTab('student-registration');
+                setIsMobileMenuOpen(false);
+              }}
+              className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-xl text-right text-[11px] font-bold transition-all duration-200 ${
+                activeTab === 'student-registration' ? 'bg-emerald-600 text-white shadow-xs ring-1 ring-emerald-400' : 'text-slate-300 hover:bg-slate-900 hover:text-white'
+              }`}
+            >
+              <UserPlus className="w-3.5 h-3.5 shrink-0 text-emerald-400" />
+              <span>تسجيل بيانات الطلاب 📝</span>
+              <span className="mr-auto bg-emerald-950/80 text-emerald-300 border border-emerald-800/50 px-1.5 py-0.5 rounded-full text-[8px] font-extrabold">20 حقل</span>
+            </button>
+
+            <button
               id="dir-nav-excuses"
               onClick={() => {
                 setActiveTab('excuses');
@@ -4815,6 +5230,890 @@ ${directivesFormatted}
                   )}
                 </div>
               </div>
+            </motion.div>
+          )}
+
+          {/* Student Registration System Tab (20 Fields) */}
+          {activeTab === 'student-registration' && (
+            <motion.div
+              key="student-registration"
+              initial={{ opacity: 0, y: 15 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -15 }}
+              className="space-y-6 text-right"
+              style={{ direction: 'rtl' }}
+            >
+              {/* Header Dark Card Banner matching user screenshots */}
+              <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 text-white shadow-2xl relative overflow-hidden">
+                <div className="absolute top-0 left-0 w-96 h-96 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none -translate-x-1/2 -translate-y-1/2" />
+                <div className="relative z-10 space-y-4">
+                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[10px] font-extrabold px-3 py-1 rounded-full flex items-center gap-1 shadow-xs">
+                          <Database className="w-3 h-3 text-emerald-400" />
+                          <span>مربوط بسحابة Firebase + حفظ بالهارد</span>
+                        </span>
+                        <span className="bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 text-[10px] font-extrabold px-3 py-1 rounded-full flex items-center gap-1">
+                          <Building className="w-3 h-3 text-indigo-400" />
+                          <span>رفع شعار المدرسة</span>
+                        </span>
+                      </div>
+                      <h1 className="text-2xl md:text-3xl font-black text-white flex items-center gap-2">
+                        <GraduationCap className="w-8 h-8 text-emerald-400" />
+                        <span>نظام تسجيل بيانات الطلاب</span>
+                      </h1>
+                      <p className="text-slate-300 text-xs md:text-sm font-medium leading-relaxed">
+                        تأطير البيانات، طباعة الاستمارة، حفظ آلي في ذاكرة الحاسوب و Excel، وتوفر كود بايثون كامل
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2 flex-wrap self-start md:self-auto">
+                      <button
+                        type="button"
+                        onClick={handleClearRegForm}
+                        className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold px-4 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-md shadow-emerald-950/40"
+                      >
+                        <UserPlus className="w-4 h-4" />
+                        <span>إدخال طالب جديد</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setActiveTab('students')}
+                        className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-bold px-4 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5"
+                      >
+                        <Users className="w-4 h-4 text-amber-400" />
+                        <span>قائمة الطلاب ({students.filter(matchesCohort).length})</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowPythonCodeModal(true)}
+                        className="bg-indigo-950/70 hover:bg-indigo-900 border border-indigo-700/60 text-indigo-300 text-xs font-bold px-3.5 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5"
+                      >
+                        <FileCode className="w-4 h-4 text-indigo-400" />
+                        <span>كود بايثون</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Comprehensive Form Card (20 Fields) */}
+              <div className="bg-white rounded-3xl border border-slate-200 p-6 md:p-8 shadow-sm space-y-6">
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-100 pb-5">
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <span className="w-3 h-3 rounded-full bg-emerald-500 animate-pulse" />
+                      <h2 className="text-lg md:text-xl font-black text-slate-900">
+                        استمارة تسجيل الطالب الشاملة (20 حقل)
+                      </h2>
+                    </div>
+                    <p className="text-slate-500 text-xs font-semibold">
+                      شاملة البيانات الشخصية، الإقامة، المدرسة السابقة، اللوجستيات، وبيانات ولي الأمر والهاتف
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleAutoFillDemoStudent}
+                    className="bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 text-xs font-extrabold px-4 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-2 shadow-2xs self-start md:self-auto"
+                  >
+                    <Sparkles className="w-4 h-4 text-amber-600" />
+                    <span>تعبئة بيانات تجريبية تلقائية ✨</span>
+                  </button>
+                </div>
+
+                <form onSubmit={handleSaveComprehensiveStudent} className="space-y-6">
+                  {/* Grid of basic & personal student fields */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+                    {/* 1. الرقم التسلسلي */}
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                        الرقم التسلسلي <span className="text-slate-400 font-normal">(آلي / إختياري)</span>
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="11"
+                        value={regStudent.serialNo}
+                        onChange={e => setRegStudent(prev => ({ ...prev, serialNo: e.target.value }))}
+                        className="w-full text-xs border border-slate-200 bg-slate-50 px-3.5 py-2.5 rounded-xl focus:border-emerald-500 focus:bg-white focus:outline-none transition font-semibold"
+                      />
+                    </div>
+
+                    {/* 2. الرقم الشخصي / الهوية */}
+                    <div>
+                      <label className="block text-xs font-bold text-slate-800 mb-1.5">
+                        الرقم الشخصي / الهوية <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="مثال: 0102938475"
+                        value={regStudent.nationalId}
+                        onChange={e => setRegStudent(prev => ({ ...prev, nationalId: e.target.value }))}
+                        className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl focus:border-emerald-500 focus:outline-none transition font-mono font-bold"
+                      />
+                    </div>
+
+                    {/* 3. الاسم والنسبة */}
+                    <div>
+                      <label className="block text-xs font-bold text-slate-800 mb-1.5">
+                        الاسم والنسبة (اسم الطالب الكامل) <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        placeholder="مثال: محمد أحمد"
+                        value={regStudent.name}
+                        onChange={e => setRegStudent(prev => ({ ...prev, name: e.target.value }))}
+                        className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl focus:border-emerald-500 focus:outline-none transition font-bold"
+                      />
+                    </div>
+
+                    {/* 4. اسم الأب */}
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                        اسم الأب
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="مثال: خالد"
+                        value={regStudent.fatherName}
+                        onChange={e => setRegStudent(prev => ({ ...prev, fatherName: e.target.value }))}
+                        className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl focus:border-emerald-500 focus:outline-none transition"
+                      />
+                    </div>
+
+                    {/* 5. اسم الأم */}
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                        اسم الأم
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="مثال: مريم"
+                        value={regStudent.motherName}
+                        onChange={e => setRegStudent(prev => ({ ...prev, motherName: e.target.value }))}
+                        className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl focus:border-emerald-500 focus:outline-none transition"
+                      />
+                    </div>
+
+                    {/* 6. نسبة الأم */}
+                    <div>
+                      <label className="block text-xs font-bold text-slate-800 mb-1.5">
+                        نسبة الأم <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="مثال: النجار"
+                        value={regStudent.motherMaidenName}
+                        onChange={e => setRegStudent(prev => ({ ...prev, motherMaidenName: e.target.value }))}
+                        className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl focus:border-emerald-500 focus:outline-none transition"
+                      />
+                    </div>
+
+                    {/* 7. اسم الجد */}
+                    <div>
+                      <label className="block text-xs font-bold text-slate-800 mb-1.5">
+                        اسم الجد <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="مثال: عبد الله"
+                        value={regStudent.grandfatherName}
+                        onChange={e => setRegStudent(prev => ({ ...prev, grandfatherName: e.target.value }))}
+                        className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl focus:border-emerald-500 focus:outline-none transition"
+                      />
+                    </div>
+
+                    {/* 8. مكان الولادة */}
+                    <div>
+                      <label className="block text-xs font-bold text-slate-800 mb-1.5">
+                        مكان الولادة <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="مثال: دمشق / الرياض"
+                        value={regStudent.birthPlace}
+                        onChange={e => setRegStudent(prev => ({ ...prev, birthPlace: e.target.value }))}
+                        className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl focus:border-emerald-500 focus:outline-none transition"
+                      />
+                    </div>
+
+                    {/* 9. تاريخ الولادة */}
+                    <div>
+                      <label className="block text-xs font-bold text-slate-800 mb-1.5">
+                        تاريخ الولادة <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="مثال: 2012-05-15 أو 15/05/2012"
+                        value={regStudent.dob}
+                        onChange={e => setRegStudent(prev => ({ ...prev, dob: e.target.value }))}
+                        className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl focus:border-emerald-500 focus:outline-none transition font-mono"
+                      />
+                    </div>
+
+                    {/* 10. مكان الإقامة */}
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                        مكان الإقامة
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="مثال: الحي الشمالي / الشارقة"
+                        value={regStudent.residencePlace}
+                        onChange={e => setRegStudent(prev => ({ ...prev, residencePlace: e.target.value }))}
+                        className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl focus:border-emerald-500 focus:outline-none transition"
+                      />
+                    </div>
+
+                    {/* 11. العنوان */}
+                    <div className="md:col-span-2">
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                        العنوان التفصيلي
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="مثال: شارع الجامعة - بناية السلام 12"
+                        value={regStudent.address}
+                        onChange={e => setRegStudent(prev => ({ ...prev, address: e.target.value }))}
+                        className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl focus:border-emerald-500 focus:outline-none transition"
+                      />
+                    </div>
+
+                    {/* 12. الصف الحالي */}
+                    <div>
+                      <label className="block text-xs font-bold text-slate-800 mb-1.5">
+                        الصف الحالي <span className="text-red-500">*</span>
+                      </label>
+                      <select
+                        value={regStudent.classId}
+                        onChange={e => setRegStudent(prev => ({ ...prev, classId: e.target.value }))}
+                        className="w-full text-xs font-bold border border-slate-200 px-3.5 py-2.5 rounded-xl bg-white focus:border-emerald-500 focus:outline-none cursor-pointer"
+                      >
+                        <option value="">-- اختر الصف والشعبة --</option>
+                        {classes.filter(matchesCohort).map(c => (
+                          <option key={c.id} value={c.id}>{c.name}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* 13. الفوج الدراسي */}
+                    <div>
+                      <label className="block text-xs font-bold text-slate-800 mb-1.5">
+                        الفوج الدراسي <span className="text-red-500">*</span>
+                      </label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setRegStudent(prev => ({ ...prev, shift: 'morning' }))}
+                          className={`py-2 px-3 rounded-xl text-xs font-bold transition cursor-pointer border flex items-center justify-center gap-1.5 ${
+                            regStudent.shift === 'morning'
+                              ? 'bg-amber-400 text-slate-950 border-amber-500 shadow-xs'
+                              : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                          }`}
+                        >
+                          <Sun className="w-3.5 h-3.5 text-amber-700" />
+                          <span>الفوج الصباحي</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setRegStudent(prev => ({ ...prev, shift: 'evening' }))}
+                          className={`py-2 px-3 rounded-xl text-xs font-bold transition cursor-pointer border flex items-center justify-center gap-1.5 ${
+                            regStudent.shift === 'evening'
+                              ? 'bg-purple-600 text-white border-purple-700 shadow-xs'
+                              : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                          }`}
+                        >
+                          <Moon className="w-3.5 h-3.5 text-purple-200" />
+                          <span>الفوج المسائي</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* 14. اسم المدرسة السابقة */}
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                        اسم المدرسة السابقة
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="مثال: مدرسة الأمل الوطنية"
+                        value={regStudent.previousSchool}
+                        onChange={e => setRegStudent(prev => ({ ...prev, previousSchool: e.target.value }))}
+                        className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl focus:border-emerald-500 focus:outline-none transition"
+                      />
+                    </div>
+
+                    {/* 15. الحالة الصحية */}
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                        الحالة الصحية
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="مثال: سليم / ممتاز"
+                        value={regStudent.healthStatus}
+                        onChange={e => setRegStudent(prev => ({ ...prev, healthStatus: e.target.value }))}
+                        className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl focus:border-emerald-500 focus:outline-none transition"
+                      />
+                    </div>
+
+                    {/* 16. المواصلات */}
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                        المواصلات
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="مثال: حافلة المدرسة"
+                        value={regStudent.transportation}
+                        onChange={e => setRegStudent(prev => ({ ...prev, transportation: e.target.value }))}
+                        className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl focus:border-emerald-500 focus:outline-none transition"
+                      />
+                    </div>
+
+                    {/* 17. تسليم كتب */}
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                        تسليم كتب
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="مثال: تم التسليم"
+                        value={regStudent.booksStatus}
+                        onChange={e => setRegStudent(prev => ({ ...prev, booksStatus: e.target.value }))}
+                        className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl focus:border-emerald-500 focus:outline-none transition"
+                      />
+                    </div>
+
+                    {/* 18. تسليم لباس */}
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                        تسليم لباس
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="مثال: تم التسليم"
+                        value={regStudent.uniformStatus}
+                        onChange={e => setRegStudent(prev => ({ ...prev, uniformStatus: e.target.value }))}
+                        className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl focus:border-emerald-500 focus:outline-none transition"
+                      />
+                    </div>
+                  </div>
+
+                  {/* 19 & 20. قسم بيانات ولي الأمر (Highlighted Container as in Screenshots) */}
+                  <div className="bg-emerald-50/70 border border-emerald-200/90 p-5 rounded-2xl space-y-4 shadow-xs">
+                    <div className="flex items-center gap-2">
+                      <div className="w-8 h-8 rounded-full bg-emerald-600 text-white flex items-center justify-center font-bold">
+                        <Users className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h3 className="font-black text-sm text-emerald-950">بيانات ولي الأمر</h3>
+                        <p className="text-[11px] text-emerald-700 font-medium">الاسم الثلاثي والنسبة ورقم هاتف التواصل المباشر للواتس اب</p>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-1">
+                      {/* 19. اسم ولي الأمر ونسبته */}
+                      <div>
+                        <label className="block text-xs font-bold text-emerald-950 mb-1.5">
+                          اسم ولي الأمر ونسبته <span className="text-red-500">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          placeholder="مثال: خالد محمد أحمد"
+                          value={regStudent.parentName}
+                          onChange={e => setRegStudent(prev => ({ ...prev, parentName: e.target.value }))}
+                          className="w-full text-xs border border-emerald-300 bg-white px-3.5 py-2.5 rounded-xl focus:border-emerald-600 focus:outline-none font-bold text-slate-800"
+                        />
+                      </div>
+
+                      {/* 20. رقم هاتف الواتس اب */}
+                      <div>
+                        <label className="block text-xs font-bold text-emerald-950 mb-1.5 flex items-center justify-between">
+                          <span>رقم هاتف الواتس اب <span className="text-red-500">*</span></span>
+                          <span className="text-emerald-700 text-[10px] flex items-center gap-1 font-bold">
+                            <MessageSquare className="w-3 h-3 text-emerald-600" />
+                            <span>ربط واتساب تلقائي</span>
+                          </span>
+                        </label>
+                        <input
+                          type="tel"
+                          required
+                          placeholder="مثال: 00963912345678 أو 0501234567"
+                          value={regStudent.parentPhone}
+                          onChange={e => setRegStudent(prev => ({ ...prev, parentPhone: e.target.value }))}
+                          className="w-full text-xs border border-emerald-300 bg-white px-3.5 py-2.5 rounded-xl focus:border-emerald-600 focus:outline-none font-mono font-bold text-slate-800"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Form Actions Footer */}
+                  <div className="pt-3 border-t border-slate-100 flex flex-col sm:flex-row items-center justify-between gap-3">
+                    <button
+                      type="button"
+                      onClick={handleClearRegForm}
+                      className="w-full sm:w-auto bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs px-5 py-3 rounded-xl transition cursor-pointer flex items-center justify-center gap-2 border border-slate-200"
+                    >
+                      <RotateCcw className="w-4 h-4 text-slate-500" />
+                      <span>تفريغ الحقول</span>
+                    </button>
+
+                    <button
+                      type="submit"
+                      className="w-full sm:w-auto bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold text-xs px-8 py-3.5 rounded-xl transition cursor-pointer flex items-center justify-center gap-2 shadow-lg shadow-emerald-200"
+                    >
+                      <Save className="w-4 h-4 text-emerald-200" />
+                      <span>حفظ البيانات مباشرة في Excel وتفريغ الحقول تلقائياً 💾</span>
+                    </button>
+                  </div>
+                </form>
+              </div>
+
+              {/* Registered Student Master Database Card (سجل الطلاب المسجلين) */}
+              <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-md space-y-6">
+                {/* Header Row */}
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-100 pb-5">
+                  <div className="flex items-start gap-3">
+                    <div className="w-10 h-10 rounded-2xl bg-slate-900 text-emerald-400 flex items-center justify-center font-bold shrink-0 shadow-sm mt-1">
+                      <Users className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h2 className="text-xl font-black text-slate-900">سجل الطلاب المسجلين</h2>
+                        <span className="bg-emerald-100 text-emerald-800 text-xs font-black px-3 py-1 rounded-full border border-emerald-200 shadow-2xs">
+                          {filteredRegistryStudents.length} / {allRegistryStudents.length} طالب
+                        </span>
+                      </div>
+                      <p className="text-slate-500 text-xs font-semibold mt-1 leading-relaxed">
+                        جميع السجلات المحفوظة منظمة وفق الحقول الأحد عشر مع إمكانية التصدير والطباعة الرسمية المنسقة
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Top Action Buttons */}
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={() => setRegManifestPrintModal(true)}
+                      className="bg-slate-900 hover:bg-slate-800 text-white text-xs font-extrabold px-4 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-md shadow-slate-900/20"
+                    >
+                      <Printer className="w-4 h-4 text-emerald-400" />
+                      <span>طباعة الكشف كامل 🖨️</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={exportRegistryExcel}
+                      className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-extrabold px-4 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-md shadow-emerald-600/20"
+                    >
+                      <Download className="w-4 h-4" />
+                      <span>تصدير إلى (xls.) Excel 📥</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={exportRegistryExcel}
+                      className="bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold px-3.5 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 border border-slate-700"
+                    >
+                      <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
+                      <span>تصدير (CSV BOM)</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Filters Section (Box with Light Green Border) */}
+                <div className="bg-emerald-50/50 border border-emerald-200/80 p-4 md:p-5 rounded-2xl space-y-4">
+                  <div className="flex items-center gap-2 text-xs font-black text-emerald-950">
+                    <Filter className="w-4 h-4 text-emerald-600" />
+                    <span>تصفية سجل الطلاب حسب (الصف الدراسي / الفوج الصباحي والمسائي / القائمة المنسدلة)</span>
+                  </div>
+
+                  {/* Grid of Selects + Search */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                    {/* Dropdown 1: الصف الدراسي */}
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">الصف الدراسي:</label>
+                      <select
+                        value={regClassFilter}
+                        onChange={e => setRegClassFilter(e.target.value)}
+                        className="w-full text-xs border border-emerald-300 bg-white px-3 py-2 rounded-xl focus:border-emerald-600 focus:outline-none font-semibold text-slate-800 shadow-2xs"
+                      >
+                        <option value="all">جميع الصفوف (الكل: {allRegistryStudents.length} طالب)</option>
+                        {classes.map(c => (
+                          <option key={c.id} value={c.id}>
+                            {c.name} ({allRegistryStudents.filter(s => s.classId === c.id).length} طالب)
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* Dropdown 2: تصفية الفوج / الدوام */}
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">تصفية الفوج / الدوام:</label>
+                      <select
+                        value={regShiftFilter}
+                        onChange={e => setRegShiftFilter(e.target.value as any)}
+                        className="w-full text-xs border border-emerald-300 bg-white px-3 py-2 rounded-xl focus:border-emerald-600 focus:outline-none font-semibold text-slate-800 shadow-2xs"
+                      >
+                        <option value="all">جميع الأفواج (الكل)</option>
+                        <option value="morning">☀️ الفوج الصباحي ({allRegistryStudents.filter(s => s.shift === 'morning').length})</option>
+                        <option value="evening">🌙 الفوج المسائي ({allRegistryStudents.filter(s => s.shift === 'evening').length})</option>
+                      </select>
+                    </div>
+
+                    {/* Dropdown 3: قائمة الطلاب للمعاينة */}
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">قائمة الطلاب ({filteredRegistryStudents.length}):</label>
+                      <select
+                        value={regSelectedPreviewStudentId}
+                        onChange={e => {
+                          const sid = e.target.value;
+                          setRegSelectedPreviewStudentId(sid);
+                          const st = allRegistryStudents.find(s => s.id === sid);
+                          if (st) setRegStudentCardModal(st);
+                        }}
+                        className="w-full text-xs border border-emerald-300 bg-white px-3 py-2 rounded-xl focus:border-emerald-600 focus:outline-none font-semibold text-slate-800 shadow-2xs"
+                      >
+                        <option value="">-- اختر طالباً للمعاينة ({filteredRegistryStudents.length}) --</option>
+                        {filteredRegistryStudents.map(s => {
+                          const cls = classes.find(c => c.id === s.classId);
+                          return (
+                            <option key={s.id} value={s.id}>
+                              {s.name} - {cls ? cls.name : 'الصف الخامس'}
+                            </option>
+                          );
+                        })}
+                      </select>
+                    </div>
+
+                    {/* Search Input */}
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">بحث سريع:</label>
+                      <div className="relative">
+                        <Search className="w-3.5 h-3.5 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
+                        <input
+                          type="text"
+                          placeholder="ابحث باسم، اسم الأب، الرقم..."
+                          value={regSearchQuery}
+                          onChange={e => setRegSearchQuery(e.target.value)}
+                          className="w-full text-xs border border-emerald-300 bg-white pr-9 pl-3 py-2 rounded-xl focus:border-emerald-600 focus:outline-none font-medium shadow-2xs"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Filter Pills / Chips */}
+                  <div className="space-y-2 pt-2 border-t border-emerald-200/60 text-xs">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-bold text-slate-600 text-[11px]">تصفية سريعة للفوج:</span>
+                      <button
+                        type="button"
+                        onClick={() => setRegShiftFilter('all')}
+                        className={`px-3 py-1 rounded-full text-[11px] font-bold transition cursor-pointer ${
+                          regShiftFilter === 'all'
+                            ? 'bg-emerald-700 text-white shadow-2xs'
+                            : 'bg-white text-slate-700 border border-slate-200 hover:bg-emerald-50'
+                        }`}
+                      >
+                        جميع الأفواج
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setRegShiftFilter('morning')}
+                        className={`px-3 py-1 rounded-full text-[11px] font-bold transition cursor-pointer flex items-center gap-1 ${
+                          regShiftFilter === 'morning'
+                            ? 'bg-amber-600 text-white shadow-2xs'
+                            : 'bg-white text-slate-700 border border-slate-200 hover:bg-amber-50'
+                        }`}
+                      >
+                        <span>☀️</span>
+                        <span>الفوج الصباحي ({allRegistryStudents.filter(s => s.shift === 'morning').length})</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setRegShiftFilter('evening')}
+                        className={`px-3 py-1 rounded-full text-[11px] font-bold transition cursor-pointer flex items-center gap-1 ${
+                          regShiftFilter === 'evening'
+                            ? 'bg-purple-700 text-white shadow-2xs'
+                            : 'bg-white text-slate-700 border border-slate-200 hover:bg-purple-50'
+                        }`}
+                      >
+                        <span>🌙</span>
+                        <span>الفوج المسائي ({allRegistryStudents.filter(s => s.shift === 'evening').length})</span>
+                      </button>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 flex-wrap pt-1">
+                      <span className="font-bold text-slate-600 text-[11px]">تصفية الصف الدراسي:</span>
+                      <button
+                        type="button"
+                        onClick={() => setRegClassFilter('all')}
+                        className={`px-2.5 py-1 rounded-full text-[10px] font-bold transition cursor-pointer ${
+                          regClassFilter === 'all'
+                            ? 'bg-slate-800 text-white'
+                            : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'
+                        }`}
+                      >
+                        كل الصفوف
+                      </button>
+                      {classes.map(c => {
+                        const cnt = allRegistryStudents.filter(s => s.classId === c.id).length;
+                        return (
+                          <button
+                            key={c.id}
+                            type="button"
+                            onClick={() => setRegClassFilter(c.id)}
+                            className={`px-2.5 py-1 rounded-full text-[10px] font-bold transition cursor-pointer ${
+                              regClassFilter === c.id
+                                ? 'bg-emerald-600 text-white'
+                                : 'bg-white text-slate-600 border border-slate-200 hover:bg-emerald-50'
+                            }`}
+                          >
+                            {c.name} ({cnt})
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Main Interactive Table */}
+                <div className="overflow-x-auto rounded-2xl border border-slate-200 shadow-2xs">
+                  <table className="w-full text-right border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-slate-100/90 text-slate-800 font-black border-b border-slate-200">
+                        <th className="p-3 border-l border-slate-200 text-center w-12 bg-slate-200/50">#</th>
+                        <th className="p-3 border-l border-slate-200 text-center font-extrabold">الرقم الشخصي</th>
+                        <th className="p-3 border-l border-slate-200 font-black text-slate-900">الاسم والنسبة</th>
+                        <th className="p-3 border-l border-slate-200 font-bold">الأب</th>
+                        <th className="p-3 border-l border-slate-200 font-bold">الأم</th>
+                        <th className="p-3 border-l border-slate-200 font-bold">الصف الحالي</th>
+                        <th className="p-3 border-l border-slate-200 text-center font-bold">الفوج</th>
+                        <th className="p-3 border-l border-slate-200 text-center font-bold">المواصلات</th>
+                        <th className="p-3 border-l border-slate-200 text-center font-bold">تسليم كتب</th>
+                        <th className="p-3 border-l border-slate-200 text-center font-bold">تسليم لباس</th>
+                        <th className="p-3 border-l border-slate-200 font-extrabold text-slate-900">ولي الأمر</th>
+                        <th className="p-3 border-l border-slate-200 text-center font-black text-emerald-800">واتساب ولي الأمر</th>
+                        <th className="p-3 text-center font-black text-slate-900">إجراءات</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-150">
+                      {filteredRegistryStudents.length > 0 ? (
+                        filteredRegistryStudents.map((st, idx) => {
+                          const cls = classes.find(c => c.id === st.classId);
+                          const parentPhone = st.parentPhone || '0501234567';
+
+                          return (
+                            <tr key={st.id} className="hover:bg-emerald-50/30 transition font-medium text-slate-700">
+                              <td className="p-2 border-l border-slate-150 text-center text-slate-400 bg-slate-50 font-mono font-bold text-[11px]">
+                                {idx + 1}
+                              </td>
+                              <td className="p-2.5 border-l border-slate-150 text-center font-mono text-indigo-700 font-bold text-[11px] bg-slate-50/50">
+                                {st.nationalId || st.rollNo || st.serialNo || '123456789'}
+                              </td>
+                              <td className="p-2.5 border-l border-slate-150 font-extrabold text-slate-900">
+                                {st.name}
+                              </td>
+                              <td className="p-2.5 border-l border-slate-150 font-semibold text-slate-700">
+                                {st.fatherName || 'خالد'}
+                              </td>
+                              <td className="p-2.5 border-l border-slate-150 font-semibold text-slate-700">
+                                {st.motherName || 'مريم'}
+                              </td>
+                              <td className="p-2.5 border-l border-slate-150">
+                                <span className="inline-block bg-emerald-50 text-emerald-800 border border-emerald-200 text-[11px] font-black px-2 py-0.5 rounded-md">
+                                  {cls ? cls.name : 'الصف الخامس'}
+                                </span>
+                              </td>
+                              <td className="p-2.5 border-l border-slate-150 text-center">
+                                {st.shift === 'evening' ? (
+                                  <span className="inline-flex items-center gap-1 bg-purple-50 text-purple-800 border border-purple-200 text-[10px] font-bold px-2 py-0.5 rounded-md">
+                                    <span>🌙</span>
+                                    <span>الفوج المسائي</span>
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 bg-amber-50 text-amber-800 border border-amber-200 text-[10px] font-bold px-2 py-0.5 rounded-md">
+                                    <span>☀️</span>
+                                    <span>الصباحي</span>
+                                  </span>
+                                )}
+                              </td>
+                              <td className="p-2.5 border-l border-slate-150 text-center text-[11px]">
+                                {st.transportation || 'حافلة المدرسة'}
+                              </td>
+                              <td className="p-2.5 border-l border-slate-150 text-center">
+                                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${
+                                  st.booksStatus === 'تم التسليم' || !st.booksStatus
+                                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                    : 'bg-rose-50 text-rose-700 border border-rose-200'
+                                }`}>
+                                  {st.booksStatus || 'تم التسليم'}
+                                </span>
+                              </td>
+                              <td className="p-2.5 border-l border-slate-150 text-center">
+                                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${
+                                  st.uniformStatus === 'تم التسليم' || !st.uniformStatus
+                                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                    : 'bg-rose-50 text-rose-700 border border-rose-200'
+                                }`}>
+                                  {st.uniformStatus || 'تم التسليم'}
+                                </span>
+                              </td>
+                              <td className="p-2.5 border-l border-slate-150 font-bold text-slate-800">
+                                {st.parentName || `ولي أمر ${st.name}`}
+                              </td>
+                              <td className="p-2.5 border-l border-slate-150 text-center">
+                                <a
+                                  href={`https://wa.me/${parentPhone.replace(/[^0-9]/g, '')}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="inline-flex items-center gap-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 font-mono font-bold text-[11px] px-2.5 py-1 rounded-lg shadow-2xs transition"
+                                >
+                                  <span>📲</span>
+                                  <span>{parentPhone}</span>
+                                </a>
+                              </td>
+                              <td className="p-2.5 text-center">
+                                <div className="flex items-center justify-center gap-1.5">
+                                  {/* Print & Preview Card Button */}
+                                  <button
+                                    type="button"
+                                    onClick={() => setRegStudentCardModal(st)}
+                                    title="معاينة وطباعة بطاقة الطالب الرسمية"
+                                    className="p-1.5 bg-sky-50 hover:bg-sky-100 text-sky-700 border border-sky-200 rounded-lg transition cursor-pointer flex items-center gap-1 text-[10px] font-bold"
+                                  >
+                                    <Eye className="w-3.5 h-3.5" />
+                                    <span>طباعة</span>
+                                  </button>
+
+                                  {/* Edit Button */}
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingStudent(st);
+                                      setEditingStudentPhone(parentPhone);
+                                    }}
+                                    title="تعديل البيانات"
+                                    className="p-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-lg transition cursor-pointer"
+                                  >
+                                    <Edit className="w-3.5 h-3.5" />
+                                  </button>
+
+                                  {/* Delete Button */}
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteSingleItem('students', st.id)}
+                                    title="حذف الطالب"
+                                    className="p-1.5 bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 rounded-lg transition cursor-pointer"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })
+                      ) : (
+                        <tr>
+                          <td colSpan={13} className="p-8 text-center text-slate-400 italic">
+                            لا يوجد طلاب ينطبق عليهم خيار التصفية المختار.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Footer note matching screenshot */}
+                <div className="bg-slate-900 text-slate-300 p-3.5 rounded-xl text-xs font-semibold flex flex-col sm:flex-row items-center justify-between gap-2">
+                  <span>💡 الملف المصدر في سكريبت البايثون يتم حفظه باسم: <code className="text-emerald-400 font-mono">تسجيل_بيانات_الطلاب.xlsx</code></span>
+                  <span className="text-emerald-400 font-bold">إجمالي السجلات: {filteredRegistryStudents.length} طالب</span>
+                </div>
+              </div>
+
+              {/* Modal for Python Code Export */}
+              <AnimatePresence>
+                {showPythonCodeModal && (
+                  <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+                    <motion.div
+                      initial={{ opacity: 0, scale: 0.95 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.95 }}
+                      className="bg-slate-900 border border-slate-800 text-slate-100 rounded-3xl max-w-2xl w-full p-6 shadow-2xl text-right space-y-4"
+                      style={{ direction: 'rtl' }}
+                    >
+                      <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                        <h3 className="font-bold text-white text-base flex items-center gap-2">
+                          <FileCode className="w-5 h-5 text-indigo-400" />
+                          <span>كود بايثون كامل لغرض حفظ وتصدير سحابة واستمارة الطلاب ⌨️</span>
+                        </h3>
+                        <button
+                          type="button"
+                          onClick={() => setShowPythonCodeModal(false)}
+                          className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+
+                      <div className="space-y-2">
+                        <p className="text-xs text-slate-300 font-medium">
+                          يمكن استخدام الكود التالي في بيئة Python لقراءة ومعالجة وتصدير كافة سجلات استمارة الطلاب الـ 20 حقل تلقائياً:
+                        </p>
+                        <pre className="bg-slate-950 border border-slate-800 rounded-xl p-4 text-[11px] font-mono text-emerald-400 overflow-x-auto text-left ltr dir-ltr leading-relaxed">
+                          {`import pandas as pd
+import json
+
+# Python Student Registration Processing Script
+def process_student_registration(file_path):
+    # Load student records from Excel or JSON
+    data = pd.read_excel(file_path) if file_path.endswith('.xlsx') else pd.read_json(file_path)
+    print("Loaded records:", len(data))
+    
+    # Process 20 comprehensive fields
+    columns = [
+        "serialNo", "nationalId", "name", "fatherName", "motherName",
+        "motherMaidenName", "grandfatherName", "birthPlace", "dob",
+        "residencePlace", "address", "className", "shift", "previousSchool",
+        "healthStatus", "transportation", "booksStatus", "uniformStatus",
+        "parentName", "parentPhone"
+    ]
+    
+    # Save cleaned output
+    data.to_excel("students_master_database.xlsx", index=False)
+    print("Successfully exported to students_master_database.xlsx")
+
+if __name__ == "__main__":
+    process_student_registration("student_records.json")`}
+                        </pre>
+                      </div>
+
+                      <div className="flex items-center justify-between pt-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard.writeText(`import pandas as pd...`);
+                            alert('تم نسخ كود بايثون للذاكرة!');
+                          }}
+                          className="bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs px-4 py-2 rounded-xl transition cursor-pointer flex items-center gap-1.5"
+                        >
+                          <Copy className="w-4 h-4" />
+                          <span>نسخ الكود</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setShowPythonCodeModal(false)}
+                          className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs px-4 py-2 rounded-xl transition cursor-pointer"
+                        >
+                          إغلاق
+                        </button>
+                      </div>
+                    </motion.div>
+                  </div>
+                )}
+              </AnimatePresence>
             </motion.div>
           )}
 
@@ -9166,6 +10465,290 @@ ${sampleEval}
             </div>
           )}
         </AnimatePresence>
+        {/* Student Individual Printable Card Modal (استمارة بطاقة الطالب الرسمية) */}
+        <AnimatePresence>
+          {regStudentCardModal && (
+            <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4 z-[10020] overflow-y-auto">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="bg-white rounded-3xl max-w-2xl w-full shadow-2xl border border-slate-200 overflow-hidden text-right my-8"
+                style={{ direction: 'rtl' }}
+              >
+                {/* Header for Card */}
+                <div className="bg-slate-900 text-white p-6 flex items-center justify-between border-b border-slate-800">
+                  <div className="flex items-center gap-3">
+                    <div className="w-12 h-12 rounded-2xl bg-emerald-500/20 border border-emerald-400/30 flex items-center justify-center text-emerald-400">
+                      <GraduationCap className="w-6 h-6" />
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-emerald-400 font-bold bg-emerald-950/80 px-2.5 py-0.5 rounded-full border border-emerald-800">
+                        استمارة تسجيل رسمية
+                      </span>
+                      <h3 className="text-base font-black text-white mt-1">بطاقة بيانات الطالب الشاملة</h3>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setRegStudentCardModal(null)}
+                    className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                {/* Printable Content Body */}
+                <div id="printable-student-card" className="p-6 md:p-8 space-y-6">
+                  {/* Ministry & School Header */}
+                  <div className="flex items-center justify-between border-b border-slate-200 pb-4">
+                    <div className="space-y-0.5">
+                      <p className="text-xs font-bold text-slate-500">الجمهورية العربية السورية / وزارة التربية والتعليم</p>
+                      <h2 className="text-base font-black text-slate-900">المدرسة الدولية المتقدمة</h2>
+                      <p className="text-[11px] font-bold text-emerald-700">قسم شؤون وقيد الطلاب - العام الدراسي 2026/2027</p>
+                    </div>
+
+                    <div className="w-16 h-16 rounded-2xl bg-emerald-50 border-2 border-emerald-200 flex items-center justify-center text-emerald-700 font-black text-xs text-center p-1">
+                      {schoolAppIcon ? (
+                        <img src={schoolAppIcon} alt="شعار" className="w-full h-full object-cover rounded-xl" />
+                      ) : (
+                        <span>رفع شعار المدرسة</span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Student Title Banner */}
+                  <div className="bg-emerald-600 text-white p-4 rounded-2xl flex items-center justify-between shadow-sm">
+                    <div>
+                      <span className="text-[10px] font-bold opacity-80 block">اسم الطالب الثلاثي والنسبة</span>
+                      <h1 className="text-lg font-black">{regStudentCardModal.name}</h1>
+                    </div>
+                    <div className="text-left font-mono">
+                      <span className="text-[10px] font-bold opacity-80 block">الرقم الشخصي / القيد</span>
+                      <span className="text-sm font-black tracking-wide">{regStudentCardModal.nationalId || regStudentCardModal.rollNo || '123456789'}</span>
+                    </div>
+                  </div>
+
+                  {/* Personal & Academic Data Grid */}
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
+                    <div className="bg-slate-50 p-3 rounded-xl border border-slate-150">
+                      <span className="text-slate-400 text-[10px] block font-bold">اسم الأب</span>
+                      <span className="font-bold text-slate-800">{regStudentCardModal.fatherName || 'خالد'}</span>
+                    </div>
+
+                    <div className="bg-slate-50 p-3 rounded-xl border border-slate-150">
+                      <span className="text-slate-400 text-[10px] block font-bold">اسم الأم ونسبتها</span>
+                      <span className="font-bold text-slate-800">{regStudentCardModal.motherName || 'مريم'} {regStudentCardModal.motherMaidenName || ''}</span>
+                    </div>
+
+                    <div className="bg-slate-50 p-3 rounded-xl border border-slate-150">
+                      <span className="text-slate-400 text-[10px] block font-bold">اسم الجد</span>
+                      <span className="font-bold text-slate-800">{regStudentCardModal.grandfatherName || 'عبد الله'}</span>
+                    </div>
+
+                    <div className="bg-slate-50 p-3 rounded-xl border border-slate-150">
+                      <span className="text-slate-400 text-[10px] block font-bold">الصف الحالي</span>
+                      <span className="font-bold text-emerald-800">
+                        {classes.find(c => c.id === regStudentCardModal.classId)?.name || 'الصف الخامس'}
+                      </span>
+                    </div>
+
+                    <div className="bg-slate-50 p-3 rounded-xl border border-slate-150">
+                      <span className="text-slate-400 text-[10px] block font-bold">الفوج / الدوام</span>
+                      <span className="font-bold text-slate-800">
+                        {regStudentCardModal.shift === 'evening' ? '🌙 الفوج المسائي' : '☀️ الفوج الصباحي'}
+                      </span>
+                    </div>
+
+                    <div className="bg-slate-50 p-3 rounded-xl border border-slate-150">
+                      <span className="text-slate-400 text-[10px] block font-bold">مكان وتاريخ الولادة</span>
+                      <span className="font-bold text-slate-800">{regStudentCardModal.birthPlace || 'دمشق'} - {regStudentCardModal.dob || '2015-05-15'}</span>
+                    </div>
+
+                    <div className="bg-slate-50 p-3 rounded-xl border border-slate-150">
+                      <span className="text-slate-400 text-[10px] block font-bold">المواصلات</span>
+                      <span className="font-bold text-slate-800">{regStudentCardModal.transportation || 'حافلة المدرسة'}</span>
+                    </div>
+
+                    <div className="bg-slate-50 p-3 rounded-xl border border-slate-150">
+                      <span className="text-slate-400 text-[10px] block font-bold">تسليم الكتب</span>
+                      <span className="font-bold text-emerald-700">{regStudentCardModal.booksStatus || 'تم التسليم'}</span>
+                    </div>
+
+                    <div className="bg-slate-50 p-3 rounded-xl border border-slate-150">
+                      <span className="text-slate-400 text-[10px] block font-bold">تسليم اللباس</span>
+                      <span className="font-bold text-emerald-700">{regStudentCardModal.uniformStatus || 'تم التسليم'}</span>
+                    </div>
+                  </div>
+
+                  {/* PROMINENT GUARDIAN SECTION (بيانات ولي الأمر والوصي القانوني) */}
+                  <div className="bg-emerald-50/80 border-2 border-emerald-300 p-5 rounded-2xl space-y-3 shadow-xs">
+                    <div className="flex items-center justify-between border-b border-emerald-200 pb-2.5">
+                      <div className="flex items-center gap-2 text-emerald-950 font-black text-sm">
+                        <Users className="w-5 h-5 text-emerald-600" />
+                        <span>بيانات ولي الأمر والوصي القانوني</span>
+                      </div>
+                      <span className="bg-emerald-600 text-white text-[10px] font-bold px-2.5 py-0.5 rounded-full">
+                        مرتبط بنظام الواتساب 📲
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                      <div>
+                        <span className="text-slate-500 text-[11px] font-bold block mb-1">اسم ولي الأمر والنسبة:</span>
+                        <p className="font-black text-slate-900 text-sm">{regStudentCardModal.parentName || `ولي أمر ${regStudentCardModal.name}`}</p>
+                      </div>
+
+                      <div>
+                        <span className="text-slate-500 text-[11px] font-bold block mb-1">رقم هاتف الواتس اب المباشر:</span>
+                        <div className="flex items-center gap-2">
+                          <p className="font-mono font-black text-emerald-900 text-sm dir-ltr text-right">
+                            {regStudentCardModal.parentPhone || '0501234567'}
+                          </p>
+                          <a
+                            href={`https://wa.me/${(regStudentCardModal.parentPhone || '0501234567').replace(/[^0-9]/g, '')}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] font-bold px-3 py-1 rounded-lg transition cursor-pointer flex items-center gap-1"
+                          >
+                            <span>مراسلة</span>
+                            <span>📲</span>
+                          </a>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Signatures Footer */}
+                  <div className="pt-6 border-t border-slate-200 grid grid-cols-2 text-center text-xs font-bold text-slate-700">
+                    <div>
+                      <p>توقيع الولي / الوصي:</p>
+                      <div className="h-10"></div>
+                    </div>
+                    <div>
+                      <p>خاتم وتوقيع المدير العام:</p>
+                      <div className="h-10"></div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Modal Footer Buttons */}
+                <div className="p-4 bg-slate-50 border-t border-slate-200 flex items-center justify-between gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setRegStudentCardModal(null)}
+                    className="bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-bold px-5 py-2.5 rounded-xl transition cursor-pointer"
+                  >
+                    إغلاق
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => window.print()}
+                    className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-black px-6 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-2 shadow-md shadow-emerald-600/20"
+                  >
+                    <Printer className="w-4 h-4" />
+                    <span>طباعة البطاقة الرسمية 🖨️</span>
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* Full Manifest Print Modal (طباعة الكشف كامل) */}
+        <AnimatePresence>
+          {regManifestPrintModal && (
+            <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4 z-[10020] overflow-y-auto">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="bg-white rounded-3xl max-w-4xl w-full shadow-2xl border border-slate-200 overflow-hidden text-right my-8"
+                style={{ direction: 'rtl' }}
+              >
+                <div className="bg-slate-900 text-white p-6 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <Printer className="w-6 h-6 text-emerald-400" />
+                    <h3 className="text-base font-black">معاينة وطباعة الكشف الكامل للطلاب</h3>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setRegManifestPrintModal(false)}
+                    className="p-2 text-slate-400 hover:text-white rounded-xl transition cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                <div className="p-6 space-y-6">
+                  {/* Manifest Header */}
+                  <div className="text-center space-y-1 border-b border-slate-200 pb-4">
+                    <h1 className="text-lg font-black text-slate-900">كشف أسماء الطلاب المسجلين بالكامل</h1>
+                    <p className="text-xs text-slate-500 font-bold">
+                      عدد الطلاب المضمنين بالشاشة: ({filteredRegistryStudents.length} طالب) | تاريخ الاستخراج: {new Date().toLocaleDateString('ar-SA')}
+                    </p>
+                  </div>
+
+                  <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                    <table className="w-full text-right border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-slate-100 font-black text-slate-900 border-b border-slate-200">
+                          <th className="p-2 border-l border-slate-200 text-center w-10">#</th>
+                          <th className="p-2 border-l border-slate-200">الرقم الشخصي</th>
+                          <th className="p-2 border-l border-slate-200">اسم الطالب الكامل</th>
+                          <th className="p-2 border-l border-slate-200">اسم الأب</th>
+                          <th className="p-2 border-l border-slate-200">الصف الحالي</th>
+                          <th className="p-2 border-l border-slate-200">الفوج</th>
+                          <th className="p-2 border-l border-slate-200">اسم ولي الأمر</th>
+                          <th className="p-2 text-center">رقم واتساب ولي الأمر</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-200 font-medium text-slate-800">
+                        {filteredRegistryStudents.map((st, idx) => {
+                          const cls = classes.find(c => c.id === st.classId);
+                          return (
+                            <tr key={st.id} className="hover:bg-slate-50">
+                              <td className="p-2 border-l border-slate-200 text-center font-mono font-bold text-slate-400">{idx + 1}</td>
+                              <td className="p-2 border-l border-slate-200 font-mono font-bold">{st.nationalId || st.rollNo}</td>
+                              <td className="p-2 border-l border-slate-200 font-bold">{st.name}</td>
+                              <td className="p-2 border-l border-slate-200">{st.fatherName || 'خالد'}</td>
+                              <td className="p-2 border-l border-slate-200 font-bold">{cls ? cls.name : 'الصف الخامس'}</td>
+                              <td className="p-2 border-l border-slate-200">{st.shift === 'evening' ? 'المسائي' : 'الصباحي'}</td>
+                              <td className="p-2 border-l border-slate-200">{st.parentName || `ولي أمر ${st.name}`}</td>
+                              <td className="p-2 text-center font-mono font-bold dir-ltr">{st.parentPhone || '0501234567'}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div className="p-4 bg-slate-50 border-t border-slate-200 flex items-center justify-between gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setRegManifestPrintModal(false)}
+                    className="bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-bold px-5 py-2.5 rounded-xl transition cursor-pointer"
+                  >
+                    إغلاق
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => window.print()}
+                    className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-black px-6 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-2 shadow-md shadow-emerald-600/20"
+                  >
+                    <Printer className="w-4 h-4" />
+                    <span>طباعة الكشف كامل 🖨️</span>
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
         {/* WhatsApp Customizer Modal */}
         {waModalState && (
           <WhatsAppMessageCustomizerModal

@@ -25,6 +25,21 @@ export interface Student {
   dob: string;
   parentName: string;
   shift?: 'morning' | 'evening';
+  serialNo?: string;
+  nationalId?: string;
+  fatherName?: string;
+  motherName?: string;
+  motherMaidenName?: string;
+  grandfatherName?: string;
+  birthPlace?: string;
+  residencePlace?: string;
+  address?: string;
+  previousSchool?: string;
+  healthStatus?: string;
+  transportation?: string;
+  booksStatus?: string;
+  uniformStatus?: string;
+  parentPhone?: string;
 }
 
 export interface Parent {
