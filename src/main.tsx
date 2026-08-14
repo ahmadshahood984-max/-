@@ -31,15 +31,16 @@ if ('caches' in window) {
   });
 }
 
-// Register Progressive Web App (PWA) Service Worker with automatic update
-if ('serviceWorker' in navigator) {
+// Register Progressive Web App (PWA) Service Worker with graceful fallback
+if ('serviceWorker' in navigator && window.self === window.top) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/service-worker.js')
       .then((reg) => {
-        console.log('Service Worker registered successfully!', reg.scope);
-        reg.update();
+        console.log('[PWA] Service Worker registered with scope:', reg.scope);
       })
-      .catch((err) => console.warn('Service Worker registration failed:', err));
+      .catch((err) => {
+        console.log('[PWA] Service worker registration deferred or unavailable in current frame:', err?.message || err);
+      });
   });
 }
 

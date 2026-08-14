@@ -4,7 +4,7 @@
  */
 
 import { initializeApp } from 'firebase/app';
-import { initializeFirestore } from 'firebase/firestore';
+import { initializeFirestore, setLogLevel } from 'firebase/firestore';
 import { getAuth } from 'firebase/auth';
 import firebaseConfigJson from '../../firebase-applet-config.json';
 
@@ -19,12 +19,19 @@ const firebaseConfig = {
 
 const databaseId = firebaseConfigJson.firestoreDatabaseId || "ai-studio-c3b19e71-cc85-420b-8314-cb9b70b9467c";
 
+// Suppress noisy transient connection messages
+try {
+  setLogLevel('error');
+} catch {
+  // ignore
+}
+
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 
-// Initialize Cloud Firestore with force long polling for optimal connection stability in proxied/sandboxed environments
+// Initialize Cloud Firestore with auto-detect long polling for optimal connection stability in proxied/sandboxed environments
 export const db = initializeFirestore(app, {
-  experimentalForceLongPolling: true,
+  experimentalAutoDetectLongPolling: true,
 }, databaseId);
 
 // Initialize Firebase Authentication
