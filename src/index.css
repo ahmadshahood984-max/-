@@ -14,7 +14,7 @@ body {
 @media print {
   @page {
     size: A4 portrait;
-    margin: 10mm 10mm 10mm 10mm;
+    margin: 8mm 8mm 8mm 8mm;
   }
 
   body {
@@ -22,19 +22,20 @@ body {
     color: #000000 !important;
     margin: 0 !important;
     padding: 0 !important;
+    overflow: visible !important;
   }
 
-  /* Hide UI elements on print */
-  button,
-  .no-print,
+  /* Hide background elements, navigation, and headers during print */
   nav,
-  header:not(.print-header),
   aside,
-  .fixed.inset-0:not(.print-container) {
+  header,
+  .no-print,
+  button,
+  .no-print-area {
     display: none !important;
   }
 
-  /* Make sure modal content takes full page without modal black backdrop */
+  /* Ensure modal container expands cleanly across the printed page */
   .print-modal-overlay {
     position: static !important;
     background: transparent !important;
@@ -45,22 +46,25 @@ body {
     overflow: visible !important;
     inset: auto !important;
     z-index: auto !important;
+    display: block !important;
   }
 
   .print-card-box {
     box-shadow: none !important;
-    border: 1px solid #cbd5e1 !important;
+    border: none !important;
     max-width: 100% !important;
     width: 100% !important;
     margin: 0 auto !important;
     border-radius: 0 !important;
     page-break-inside: avoid !important;
+    display: block !important;
   }
 
-  /* Force background colors and borders in print */
+  /* Force background colors and exact border styling in print output */
   * {
     -webkit-print-color-adjust: exact !important;
     print-color-adjust: exact !important;
+    color-adjust: exact !important;
   }
 }
 

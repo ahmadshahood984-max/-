@@ -57,7 +57,10 @@ import {
   Eye,
   FileText,
   CheckCircle,
-  Loader2
+  Loader2,
+  Share2,
+  LayoutGrid,
+  ClipboardList
 } from 'lucide-react';
 import { printElementById, downloadElementAsImage } from '../lib/printUtils';
 import { buildWhatsAppUrl, openWhatsAppDirectly, getWhatsAppSentRecords, recordWhatsAppSent, WhatsAppSentRecord } from '../lib/whatsapp';
@@ -1526,6 +1529,7 @@ ${directivesFormatted}
   // Detailed 20-Field Student Registration System State
   const [regStudent, setRegStudent] = useState({
     serialNo: '11',
+    unifiedNo: '75',
     nationalId: '',
     name: '',
     fatherName: '',
@@ -1550,6 +1554,7 @@ ${directivesFormatted}
   });
 
   const [showPythonCodeModal, setShowPythonCodeModal] = useState(false);
+  const [regSubViewMode, setRegSubViewMode] = useState<'all' | 'form' | 'registry'>('all');
 
   // Student Registry (سجل الطلاب المسجلين) Table Filters & Print State
   const [regClassFilter, setRegClassFilter] = useState<string>('all');
@@ -1561,6 +1566,7 @@ ${directivesFormatted}
   const [regManifestPrintModal, setRegManifestPrintModal] = useState<boolean>(false);
   const [isExportingDocImage, setIsExportingDocImage] = useState<boolean>(false);
   const [printToastMsg, setPrintToastMsg] = useState<string | null>(null);
+  const [previewDocImageModal, setPreviewDocImageModal] = useState<{ url: string; title: string; filename: string } | null>(null);
 
   const sampleRegistryStudents: Student[] = [
     {
@@ -1570,6 +1576,8 @@ ${directivesFormatted}
       motherName: 'ننتا',
       rollNo: '123456789',
       nationalId: '123456789',
+      serialNo: '1',
+      unifiedNo: '75',
       classId: classes[0]?.id || 'class-1',
       parentId: 'p-1',
       gender: 'female',
@@ -1588,6 +1596,8 @@ ${directivesFormatted}
       motherName: 'اللا',
       rollNo: '456789854',
       nationalId: '456789854',
+      serialNo: '2',
+      unifiedNo: '76',
       classId: classes[2]?.id || 'class-3',
       parentId: 'p-2',
       gender: 'male',
@@ -1606,6 +1616,8 @@ ${directivesFormatted}
       motherName: 'تالين',
       rollNo: '563214789',
       nationalId: '563214789',
+      serialNo: '3',
+      unifiedNo: '77',
       classId: classes[1]?.id || 'class-2',
       parentId: 'p-3',
       gender: 'female',
@@ -1624,6 +1636,8 @@ ${directivesFormatted}
       motherName: 'تتتتت',
       rollNo: '1235874589',
       nationalId: '1235874589',
+      serialNo: '4',
+      unifiedNo: '78',
       classId: classes[4]?.id || 'class-5',
       parentId: 'p-4',
       gender: 'female',
@@ -1642,6 +1656,8 @@ ${directivesFormatted}
       motherName: 'فاطمة',
       rollNo: '987654321',
       nationalId: '987654321',
+      serialNo: '5',
+      unifiedNo: '79',
       classId: classes[4]?.id || 'class-5',
       parentId: 'p-5',
       gender: 'male',
@@ -1660,6 +1676,8 @@ ${directivesFormatted}
       motherName: 'فاطمة',
       rollNo: '876543210',
       nationalId: '876543210',
+      serialNo: '6',
+      unifiedNo: '80',
       classId: classes[4]?.id || 'class-5',
       parentId: 'p-6',
       gender: 'male',
@@ -1678,6 +1696,8 @@ ${directivesFormatted}
       motherName: 'تنم',
       rollNo: '765432109',
       nationalId: '765432109',
+      serialNo: '7',
+      unifiedNo: '81',
       classId: classes[4]?.id || 'class-5',
       parentId: 'p-7',
       gender: 'male',
@@ -1696,6 +1716,8 @@ ${directivesFormatted}
       motherName: 'ليلى',
       rollNo: '654321098',
       nationalId: '654321098',
+      serialNo: '8',
+      unifiedNo: '82',
       classId: classes[6]?.id || 'class-7',
       parentId: 'p-8',
       gender: 'male',
@@ -1714,6 +1736,8 @@ ${directivesFormatted}
       motherName: 'خديجة',
       rollNo: '543210987',
       nationalId: '543210987',
+      serialNo: '9',
+      unifiedNo: '83',
       classId: classes[5]?.id || 'class-6',
       parentId: 'p-9',
       gender: 'female',
@@ -1732,6 +1756,8 @@ ${directivesFormatted}
       motherName: 'تللت',
       rollNo: '123587459',
       nationalId: '123587459',
+      serialNo: '10',
+      unifiedNo: '84',
       classId: classes[1]?.id || 'class-2',
       parentId: 'p-10',
       gender: 'female',
@@ -1768,6 +1794,7 @@ ${directivesFormatted}
 
   const exportRegistryExcel = () => {
     const headers = [
+      "الرقم الموحد",
       "الرقم الشخصي",
       "الاسم والنسبة",
       "الأب",
@@ -1783,6 +1810,7 @@ ${directivesFormatted}
     const rows = filteredRegistryStudents.map(s => {
       const cls = classes.find(c => c.id === s.classId);
       return [
+        s.unifiedNo || '75',
         s.nationalId || s.rollNo || '',
         s.name,
         s.fatherName || '',
@@ -1807,9 +1835,28 @@ ${directivesFormatted}
     document.body.removeChild(link);
   };
 
+  const getNextUnifiedNo = (currentStudents: Student[] = students): string => {
+    const list = currentStudents.length > 0 ? currentStudents : sampleRegistryStudents;
+    let maxUnified = 74;
+    for (const s of list) {
+      const val = s.unifiedNo || (parseInt(s.rollNo || '', 10) >= 75 ? s.rollNo : undefined);
+      if (val) {
+        const num = parseInt(String(val).replace(/\D/g, ''), 10);
+        if (!isNaN(num) && num > maxUnified) {
+          maxUnified = num;
+        }
+      }
+    }
+    if (maxUnified >= 75) {
+      return String(maxUnified + 1);
+    }
+    return '75';
+  };
+
   const handleAutoFillDemoStudent = () => {
     setRegStudent({
       serialNo: String(students.length + 11),
+      unifiedNo: getNextUnifiedNo(students),
       nationalId: '0102938475',
       name: 'محمد أحمد',
       fatherName: 'خالد',
@@ -1837,6 +1884,7 @@ ${directivesFormatted}
   const handleClearRegForm = () => {
     setRegStudent({
       serialNo: String(students.length + 1),
+      unifiedNo: getNextUnifiedNo(students),
       nationalId: '',
       name: '',
       fatherName: '',
@@ -1882,6 +1930,7 @@ ${directivesFormatted}
       parentName: regStudent.parentName.trim() || (regStudent.name.trim() ? `ولي أمر ${regStudent.name.trim()}` : 'ولي الأمر'),
       shift: regStudent.shift || (activeCohort === 'evening' ? 'evening' : 'morning'),
       serialNo: regStudent.serialNo || '1',
+      unifiedNo: regStudent.unifiedNo || getNextUnifiedNo(students),
       nationalId: regStudent.nationalId || '',
       fatherName: regStudent.fatherName || '',
       motherName: regStudent.motherName || '',
@@ -1902,29 +1951,40 @@ ${directivesFormatted}
 
   const handleTriggerPrint = (elementId: string, title: string) => {
     setPrintToastMsg('جاري تجهيز وتشغيل أمر الطباعة الرسمية 🖨️...');
-    printElementById(elementId, title);
+    try {
+      printElementById(elementId, title);
+    } catch {
+      window.print();
+    }
     setTimeout(() => {
       setPrintToastMsg(null);
     }, 4000);
   };
 
-  const handleExportAsDocImage = async (elementId: string, filename: string) => {
+  const handleExportAsDocImage = async (elementId: string, filename: string, title: string = 'وثيقة رسمية') => {
     setIsExportingDocImage(true);
-    setPrintToastMsg('جاري استخراج وتحميل الوثيقة كصورة عالية الدقة 📥...');
+    setPrintToastMsg('جاري استخراج الوثيقة كصورة عالية الدقة 📥...');
     try {
-      const ok = await downloadElementAsImage(elementId, filename);
-      if (ok) {
+      const res = await downloadElementAsImage(elementId, filename);
+      if (res && res.dataUrl) {
+        setPreviewDocImageModal({
+          url: res.dataUrl,
+          title: title,
+          filename: filename
+        });
+        setPrintToastMsg('تم استخراج الوثيقة بنجاح! يمكنك الآن حفظها أو مشاركتها ✅');
+      } else if (res && res.success) {
         setPrintToastMsg('تم تحميل وحفظ الوثيقة بنجاح! ✅');
       } else {
-        setPrintToastMsg('تعذر حفظ الصورة، يرجى استخدام زر الطباعة');
+        setPrintToastMsg('تعذر حفظ الصورة تلقائياً، يرجى المحاولة ثانية');
       }
     } catch {
-      setPrintToastMsg('حدث خطأ أثناء حفظ الصورة');
+      setPrintToastMsg('حدث خطأ أثناء معالجة الصورة');
     } finally {
       setIsExportingDocImage(false);
       setTimeout(() => {
         setPrintToastMsg(null);
-      }, 4000);
+      }, 4500);
     }
   };
 
@@ -1983,6 +2043,7 @@ ${directivesFormatted}
         parentName: regStudent.parentName.trim(),
         shift: chosenShift,
         serialNo: regStudent.serialNo,
+        unifiedNo: regStudent.unifiedNo || getNextUnifiedNo(students),
         nationalId: regStudent.nationalId,
         fatherName: regStudent.fatherName,
         motherName: regStudent.motherName,
@@ -4108,7 +4169,7 @@ ${directivesFormatted}
             >
               <UserPlus className="w-3.5 h-3.5 shrink-0 text-emerald-400" />
               <span>تسجيل بيانات الطلاب 📝</span>
-              <span className="mr-auto bg-emerald-950/80 text-emerald-300 border border-emerald-800/50 px-1.5 py-0.5 rounded-full text-[8px] font-extrabold">20 حقل</span>
+              <span className="mr-auto bg-emerald-950/80 text-emerald-300 border border-emerald-800/50 px-1.5 py-0.5 rounded-full text-[8px] font-extrabold">{allRegistryStudents.length} طالب</span>
             </button>
 
             <button
@@ -5375,20 +5436,52 @@ ${directivesFormatted}
                     <div className="flex items-center gap-2 flex-wrap self-start md:self-auto">
                       <button
                         type="button"
-                        onClick={handleClearRegForm}
-                        className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold px-4 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-md shadow-emerald-950/40"
+                        onClick={() => {
+                          setRegSubViewMode('form');
+                          handleClearRegForm();
+                          const el = document.getElementById('student-reg-form-card');
+                          if (el) el.scrollIntoView({ behavior: 'smooth' });
+                        }}
+                        className={`text-xs font-bold px-4 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-md ${
+                          regSubViewMode === 'form'
+                            ? 'bg-emerald-500 text-white ring-2 ring-emerald-300 shadow-emerald-950/60'
+                            : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-950/40'
+                        }`}
                       >
                         <UserPlus className="w-4 h-4" />
-                        <span>إدخال طالب جديد</span>
+                        <span>تسجيل طالب جديد 📝</span>
                       </button>
+
                       <button
                         type="button"
-                        onClick={() => setActiveTab('students')}
-                        className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-bold px-4 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5"
+                        onClick={() => {
+                          setRegSubViewMode('registry');
+                          const el = document.getElementById('student-reg-table-card');
+                          if (el) el.scrollIntoView({ behavior: 'smooth' });
+                        }}
+                        className={`text-xs font-bold px-4 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-md ${
+                          regSubViewMode === 'registry'
+                            ? 'bg-amber-400 text-slate-950 font-black ring-2 ring-amber-300 shadow-amber-950/60'
+                            : 'bg-slate-800 hover:bg-slate-700 text-slate-100 border border-slate-700'
+                        }`}
                       >
-                        <Users className="w-4 h-4 text-amber-400" />
-                        <span>قائمة الطلاب ({students.filter(matchesCohort).length})</span>
+                        <ClipboardList className="w-4 h-4 text-amber-400" />
+                        <span>سجل الطلاب المسجلين ({allRegistryStudents.length}) 📋</span>
                       </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setRegSubViewMode('all')}
+                        className={`text-xs font-bold px-3.5 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 border ${
+                          regSubViewMode === 'all'
+                            ? 'bg-indigo-600 text-white border-indigo-400 ring-2 ring-indigo-300'
+                            : 'bg-slate-800/80 hover:bg-slate-700 text-slate-300 border-slate-700'
+                        }`}
+                      >
+                        <LayoutGrid className="w-4 h-4 text-indigo-300" />
+                        <span>عرض الكل ✨</span>
+                      </button>
+
                       <button
                         type="button"
                         onClick={() => setShowPythonCodeModal(true)}
@@ -5402,30 +5495,103 @@ ${directivesFormatted}
                 </div>
               </div>
 
-              {/* Comprehensive Form Card (20 Fields) */}
-              <div className="bg-white rounded-3xl border border-slate-200 p-6 md:p-8 shadow-sm space-y-6">
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-100 pb-5">
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-2">
-                      <span className="w-3 h-3 rounded-full bg-emerald-500 animate-pulse" />
-                      <h2 className="text-lg md:text-xl font-black text-slate-900">
-                        استمارة تسجيل الطالب الشاملة (20 حقل)
-                      </h2>
-                    </div>
-                    <p className="text-slate-500 text-xs font-semibold">
-                      شاملة البيانات الشخصية، الإقامة، المدرسة السابقة، اللوجستيات، وبيانات ولي الأمر والهاتف
-                    </p>
-                  </div>
+              {/* Subview Quick Toggle Switcher */}
+              <div className="flex items-center justify-between gap-3 bg-white p-3 rounded-2xl border border-slate-200 shadow-2xs flex-wrap">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-xs font-bold text-slate-700 ml-1">تبديل طريقة العرض:</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRegSubViewMode('form');
+                      handleClearRegForm();
+                    }}
+                    className={`px-3.5 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                      regSubViewMode === 'form'
+                        ? 'bg-emerald-600 text-white shadow-xs ring-1 ring-emerald-500'
+                        : 'bg-slate-50 text-slate-700 hover:bg-slate-100 border border-slate-200'
+                    }`}
+                  >
+                    <UserPlus className="w-3.5 h-3.5" />
+                    <span>أيقونة تسجيل الطلاب (استمارة إدخال طالب جديد) 📝</span>
+                  </button>
 
                   <button
                     type="button"
-                    onClick={handleAutoFillDemoStudent}
-                    className="bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 text-xs font-extrabold px-4 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-2 shadow-2xs self-start md:self-auto"
+                    onClick={() => setRegSubViewMode('registry')}
+                    className={`px-3.5 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                      regSubViewMode === 'registry'
+                        ? 'bg-slate-900 text-white shadow-xs ring-1 ring-slate-800'
+                        : 'bg-slate-50 text-slate-700 hover:bg-slate-100 border border-slate-200'
+                    }`}
                   >
-                    <Sparkles className="w-4 h-4 text-amber-600" />
-                    <span>تعبئة بيانات تجريبية تلقائية ✨</span>
+                    <ClipboardList className="w-3.5 h-3.5 text-amber-400" />
+                    <span>سجل الطلاب المسجلين ({allRegistryStudents.length}) 📋</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setRegSubViewMode('all')}
+                    className={`px-3.5 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                      regSubViewMode === 'all'
+                        ? 'bg-indigo-600 text-white shadow-xs ring-1 ring-indigo-500'
+                        : 'bg-slate-50 text-slate-700 hover:bg-slate-100 border border-slate-200'
+                    }`}
+                  >
+                    <LayoutGrid className="w-3.5 h-3.5 text-indigo-300" />
+                    <span>عرض الاثنين معاً (الاستمارة + السجل)</span>
                   </button>
                 </div>
+
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] font-bold text-slate-500 bg-slate-100 px-2.5 py-1 rounded-lg">
+                    إجمالي المسجلين: <strong className="text-emerald-700 font-extrabold">{allRegistryStudents.length} طالب</strong>
+                  </span>
+                </div>
+              </div>
+
+              {/* Comprehensive Form Card (20 Fields) */}
+              {(regSubViewMode === 'all' || regSubViewMode === 'form') && (
+                <div id="student-reg-form-card" className="bg-white rounded-3xl border border-slate-200 p-6 md:p-8 shadow-sm space-y-6">
+                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-100 pb-5">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="w-3 h-3 rounded-full bg-emerald-500 animate-pulse" />
+                        <h2 className="text-lg md:text-xl font-black text-slate-900">
+                          استمارة تسجيل الطالب الشاملة (20 حقل)
+                        </h2>
+                        <span className="bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-bold px-2.5 py-0.5 rounded-full">
+                          أيقونة تسجيل الطلاب
+                        </span>
+                      </div>
+                      <p className="text-slate-500 text-xs font-semibold">
+                        شاملة البيانات الشخصية، الإقامة، المدرسة السابقة، اللوجستيات، وبيانات ولي الأمر والهاتف
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2 flex-wrap self-start md:self-auto">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setRegSubViewMode('registry');
+                          const el = document.getElementById('student-reg-table-card');
+                          if (el) el.scrollIntoView({ behavior: 'smooth' });
+                        }}
+                        className="bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 text-xs font-extrabold px-3.5 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-2xs"
+                      >
+                        <ClipboardList className="w-4 h-4 text-emerald-600" />
+                        <span>تبديل إلى سجل الطلاب المسجلين ({allRegistryStudents.length}) 📋</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleAutoFillDemoStudent}
+                        className="bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 text-xs font-extrabold px-4 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-2 shadow-2xs"
+                      >
+                        <Sparkles className="w-4 h-4 text-amber-600" />
+                        <span>تعبئة تجريبية تلقائية ✨</span>
+                      </button>
+                    </div>
+                  </div>
 
                 <form onSubmit={handleSaveComprehensiveStudent} className="space-y-6">
                   {/* Grid of basic & personal student fields */}
@@ -5441,6 +5607,23 @@ ${directivesFormatted}
                         value={regStudent.serialNo}
                         onChange={e => setRegStudent(prev => ({ ...prev, serialNo: e.target.value }))}
                         className="w-full text-xs border border-slate-200 bg-slate-50 px-3.5 py-2.5 rounded-xl focus:border-emerald-500 focus:bg-white focus:outline-none transition font-semibold"
+                      />
+                    </div>
+
+                    {/* الرقم الموحد (تلقائياً من 75 فما فوق) */}
+                    <div>
+                      <label className="block text-xs font-bold text-emerald-900 mb-1.5 flex items-center justify-between">
+                        <span>الرقم الموحد <span className="text-emerald-600 font-extrabold">(تلقائي)</span></span>
+                        <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-1.5 py-0.5 rounded-md">
+                          من 75 فما فوق
+                        </span>
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="75"
+                        value={regStudent.unifiedNo}
+                        onChange={e => setRegStudent(prev => ({ ...prev, unifiedNo: e.target.value }))}
+                        className="w-full text-xs border-2 border-emerald-300 bg-emerald-50/50 px-3.5 py-2.5 rounded-xl focus:border-emerald-600 focus:bg-white focus:outline-none transition font-mono font-black text-emerald-950 shadow-2xs"
                       />
                     </div>
 
@@ -5827,9 +6010,11 @@ ${directivesFormatted}
                   </div>
                 </form>
               </div>
+              )}
 
               {/* Registered Student Master Database Card (سجل الطلاب المسجلين) */}
-              <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-md space-y-6">
+              {(regSubViewMode === 'all' || regSubViewMode === 'registry') && (
+              <div id="student-reg-table-card" className="bg-white rounded-3xl border border-slate-200 p-6 shadow-md space-y-6">
                 {/* Header Row */}
                 <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-100 pb-5">
                   <div className="flex items-start gap-3">
@@ -5844,13 +6029,27 @@ ${directivesFormatted}
                         </span>
                       </div>
                       <p className="text-slate-500 text-xs font-semibold mt-1 leading-relaxed">
-                        جميع السجلات المحفوظة منظمة وفق الحقول الأحد عشر مع إمكانية التصدير والطباعة الرسمية المنسقة
+                        جميع السجلات المحفوظة منظمة وفق الحقول مع إمكانية التصدير والطباعة الرسمية المنسقة
                       </p>
                     </div>
                   </div>
 
                   {/* Top Action Buttons */}
                   <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRegSubViewMode('form');
+                        handleClearRegForm();
+                        const el = document.getElementById('student-reg-form-card');
+                        if (el) el.scrollIntoView({ behavior: 'smooth' });
+                      }}
+                      className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-extrabold px-3.5 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-md shadow-emerald-600/20"
+                    >
+                      <UserPlus className="w-4 h-4" />
+                      <span>تسجيل طالب جديد 📝</span>
+                    </button>
+
                     <button
                       type="button"
                       onClick={() => setRegManifestPrintModal(true)}
@@ -6040,6 +6239,7 @@ ${directivesFormatted}
                     <thead>
                       <tr className="bg-slate-100/90 text-slate-800 font-black border-b border-slate-200">
                         <th className="p-3 border-l border-slate-200 text-center w-12 bg-slate-200/50">#</th>
+                        <th className="p-3 border-l border-slate-200 text-center font-extrabold text-emerald-900 bg-emerald-50/50">الرقم الموحد</th>
                         <th className="p-3 border-l border-slate-200 text-center font-extrabold">الرقم الشخصي</th>
                         <th className="p-3 border-l border-slate-200 font-black text-slate-900">الاسم والنسبة</th>
                         <th className="p-3 border-l border-slate-200 font-bold">الأب</th>
@@ -6064,6 +6264,9 @@ ${directivesFormatted}
                             <tr key={st.id} className="hover:bg-emerald-50/30 transition font-medium text-slate-700">
                               <td className="p-2 border-l border-slate-150 text-center text-slate-400 bg-slate-50 font-mono font-bold text-[11px]">
                                 {idx + 1}
+                              </td>
+                              <td className="p-2.5 border-l border-slate-150 text-center font-mono text-emerald-800 font-black text-[11px] bg-emerald-50/40">
+                                {st.unifiedNo || (parseInt(st.rollNo || '', 10) >= 75 ? st.rollNo : '75')}
                               </td>
                               <td className="p-2.5 border-l border-slate-150 text-center font-mono text-indigo-700 font-bold text-[11px] bg-slate-50/50">
                                 {st.nationalId || st.rollNo || st.serialNo || '123456789'}
@@ -6187,6 +6390,7 @@ ${directivesFormatted}
                   <span className="text-emerald-400 font-bold">إجمالي السجلات: {filteredRegistryStudents.length} طالب</span>
                 </div>
               </div>
+              )}
 
               {/* Modal for Python Code Export */}
               <AnimatePresence>
@@ -6286,26 +6490,52 @@ if __name__ == "__main__":
                   <h1 className="text-2xl font-bold text-slate-800">شؤون الطلاب وأولياء الأمور (Excel)</h1>
                   <p className="text-slate-500 text-sm mt-1">إدارة كشوف الطلاب وتوثيق ارتباطهم بأولياء أمورهم عبر تصدير واستيراد ملفات Excel ومعاينتها فورياً</p>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setNewStudent({
-                      name: '',
-                      classId: selectedClassForStudentAffairs !== 'all' ? selectedClassForStudentAffairs : '',
-                      rollNo: '',
-                      gender: 'male',
-                      dob: '2018-01-01',
-                      parentName: '',
-                      parentEmail: '',
-                      parentPhone: ''
-                    });
-                    setShowStudentForm(true);
-                  }}
-                  className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 justify-center shadow-md shadow-indigo-100/50 transition cursor-pointer self-start sm:self-auto"
-                >
-                  <Plus className="w-4 h-4" />
-                  <span>إضافة طالب يدوي جديد 👤</span>
-                </button>
+                <div className="flex items-center gap-2 flex-wrap self-start sm:self-auto">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveTab('student-registration');
+                      setRegSubViewMode('registry');
+                    }}
+                    className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 justify-center shadow-md shadow-emerald-100 transition cursor-pointer"
+                  >
+                    <ClipboardList className="w-4 h-4" />
+                    <span>سجل الطلاب المسجلين ({allRegistryStudents.length}) 📋</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveTab('student-registration');
+                      setRegSubViewMode('form');
+                    }}
+                    className="bg-slate-800 hover:bg-slate-700 text-slate-100 px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 justify-center shadow-xs transition cursor-pointer"
+                  >
+                    <UserPlus className="w-4 h-4 text-emerald-400" />
+                    <span>استمارة تسجيل الطلاب 📝</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setNewStudent({
+                        name: '',
+                        classId: selectedClassForStudentAffairs !== 'all' ? selectedClassForStudentAffairs : '',
+                        rollNo: '',
+                        gender: 'male',
+                        dob: '2018-01-01',
+                        parentName: '',
+                        parentEmail: '',
+                        parentPhone: ''
+                      });
+                      setShowStudentForm(true);
+                    }}
+                    className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 justify-center shadow-md shadow-indigo-100/50 transition cursor-pointer"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>إضافة طالب يدوي 👤</span>
+                  </button>
+                </div>
               </div>
 
               {/* Class & Section Selection for viewing and registration */}
@@ -10704,6 +10934,10 @@ ${sampleEval}
                         <span className="text-sm font-black text-amber-300">#{regStudentCardModal.serialNo || '1'}</span>
                       </div>
                       <div className="border-r border-emerald-600/60 pr-4">
+                        <span className="text-[10px] font-bold text-emerald-200 block">الرقم الموحد</span>
+                        <span className="text-sm font-black text-white">#{regStudentCardModal.unifiedNo || '75'}</span>
+                      </div>
+                      <div className="border-r border-emerald-600/60 pr-4">
                         <span className="text-[10px] font-bold text-emerald-200 block">الرقم الوطني / القيد</span>
                         <span className="text-sm font-black tracking-wide">{regStudentCardModal.nationalId || regStudentCardModal.rollNo || '123456789'}</span>
                       </div>
@@ -10815,9 +11049,6 @@ ${sampleEval}
                         <Users className="w-4 h-4 text-emerald-700" />
                         <span>4. بيانات ولي الأمر والوصي القانوني المعتمد</span>
                       </div>
-                      <span className="bg-emerald-700 text-white text-[10px] font-black px-2.5 py-0.5 rounded-full">
-                        خدمة الإشعارات والواتساب 📲
-                      </span>
                     </div>
 
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
@@ -10827,7 +11058,7 @@ ${sampleEval}
                       </div>
 
                       <div>
-                        <span className="text-slate-600 text-[10px] font-bold block mb-0.5">رقم هاتف الواتس اب للتواصل المباشر:</span>
+                        <span className="text-slate-600 text-[10px] font-bold block mb-0.5">رقم هاتف التواصل المعتمد:</span>
                         <p className="font-mono font-black text-emerald-950 text-sm dir-ltr text-right">
                           {regStudentCardModal.parentPhone || '0501234567'}
                         </p>
@@ -10992,6 +11223,10 @@ ${sampleEval}
                         <span className="font-bold text-slate-600 text-[11px] block">الرقم التسلسلي:</span>
                         <div className="h-6 border-b border-dotted border-slate-400 mt-1"></div>
                       </div>
+                      <div className="border border-emerald-300 rounded-lg p-2 bg-emerald-50/30">
+                        <span className="font-bold text-emerald-800 text-[11px] block">الرقم الموحد (≥ 75):</span>
+                        <div className="h-6 border-b border-dotted border-emerald-400 mt-1"></div>
+                      </div>
                       <div className="border border-slate-300 rounded-lg p-2 bg-slate-50/40 flex items-center justify-between">
                         <span className="font-bold text-slate-600 text-[11px]">الجنس:</span>
                         <div className="flex items-center gap-4 font-bold text-slate-800">
@@ -11108,7 +11343,7 @@ ${sampleEval}
                         <div className="h-6 border-b border-dotted border-slate-400 mt-1"></div>
                       </div>
                       <div className="border border-slate-300 rounded-lg p-2 bg-slate-50/40">
-                        <span className="font-bold text-slate-600 text-[11px] block">رقم هاتف الواتس اب للتواصل:</span>
+                        <span className="font-bold text-slate-600 text-[11px] block">رقم هاتف التواصل:</span>
                         <div className="h-6 border-b border-dotted border-slate-400 mt-1"></div>
                       </div>
                     </div>
@@ -11319,6 +11554,93 @@ ${sampleEval}
             onConfirmSend={handleConfirmSendWhatsAppDirector}
           />
         )}
+
+        {/* Document Image Preview & Fast Save Modal */}
+        <AnimatePresence>
+          {previewDocImageModal && (
+            <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 z-[10030] overflow-y-auto no-print">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95, y: 10 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 10 }}
+                className="bg-white rounded-3xl max-w-3xl w-full shadow-2xl border border-slate-200 overflow-hidden text-right my-6"
+                style={{ direction: 'rtl' }}
+              >
+                {/* Header */}
+                <div className="bg-slate-900 text-white p-5 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-emerald-500/20 border border-emerald-400/30 flex items-center justify-center text-emerald-400">
+                      <ImageIcon className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h3 className="text-base font-black text-white">معاينة وتحميل صورة الوثيقة 🖼️</h3>
+                      <p className="text-xs text-slate-300">{previewDocImageModal.title}</p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setPreviewDocImageModal(null)}
+                    className="p-2 text-slate-400 hover:text-white rounded-xl transition cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                {/* Mobile Guide Note */}
+                <div className="bg-amber-50 border-b border-amber-200 p-3 text-xs text-amber-900 font-bold flex items-center gap-2">
+                  <span className="text-base">💡</span>
+                  <span><strong>لمستخدمي الموبايل والجوال:</strong> يمكنك الضغط مطولاً على الصورة أدناه واختيار <u>«تنزيل الصورة / Download image»</u> لحفظها مباشرة في المعرض (Gallery).</span>
+                </div>
+
+                {/* Image Container */}
+                <div className="p-4 bg-slate-100 max-h-[60vh] overflow-y-auto flex items-center justify-center">
+                  <img
+                    src={previewDocImageModal.url}
+                    alt={previewDocImageModal.title}
+                    className="w-full h-auto object-contain rounded-xl shadow-lg border border-slate-300 bg-white"
+                  />
+                </div>
+
+                {/* Footer Buttons */}
+                <div className="p-4 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setPreviewDocImageModal(null)}
+                    className="bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-bold px-4 py-2.5 rounded-xl transition cursor-pointer"
+                  >
+                    إغلاق
+                  </button>
+
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {/* Share on WhatsApp */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const text = `استمارة رسمية صادرة من المدرسة الدولية الخاصة: ${previewDocImageModal.title}`;
+                        const url = buildWhatsAppUrl('', text);
+                        window.open(url, '_blank');
+                      }}
+                      className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold px-4 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-2 shadow-xs"
+                    >
+                      <Share2 className="w-4 h-4" />
+                      <span>مشاركة واتساب 💬</span>
+                    </button>
+
+                    {/* Direct Download */}
+                    <a
+                      href={previewDocImageModal.url}
+                      download={`${previewDocImageModal.filename}.png`}
+                      className="bg-slate-900 hover:bg-slate-800 text-white text-xs font-black px-5 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-2 shadow-md shadow-slate-900/20"
+                    >
+                      <Download className="w-4 h-4 text-emerald-400" />
+                      <span>تنزيل الصورة الآن 📥</span>
+                    </a>
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
 
         {/* Welcome Greeting Modal for Director */}
         <AnimatePresence>

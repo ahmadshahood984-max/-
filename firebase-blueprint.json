@@ -1,0 +1,44 @@
+{
+  "entities": {
+    "SchoolLiveData": {
+      "title": "School Live Data",
+      "description": "Synced persistent school state",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "string",
+          "description": "JSON serialized payload or string data"
+        },
+        "updatedAt": {
+          "type": "number",
+          "description": "Unix timestamp in milliseconds"
+        }
+      }
+    },
+    "FCMToken": {
+      "title": "FCM Token",
+      "description": "Parent FCM Push notification registration tokens",
+      "type": "object",
+      "properties": {
+        "token": {
+          "type": "string",
+          "description": "FCM token string"
+        },
+        "updatedAt": {
+          "type": "number",
+          "description": "Unix timestamp in milliseconds"
+        }
+      }
+    }
+  },
+  "firestore": {
+    "/school_live_data/{key}": {
+      "schema": "SchoolLiveData",
+      "description": "Collection for school dataset key-value syncing"
+    },
+    "/fcm_tokens/{parentId}": {
+      "schema": "FCMToken",
+      "description": "Collection for FCM device tokens"
+    }
+  }
+}

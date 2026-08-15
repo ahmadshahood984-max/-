@@ -174,8 +174,13 @@ export function setupFirebaseSync() {
         }
       }
     }, (error) => {
-      console.error(`Firestore listener error for key ${key}:`, error);
-      // Fallback: let user writes happen if Firestore fails
+      // Graceful fallback if transient connection issues occur
+      if (error && error.code === 'unavailable') {
+        console.warn(`[Firestore Sync] Key ${key} operating in offline cache mode.`);
+      } else {
+        console.warn(`[Firestore Sync] Key ${key} listener notice:`, error?.message || error);
+      }
+      // Fallback: allow local writes to proceed so user workflow is never blocked
       initialLoadCompletedKeys.add(key);
     });
   });

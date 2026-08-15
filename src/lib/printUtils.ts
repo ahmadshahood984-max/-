@@ -12,18 +12,24 @@ export const printElementById = (elementId: string, docTitle: string = 'وثيق
       return true;
     }
 
-    // 1. Prepare clean standalone HTML content with embedded styles for perfect print fidelity
-    const contentHtml = element.innerHTML;
-    
-    // Create an isolated hidden iframe for printing
+    // Direct invocation with standard browser print dialog
+    // Modern CSS media rules ensure print-card-box prints cleanly
+    try {
+      window.print();
+      return true;
+    } catch (directPrintErr) {
+      console.warn('Standard window.print failed, attempting iframe print isolation:', directPrintErr);
+    }
+
+    // Fallback: Standalone iframe print
+    const contentHtml = element.outerHTML;
     const printIframe = document.createElement('iframe');
-    printIframe.setAttribute('style', 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden;z-index:-1000;');
+    printIframe.setAttribute('style', 'position:fixed;right:0;bottom:0;width:10px;height:10px;border:0;opacity:0;z-index:-1000;');
     printIframe.setAttribute('id', 'universal-print-iframe-' + Date.now());
     document.body.appendChild(printIframe);
 
     const iframeDoc = printIframe.contentWindow?.document || printIframe.contentDocument;
     if (!iframeDoc) {
-      // Fallback to window.print if iframe document is not accessible
       window.print();
       return true;
     }
@@ -53,7 +59,7 @@ export const printElementById = (elementId: string, docTitle: string = 'وثيق
               background-color: #ffffff !important;
               color: #0f172a !important;
               margin: 0;
-              padding: 15px;
+              padding: 10px;
             }
             @page {
               size: A4 portrait;
@@ -66,9 +72,6 @@ export const printElementById = (elementId: string, docTitle: string = 'وثيق
               .no-print {
                 display: none !important;
               }
-            }
-            .border-slate-150 {
-              border-color: #e2e8f0;
             }
             .dir-ltr {
               direction: ltr;
@@ -87,26 +90,22 @@ export const printElementById = (elementId: string, docTitle: string = 'وثيق
     iframeDoc.write(fullHtml);
     iframeDoc.close();
 
-    // Allow resources & fonts to render before printing
     setTimeout(() => {
       try {
         printIframe.contentWindow?.focus();
         printIframe.contentWindow?.print();
-      } catch (err) {
-        console.error('Error invoking iframe print:', err);
-        // Fallback to window.print
+      } catch {
         window.print();
       }
 
-      // Cleanup iframe after a delay
       setTimeout(() => {
         try {
           document.body.removeChild(printIframe);
         } catch {
           // ignore
         }
-      }, 5000);
-    }, 400);
+      }, 4000);
+    }, 300);
 
     return true;
   } catch (error) {
@@ -121,18 +120,46 @@ export const printElementById = (elementId: string, docTitle: string = 'وثيق
 };
 
 /**
- * Downloads a DOM element as a high-resolution crisp PNG image.
- * Especially helpful for mobile users and offline archiving.
+ * Generates an image data URL from a DOM element using html2canvas.
+ */
+export const captureElementToDataUrl = async (elementId: string): Promise<string | null> => {
+  try {
+    const element = document.getElementById(elementId);
+    if (!element) {
+      console.warn(`Element with id "${elementId}" not found for capture.`);
+      return null;
+    }
+
+    const canvas = await html2canvas(element, {
+      scale: 2,
+      useCORS: true,
+      logging: false,
+      backgroundColor: '#ffffff',
+      allowTaint: true,
+      foreignObjectRendering: false,
+      windowWidth: Math.max(element.scrollWidth || 0, 800)
+    });
+
+    return canvas.toDataURL('image/png');
+  } catch (err) {
+    console.error('Failed to capture element to data URL:', err);
+    return null;
+  }
+};
+
+/**
+ * Downloads or shares a DOM element as a high-resolution crisp PNG image.
+ * Uses Web Share API on mobile devices and Blob download link as standard fallback.
  */
 export const downloadElementAsImage = async (
   elementId: string,
   fileName: string = 'وثيقة-المدرسة-الدولية-الخاصة.png'
-): Promise<boolean> => {
+): Promise<{ success: boolean; dataUrl?: string; mode?: 'share' | 'download' | 'preview' }> => {
   try {
     const element = document.getElementById(elementId);
     if (!element) {
       console.warn(`Element with id "${elementId}" not found for image generation.`);
-      return false;
+      return { success: false };
     }
 
     // Capture element with html2canvas at 2x scale for crystal clear text
@@ -142,22 +169,67 @@ export const downloadElementAsImage = async (
       logging: false,
       backgroundColor: '#ffffff',
       allowTaint: true,
-      windowWidth: element.scrollWidth || 1000
+      foreignObjectRendering: false,
+      windowWidth: Math.max(element.scrollWidth || 0, 800)
     });
 
     const dataUrl = canvas.toDataURL('image/png');
+    const safeFileName = fileName.endsWith('.png') ? fileName : `${fileName}.png`;
 
-    // Trigger download
+    // Try Web Share API (native on Android/iOS Chrome and Safari)
+    try {
+      if (typeof canvas.toBlob === 'function') {
+        const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
+        if (blob) {
+          const file = new File([blob], safeFileName, { type: 'image/png' });
+          if (navigator.canShare && navigator.canShare({ files: [file] })) {
+            try {
+              await navigator.share({
+                title: 'وثيقة رسمية - المدرسة الدولية الخاصة',
+                text: `استمارة رسمية صادرة من المدرسة الدولية الخاصة`,
+                files: [file]
+              });
+              return { success: true, dataUrl, mode: 'share' };
+            } catch (shareErr: any) {
+              if (shareErr.name !== 'AbortError') {
+                console.warn('Web Share cancelled or failed, falling back to direct download:', shareErr);
+              }
+            }
+          }
+
+          // Fallback: Blob URL download
+          const blobUrl = URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          link.download = safeFileName;
+          link.href = blobUrl;
+          link.target = '_blank';
+          document.body.appendChild(link);
+          link.click();
+          setTimeout(() => {
+            document.body.removeChild(link);
+            URL.revokeObjectURL(blobUrl);
+          }, 2000);
+
+          return { success: true, dataUrl, mode: 'download' };
+        }
+      }
+    } catch (blobErr) {
+      console.warn('Blob generation error, falling back to direct dataUrl link:', blobErr);
+    }
+
+    // Direct dataUrl download fallback
     const link = document.createElement('a');
-    link.download = fileName.endsWith('.png') ? fileName : `${fileName}.png`;
+    link.download = safeFileName;
     link.href = dataUrl;
     document.body.appendChild(link);
     link.click();
-    document.body.removeChild(link);
+    setTimeout(() => {
+      document.body.removeChild(link);
+    }, 1000);
 
-    return true;
+    return { success: true, dataUrl, mode: 'download' };
   } catch (error) {
     console.error('Failed to generate image from element:', error);
-    return false;
+    return { success: false };
   }
 };

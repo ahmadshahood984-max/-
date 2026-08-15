@@ -19,9 +19,9 @@ const firebaseConfig = {
 
 const databaseId = firebaseConfigJson.firestoreDatabaseId || "ai-studio-c3b19e71-cc85-420b-8314-cb9b70b9467c";
 
-// Suppress noisy transient connection messages
+// Suppress internal WebChannel / transient polling logs in browser console
 try {
-  setLogLevel('error');
+  setLogLevel('silent');
 } catch {
   // ignore
 }
@@ -29,9 +29,9 @@ try {
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 
-// Initialize Cloud Firestore with auto-detect long polling for optimal connection stability in proxied/sandboxed environments
+// Initialize Cloud Firestore with forced long polling for 100% reliable connection stability in sandboxed / iframe environments
 export const db = initializeFirestore(app, {
-  experimentalAutoDetectLongPolling: true,
+  experimentalForceLongPolling: true,
 }, databaseId);
 
 // Initialize Firebase Authentication

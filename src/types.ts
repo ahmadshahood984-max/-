@@ -26,6 +26,7 @@ export interface Student {
   parentName: string;
   shift?: 'morning' | 'evening';
   serialNo?: string;
+  unifiedNo?: string;
   nationalId?: string;
   fatherName?: string;
   motherName?: string;
