@@ -72,9 +72,14 @@ body {
     break-before: avoid !important;
     page-break-after: avoid !important;
     break-after: avoid !important;
-    max-height: 284mm !important;
+    min-height: 284mm !important;
+    max-height: 287mm !important;
+    height: 100% !important;
     box-sizing: border-box !important;
     overflow: hidden !important;
+    display: flex !important;
+    flex-direction: column !important;
+    justify-content: space-between !important;
   }
 
   /* Force background colors and exact border styling in print output */
