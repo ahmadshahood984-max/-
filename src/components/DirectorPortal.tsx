@@ -10897,169 +10897,169 @@ ${sampleEval}
                 </div>
 
                 {/* Printable Content Body */}
-                <div id="printable-student-card" className="p-6 md:p-8 space-y-5 bg-white text-slate-900">
+                <div id="printable-student-card" className="a4-single-page p-4 sm:p-5 print:p-2 space-y-2 print:space-y-1.5 bg-white text-slate-900">
                   {/* Ministry & School Header */}
-                  <div className="flex items-center justify-between border-b-2 border-slate-800 pb-4">
-                    <div className="space-y-1">
-                      <p className="text-xs font-bold text-slate-600">الجمهورية العربية السورية / وزارة التربية والتعليم</p>
-                      <h2 className="text-xl font-black text-slate-900 tracking-tight">المدرسة الدولية الخاصة</h2>
-                      <p className="text-xs font-bold text-emerald-800">قسم شؤون وقيد الطلاب - استمارة تسجيل وقيد طالب (العام الدراسي 2026/2027)</p>
+                  <div className="flex items-center justify-between border-b-2 border-slate-900 pb-2 mb-1">
+                    <div className="space-y-0.5">
+                      <p className="text-[11px] font-bold text-slate-600">الجمهورية العربية السورية / وزارة التربية والتعليم</p>
+                      <h2 className="text-lg font-black text-slate-900 tracking-tight">المدرسة الدولية الخاصة</h2>
+                      <p className="text-[10.5px] font-bold text-emerald-800">قسم شؤون وقيد الطلاب - استمارة تسجيل وقيد طالب (العام الدراسي 2026/2027)</p>
                     </div>
 
-                    <div className="text-left space-y-1">
-                      <div className="w-16 h-16 rounded-2xl bg-emerald-50 border-2 border-emerald-300 flex items-center justify-center text-emerald-700 font-black text-xs text-center p-1 shadow-xs inline-block">
-                        {schoolAppIcon ? (
-                          <img src={schoolAppIcon} alt="شعار" className="w-full h-full object-cover rounded-xl" />
-                        ) : (
-                          <span className="text-[10px] leading-tight font-black">المدرسة الدولية الخاصة</span>
-                        )}
-                      </div>
-                      <div className="text-[10px] font-mono font-bold text-slate-500">
+                    <div className="text-left flex items-center gap-3">
+                      <div className="text-[9.5px] font-mono font-bold text-slate-500 text-left">
                         <span>التاريخ: {new Date().toLocaleDateString('ar-SY', { year: 'numeric', month: '2-digit', day: '2-digit' })}</span>
                         <br />
                         <span>الوقت: {new Date().toLocaleTimeString('ar-SY', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}</span>
+                      </div>
+                      <div className="w-13 h-13 rounded-xl bg-emerald-50 border border-emerald-300 flex items-center justify-center text-emerald-700 font-black text-[10px] text-center p-1 shadow-2xs">
+                        {schoolAppIcon ? (
+                          <img src={schoolAppIcon} alt="شعار" className="w-full h-full object-cover rounded-lg" />
+                        ) : (
+                          <span className="text-[9px] leading-tight font-black">المدرسة الدولية</span>
+                        )}
                       </div>
                     </div>
                   </div>
 
                   {/* Student Title Banner */}
-                  <div className="bg-emerald-700 text-white p-4 rounded-2xl flex items-center justify-between shadow-sm">
+                  <div className="bg-emerald-700 text-white py-2 px-3.5 rounded-xl flex items-center justify-between shadow-2xs">
                     <div className="space-y-0.5">
-                      <span className="text-[10px] font-bold text-emerald-200 block">اسم الطالب الثلاثي والنسبة</span>
-                      <h1 className="text-xl font-black text-white">{regStudentCardModal.name}</h1>
+                      <span className="text-[9px] font-bold text-emerald-200 block">اسم الطالب الثلاثي والنسبة</span>
+                      <h1 className="text-base font-black text-white">{regStudentCardModal.name}</h1>
                     </div>
-                    <div className="flex items-center gap-4 text-left font-mono">
+                    <div className="flex items-center gap-3 text-left font-mono">
                       <div>
-                        <span className="text-[10px] font-bold text-emerald-200 block">الرقم التسلسلي</span>
-                        <span className="text-sm font-black text-amber-300">#{regStudentCardModal.serialNo || '1'}</span>
+                        <span className="text-[8.5px] font-bold text-emerald-200 block">الرقم التسلسلي</span>
+                        <span className="text-xs font-black text-amber-300">#{regStudentCardModal.serialNo || '1'}</span>
                       </div>
-                      <div className="border-r border-emerald-600/60 pr-4">
-                        <span className="text-[10px] font-bold text-emerald-200 block">الرقم الموحد</span>
-                        <span className="text-sm font-black text-white">#{regStudentCardModal.unifiedNo || '75'}</span>
+                      <div className="border-r border-emerald-600/60 pr-3">
+                        <span className="text-[8.5px] font-bold text-emerald-200 block">الرقم الموحد</span>
+                        <span className="text-xs font-black text-white">#{regStudentCardModal.unifiedNo || '75'}</span>
                       </div>
-                      <div className="border-r border-emerald-600/60 pr-4">
-                        <span className="text-[10px] font-bold text-emerald-200 block">الرقم الوطني / القيد</span>
-                        <span className="text-sm font-black tracking-wide">{regStudentCardModal.nationalId || regStudentCardModal.rollNo || '123456789'}</span>
+                      <div className="border-r border-emerald-600/60 pr-3">
+                        <span className="text-[8.5px] font-bold text-emerald-200 block">الرقم الوطني / القيد</span>
+                        <span className="text-xs font-black tracking-wide">{regStudentCardModal.nationalId || regStudentCardModal.rollNo || '123456789'}</span>
                       </div>
                     </div>
                   </div>
 
                   {/* Section 1: البيانات الشخصية والأساسية */}
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2 border-b border-slate-200 pb-1">
-                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-600"></span>
-                      <h4 className="text-xs font-black text-slate-800">1. البيانات الشخصية ومحل الولادة</h4>
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-1.5 border-b border-slate-200 pb-0.5">
+                      <span className="w-2 h-2 rounded-full bg-emerald-600"></span>
+                      <h4 className="text-[11px] font-black text-slate-800">1. البيانات الشخصية ومحل الولادة</h4>
                     </div>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs">
-                      <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200">
-                        <span className="text-slate-500 text-[10px] block font-bold">الجنس</span>
-                        <span className="font-extrabold text-slate-900">{regStudentCardModal.gender === 'female' ? 'أنثى 👧' : 'ذكر 👦'}</span>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-xs">
+                      <div className="bg-slate-50 p-1.5 px-2 rounded-lg border border-slate-200">
+                        <span className="text-slate-500 text-[9px] block font-bold">الجنس</span>
+                        <span className="font-extrabold text-slate-900 text-[11px]">{regStudentCardModal.gender === 'female' ? 'أنثى 👧' : 'ذكر 👦'}</span>
                       </div>
-                      <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200">
-                        <span className="text-slate-500 text-[10px] block font-bold">تاريخ الولادة</span>
-                        <span className="font-extrabold text-slate-900 font-mono">{regStudentCardModal.dob || '15/05/2012'}</span>
+                      <div className="bg-slate-50 p-1.5 px-2 rounded-lg border border-slate-200">
+                        <span className="text-slate-500 text-[9px] block font-bold">تاريخ الولادة</span>
+                        <span className="font-extrabold text-slate-900 font-mono text-[11px]">{regStudentCardModal.dob || '15/05/2012'}</span>
                       </div>
-                      <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200">
-                        <span className="text-slate-500 text-[10px] block font-bold">مكان الولادة</span>
-                        <span className="font-extrabold text-slate-900">{regStudentCardModal.birthPlace || 'دمشق'}</span>
+                      <div className="bg-slate-50 p-1.5 px-2 rounded-lg border border-slate-200">
+                        <span className="text-slate-500 text-[9px] block font-bold">مكان الولادة</span>
+                        <span className="font-extrabold text-slate-900 text-[11px]">{regStudentCardModal.birthPlace || 'دمشق'}</span>
                       </div>
-                      <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200">
-                        <span className="text-slate-500 text-[10px] block font-bold">الحالة الصحية</span>
-                        <span className="font-extrabold text-emerald-800">{regStudentCardModal.healthStatus || 'سليم / ممتاز'}</span>
+                      <div className="bg-slate-50 p-1.5 px-2 rounded-lg border border-slate-200">
+                        <span className="text-slate-500 text-[9px] block font-bold">الحالة الصحية</span>
+                        <span className="font-extrabold text-emerald-800 text-[11px]">{regStudentCardModal.healthStatus || 'سليم / ممتاز'}</span>
                       </div>
                     </div>
                   </div>
 
                   {/* Section 2: البيانات العائلية ومحل الإقامة والسكن */}
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2 border-b border-slate-200 pb-1">
-                      <span className="w-2.5 h-2.5 rounded-full bg-indigo-600"></span>
-                      <h4 className="text-xs font-black text-slate-800">2. البيانات العائلية والعنوان بالتفصيل</h4>
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-1.5 border-b border-slate-200 pb-0.5">
+                      <span className="w-2 h-2 rounded-full bg-indigo-600"></span>
+                      <h4 className="text-[11px] font-black text-slate-800">2. البيانات العائلية والعنوان بالتفصيل</h4>
                     </div>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs">
-                      <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200">
-                        <span className="text-slate-500 text-[10px] block font-bold">اسم الأب</span>
-                        <span className="font-extrabold text-slate-900">{regStudentCardModal.fatherName || 'خالد'}</span>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-xs">
+                      <div className="bg-slate-50 p-1.5 px-2 rounded-lg border border-slate-200">
+                        <span className="text-slate-500 text-[9px] block font-bold">اسم الأب</span>
+                        <span className="font-extrabold text-slate-900 text-[11px]">{regStudentCardModal.fatherName || 'خالد'}</span>
                       </div>
-                      <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200">
-                        <span className="text-slate-500 text-[10px] block font-bold">اسم الجد</span>
-                        <span className="font-extrabold text-slate-900">{regStudentCardModal.grandfatherName || 'عبد الله'}</span>
+                      <div className="bg-slate-50 p-1.5 px-2 rounded-lg border border-slate-200">
+                        <span className="text-slate-500 text-[9px] block font-bold">اسم الجد</span>
+                        <span className="font-extrabold text-slate-900 text-[11px]">{regStudentCardModal.grandfatherName || 'عبد الله'}</span>
                       </div>
-                      <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200">
-                        <span className="text-slate-500 text-[10px] block font-bold">اسم الأم</span>
-                        <span className="font-extrabold text-slate-900">{regStudentCardModal.motherName || 'مريم'}</span>
+                      <div className="bg-slate-50 p-1.5 px-2 rounded-lg border border-slate-200">
+                        <span className="text-slate-500 text-[9px] block font-bold">اسم الأم</span>
+                        <span className="font-extrabold text-slate-900 text-[11px]">{regStudentCardModal.motherName || 'مريم'}</span>
                       </div>
-                      <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200">
-                        <span className="text-slate-500 text-[10px] block font-bold">نسبة الأم (الكنية)</span>
-                        <span className="font-extrabold text-slate-900">{regStudentCardModal.motherMaidenName || 'النجار'}</span>
+                      <div className="bg-slate-50 p-1.5 px-2 rounded-lg border border-slate-200">
+                        <span className="text-slate-500 text-[9px] block font-bold">نسبة الأم (الكنية)</span>
+                        <span className="font-extrabold text-slate-900 text-[11px]">{regStudentCardModal.motherMaidenName || 'النجار'}</span>
                       </div>
-                      <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200 col-span-2 sm:col-span-2">
-                        <span className="text-slate-500 text-[10px] block font-bold">مكان الإقامة / المنطقة</span>
-                        <span className="font-extrabold text-slate-900">{regStudentCardModal.residencePlace || 'الحي الشمالي'}</span>
+                      <div className="bg-slate-50 p-1.5 px-2 rounded-lg border border-slate-200 col-span-2 sm:col-span-2">
+                        <span className="text-slate-500 text-[9px] block font-bold">مكان الإقامة / المنطقة</span>
+                        <span className="font-extrabold text-slate-900 text-[11px]">{regStudentCardModal.residencePlace || 'الحي الشمالي'}</span>
                       </div>
-                      <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200 col-span-2 sm:col-span-2">
-                        <span className="text-slate-500 text-[10px] block font-bold">العنوان التفصيلي</span>
-                        <span className="font-extrabold text-slate-900">{regStudentCardModal.address || 'شارع الجامعة - بناية السلام'}</span>
+                      <div className="bg-slate-50 p-1.5 px-2 rounded-lg border border-slate-200 col-span-2 sm:col-span-2">
+                        <span className="text-slate-500 text-[9px] block font-bold">العنوان التفصيلي</span>
+                        <span className="font-extrabold text-slate-900 text-[11px]">{regStudentCardModal.address || 'شارع الجامعة - بناية السلام'}</span>
                       </div>
                     </div>
                   </div>
 
                   {/* Section 3: القيد الأكاديمي والخدمات المدرسية */}
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2 border-b border-slate-200 pb-1">
-                      <span className="w-2.5 h-2.5 rounded-full bg-amber-600"></span>
-                      <h4 className="text-xs font-black text-slate-800">3. القيد الأكاديمي والخدمات المدرسية</h4>
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-1.5 border-b border-slate-200 pb-0.5">
+                      <span className="w-2 h-2 rounded-full bg-amber-600"></span>
+                      <h4 className="text-[11px] font-black text-slate-800">3. القيد الأكاديمي والخدمات المدرسية</h4>
                     </div>
-                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 text-xs">
-                      <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200">
-                        <span className="text-slate-500 text-[10px] block font-bold">الصف الدراسي الحالي</span>
-                        <span className="font-black text-emerald-800">
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 text-xs">
+                      <div className="bg-slate-50 p-1.5 px-2 rounded-lg border border-slate-200">
+                        <span className="text-slate-500 text-[9px] block font-bold">الصف الدراسي الحالي</span>
+                        <span className="font-black text-emerald-800 text-[11px]">
                           {classes.find(c => c.id === regStudentCardModal.classId)?.name || (regStudentCardModal.classId && regStudentCardModal.classId !== 'class-default' ? regStudentCardModal.classId : 'الصف الخامس')}
                         </span>
                       </div>
-                      <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200">
-                        <span className="text-slate-500 text-[10px] block font-bold">الفوج / الدوام الدراسي</span>
-                        <span className="font-black text-slate-900">
+                      <div className="bg-slate-50 p-1.5 px-2 rounded-lg border border-slate-200">
+                        <span className="text-slate-500 text-[9px] block font-bold">الفوج / الدوام الدراسي</span>
+                        <span className="font-black text-slate-900 text-[11px]">
                           {regStudentCardModal.shift === 'evening' ? '🌙 الفوج المسائي' : '☀️ الفوج الصباحي'}
                         </span>
                       </div>
-                      <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200">
-                        <span className="text-slate-500 text-[10px] block font-bold">المدرسة السابقة</span>
-                        <span className="font-bold text-slate-900">{regStudentCardModal.previousSchool || 'مدرسة الأمل الوطنية'}</span>
+                      <div className="bg-slate-50 p-1.5 px-2 rounded-lg border border-slate-200">
+                        <span className="text-slate-500 text-[9px] block font-bold">المدرسة السابقة</span>
+                        <span className="font-bold text-slate-900 text-[11px]">{regStudentCardModal.previousSchool || 'مدرسة الأمل الوطنية'}</span>
                       </div>
-                      <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200">
-                        <span className="text-slate-500 text-[10px] block font-bold">المواصلات المدرسية</span>
-                        <span className="font-bold text-slate-900">{regStudentCardModal.transportation || 'حافلة المدرسة'}</span>
+                      <div className="bg-slate-50 p-1.5 px-2 rounded-lg border border-slate-200">
+                        <span className="text-slate-500 text-[9px] block font-bold">المواصلات المدرسية</span>
+                        <span className="font-bold text-slate-900 text-[11px]">{regStudentCardModal.transportation || 'حافلة المدرسة'}</span>
                       </div>
-                      <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200">
-                        <span className="text-slate-500 text-[10px] block font-bold">تسليم الكتب المدرسية</span>
-                        <span className="font-black text-emerald-700">{regStudentCardModal.booksStatus || 'تم التسليم'}</span>
+                      <div className="bg-slate-50 p-1.5 px-2 rounded-lg border border-slate-200">
+                        <span className="text-slate-500 text-[9px] block font-bold">تسليم الكتب المدرسية</span>
+                        <span className="font-black text-emerald-700 text-[11px]">{regStudentCardModal.booksStatus || 'تم التسليم'}</span>
                       </div>
-                      <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200">
-                        <span className="text-slate-500 text-[10px] block font-bold">تسليم اللباس المدرسي</span>
-                        <span className="font-black text-emerald-700">{regStudentCardModal.uniformStatus || 'تم التسليم'}</span>
+                      <div className="bg-slate-50 p-1.5 px-2 rounded-lg border border-slate-200">
+                        <span className="text-slate-500 text-[9px] block font-bold">تسليم اللباس المدرسي</span>
+                        <span className="font-black text-emerald-700 text-[11px]">{regStudentCardModal.uniformStatus || 'تم التسليم'}</span>
                       </div>
                     </div>
                   </div>
 
                   {/* Section 4: بيانات ولي الأمر والوصي القانوني */}
-                  <div className="bg-emerald-50/90 border-2 border-emerald-400 p-4 rounded-2xl space-y-3">
-                    <div className="flex items-center justify-between border-b border-emerald-200 pb-2">
-                      <div className="flex items-center gap-2 text-emerald-950 font-black text-xs sm:text-sm">
-                        <Users className="w-4 h-4 text-emerald-700" />
+                  <div className="bg-emerald-50/90 border border-emerald-300 p-2.5 rounded-xl space-y-1.5">
+                    <div className="flex items-center justify-between border-b border-emerald-200 pb-1">
+                      <div className="flex items-center gap-1.5 text-emerald-950 font-black text-[11px]">
+                        <Users className="w-3.5 h-3.5 text-emerald-700" />
                         <span>4. بيانات ولي الأمر والوصي القانوني المعتمد</span>
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
                       <div>
-                        <span className="text-slate-600 text-[10px] font-bold block mb-0.5">اسم ولي الأمر والنسبة:</span>
-                        <p className="font-black text-slate-900 text-sm">{regStudentCardModal.parentName || `ولي أمر ${regStudentCardModal.name}`}</p>
+                        <span className="text-slate-600 text-[9px] font-bold block mb-0.5">اسم ولي الأمر والنسبة:</span>
+                        <p className="font-black text-slate-900 text-xs">{regStudentCardModal.parentName || `ولي أمر ${regStudentCardModal.name}`}</p>
                       </div>
 
                       <div>
-                        <span className="text-slate-600 text-[10px] font-bold block mb-0.5">رقم هاتف التواصل المعتمد:</span>
-                        <p className="font-mono font-black text-emerald-950 text-sm dir-ltr text-right">
+                        <span className="text-slate-600 text-[9px] font-bold block mb-0.5">رقم هاتف التواصل المعتمد:</span>
+                        <p className="font-mono font-black text-emerald-950 text-xs dir-ltr text-right">
                           {regStudentCardModal.parentPhone || '0501234567'}
                         </p>
                       </div>
@@ -11067,27 +11067,27 @@ ${sampleEval}
                   </div>
 
                   {/* Signatures & Declarations */}
-                  <div className="pt-3 border-t border-slate-300 space-y-3">
-                    <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200 text-[10px] leading-relaxed text-slate-700 font-semibold text-justify">
+                  <div className="pt-1.5 border-t border-slate-300 space-y-1.5">
+                    <div className="bg-slate-50 p-1.5 rounded-lg border border-slate-200 text-[9px] leading-relaxed text-slate-700 font-semibold text-justify">
                       <span className="font-black text-slate-900">إقرار وتعهد ولي الأمر: </span>
                       أتعهد أنا ولي أمر الطالب المذكور أعلاه بصحة كافة البيانات والمعلومات الواردة في هذه الاستمارة، والالتزام التام بكافة القوانين واللوائح التنظيمية والتعليمات المدرسية الصادرة عن إدارة المدرسة الدولية الخاصة.
                     </div>
 
-                    <div className="grid grid-cols-3 text-center text-xs font-black text-slate-800 gap-3 pt-2">
-                      <div className="border border-slate-200 rounded-xl p-2.5 bg-slate-50/50">
-                        <p className="text-[11px] text-slate-600 font-bold mb-1">توقيع ولي الأمر / الوصي:</p>
-                        <div className="h-10 border-b border-dashed border-slate-300 mb-1"></div>
-                        <span className="text-[10px] text-slate-400 font-normal">الاسم والتوقيع</span>
+                    <div className="grid grid-cols-3 text-center text-xs font-black text-slate-800 gap-2 pt-1">
+                      <div className="border border-slate-200 rounded-lg p-1.5 bg-slate-50/50">
+                        <p className="text-[9.5px] text-slate-600 font-bold mb-0.5">توقيع ولي الأمر / الوصي:</p>
+                        <div className="h-6 border-b border-dashed border-slate-300 mb-0.5"></div>
+                        <span className="text-[8.5px] text-slate-400 font-normal">الاسم والتوقيع</span>
                       </div>
-                      <div className="border border-slate-200 rounded-xl p-2.5 bg-slate-50/50">
-                        <p className="text-[11px] text-slate-600 font-bold mb-1">تدقيق ومصادقة شؤون الطلاب:</p>
-                        <div className="h-10 border-b border-dashed border-slate-300 mb-1"></div>
-                        <span className="text-[10px] text-slate-400 font-normal">أمين السر / مسجل الطلاب</span>
+                      <div className="border border-slate-200 rounded-lg p-1.5 bg-slate-50/50">
+                        <p className="text-[9.5px] text-slate-600 font-bold mb-0.5">تدقيق ومصادقة شؤون الطلاب:</p>
+                        <div className="h-6 border-b border-dashed border-slate-300 mb-0.5"></div>
+                        <span className="text-[8.5px] text-slate-400 font-normal">أمين السر / مسجل الطلاب</span>
                       </div>
-                      <div className="border border-slate-200 rounded-xl p-2.5 bg-slate-50/50">
-                        <p className="text-[11px] text-slate-600 font-bold mb-1">خاتم وتوقيع المدير العام:</p>
-                        <div className="h-10 border-b border-dashed border-slate-300 mb-1"></div>
-                        <span className="text-[10px] text-slate-400 font-normal">المدرسة الدولية الخاصة</span>
+                      <div className="border border-slate-200 rounded-lg p-1.5 bg-slate-50/50">
+                        <p className="text-[9.5px] text-slate-600 font-bold mb-0.5">خاتم وتوقيع المدير العام:</p>
+                        <div className="h-6 border-b border-dashed border-slate-300 mb-0.5"></div>
+                        <span className="text-[8.5px] text-slate-400 font-normal">المدرسة الدولية الخاصة</span>
                       </div>
                     </div>
                   </div>
@@ -11173,204 +11173,200 @@ ${sampleEval}
                 </div>
 
                 {/* Printable Blank Form Content */}
-                <div id="printable-blank-form" className="p-6 md:p-8 space-y-5 bg-white text-slate-900">
+                <div id="printable-blank-form" className="a4-single-page p-4 sm:p-5 print:p-2 space-y-2 print:space-y-1.5 bg-white text-slate-900">
                   {/* Ministry & School Header */}
-                  <div className="flex items-center justify-between border-b-2 border-slate-800 pb-4">
-                    <div className="space-y-1">
-                      <p className="text-xs font-bold text-slate-600">الجمهورية العربية السورية / وزارة التربية والتعليم</p>
-                      <h2 className="text-xl font-black text-slate-900 tracking-tight">المدرسة الدولية الخاصة</h2>
-                      <p className="text-xs font-bold text-amber-800">قسم شؤون وقيد الطلاب - استمارة تسجيل وقيد طالب جديد (نموذج رسمي فارغ 2026/2027)</p>
+                  <div className="flex items-center justify-between border-b-2 border-slate-900 pb-2 mb-1">
+                    <div className="space-y-0.5">
+                      <p className="text-[11px] font-bold text-slate-600">الجمهورية العربية السورية / وزارة التربية والتعليم</p>
+                      <h2 className="text-lg font-black text-slate-900 tracking-tight">المدرسة الدولية الخاصة</h2>
+                      <p className="text-[10.5px] font-bold text-amber-800">قسم شؤون وقيد الطلاب - استمارة تسجيل وقيد طالب جديد (نموذج رسمي فارغ 2026/2027)</p>
                     </div>
 
-                    <div className="text-left space-y-1">
-                      <div className="w-16 h-16 rounded-2xl bg-amber-50 border-2 border-amber-300 flex items-center justify-center text-amber-800 font-black text-xs text-center p-1 shadow-xs inline-block">
-                        {schoolAppIcon ? (
-                          <img src={schoolAppIcon} alt="شعار" className="w-full h-full object-cover rounded-xl" />
-                        ) : (
-                          <span className="text-[10px] leading-tight font-black">المدرسة الدولية الخاصة</span>
-                        )}
-                      </div>
-                      <div className="text-[10px] font-mono font-bold text-slate-500">
+                    <div className="text-left flex items-center gap-3">
+                      <div className="text-[9.5px] font-mono font-bold text-slate-500 text-left">
                         <span>تاريخ الطباعة: {new Date().toLocaleDateString('ar-SY', { year: 'numeric', month: '2-digit', day: '2-digit' })}</span>
                         <br />
                         <span>وقت الطباعة: {new Date().toLocaleTimeString('ar-SY', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}</span>
+                      </div>
+                      <div className="w-13 h-13 rounded-xl bg-amber-50 border border-amber-300 flex items-center justify-center text-amber-800 font-black text-[10px] text-center p-1 shadow-2xs">
+                        {schoolAppIcon ? (
+                          <img src={schoolAppIcon} alt="شعار" className="w-full h-full object-cover rounded-lg" />
+                        ) : (
+                          <span className="text-[9px] leading-tight font-black">المدرسة الدولية</span>
+                        )}
                       </div>
                     </div>
                   </div>
 
                   {/* Header Title Box */}
-                  <div className="border-2 border-slate-800 p-3 rounded-xl text-center bg-slate-50">
-                    <h3 className="text-base font-black text-slate-900">استمارة طلب تسجيل وقيد طالب في المدرسة الدولية الخاصة</h3>
-                    <p className="text-xs text-slate-600 font-semibold mt-0.5">يرجى تعبئة كافة الحقول والمعلومات التالية بدقة وبخط واضح</p>
+                  <div className="border border-slate-700 py-1 px-3 rounded-lg text-center bg-slate-50">
+                    <h3 className="text-xs font-black text-slate-900">استمارة طلب تسجيل وقيد طالب في المدرسة الدولية الخاصة</h3>
+                    <p className="text-[9.5px] text-slate-600 font-semibold">يرجى تعبئة كافة الحقول والمعلومات التالية بدقة وبخط واضح</p>
                   </div>
 
                   {/* Section 1: البيانات الأساسية للطالب */}
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2 border-b border-slate-200 pb-1">
-                      <span className="w-2.5 h-2.5 rounded-full bg-slate-800"></span>
-                      <h4 className="text-xs font-black text-slate-800">أولاً: بيانات الطالب الشخصية والأساسية</h4>
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-1.5 border-b border-slate-200 pb-0.5">
+                      <span className="w-2 h-2 rounded-full bg-slate-800"></span>
+                      <h4 className="text-[11px] font-black text-slate-800">أولاً: بيانات الطالب الشخصية والأساسية</h4>
                     </div>
-                    <div className="grid grid-cols-2 gap-3 text-xs">
-                      <div className="border border-slate-300 rounded-lg p-2 bg-slate-50/40">
-                        <span className="font-bold text-slate-600 text-[11px] block">اسم الطالب الثلاثي والنسبة:</span>
-                        <div className="h-6 border-b border-dotted border-slate-400 mt-1"></div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-xs">
+                      <div className="border border-slate-300 rounded-lg p-1.5 bg-slate-50/40 col-span-2">
+                        <span className="font-bold text-slate-600 text-[10px] block">اسم الطالب الثلاثي والنسبة:</span>
+                        <div className="h-5 border-b border-dotted border-slate-400 mt-0.5"></div>
                       </div>
-                      <div className="border border-slate-300 rounded-lg p-2 bg-slate-50/40">
-                        <span className="font-bold text-slate-600 text-[11px] block">الرقم الوطني / القيد المدني:</span>
-                        <div className="h-6 border-b border-dotted border-slate-400 mt-1"></div>
+                      <div className="border border-slate-300 rounded-lg p-1.5 bg-slate-50/40">
+                        <span className="font-bold text-slate-600 text-[10px] block">الرقم الوطني / القيد:</span>
+                        <div className="h-5 border-b border-dotted border-slate-400 mt-0.5"></div>
                       </div>
-                      <div className="border border-slate-300 rounded-lg p-2 bg-slate-50/40">
-                        <span className="font-bold text-slate-600 text-[11px] block">الرقم التسلسلي:</span>
-                        <div className="h-6 border-b border-dotted border-slate-400 mt-1"></div>
+                      <div className="border border-slate-300 rounded-lg p-1.5 bg-slate-50/40">
+                        <span className="font-bold text-slate-600 text-[10px] block">الرقم التسلسلي / الموحد:</span>
+                        <div className="h-5 border-b border-dotted border-slate-400 mt-0.5"></div>
                       </div>
-                      <div className="border border-emerald-300 rounded-lg p-2 bg-emerald-50/30">
-                        <span className="font-bold text-emerald-800 text-[11px] block">الرقم الموحد (≥ 75):</span>
-                        <div className="h-6 border-b border-dotted border-emerald-400 mt-1"></div>
-                      </div>
-                      <div className="border border-slate-300 rounded-lg p-2 bg-slate-50/40 flex items-center justify-between">
-                        <span className="font-bold text-slate-600 text-[11px]">الجنس:</span>
-                        <div className="flex items-center gap-4 font-bold text-slate-800">
+                      <div className="border border-slate-300 rounded-lg p-1.5 bg-slate-50/40 flex items-center justify-between">
+                        <span className="font-bold text-slate-600 text-[10px]">الجنس:</span>
+                        <div className="flex items-center gap-2 font-bold text-slate-800 text-[10px]">
                           <span>[ &nbsp; ] ذكر</span>
                           <span>[ &nbsp; ] أنثى</span>
                         </div>
                       </div>
-                      <div className="border border-slate-300 rounded-lg p-2 bg-slate-50/40">
-                        <span className="font-bold text-slate-600 text-[11px] block">تاريخ الولادة:</span>
-                        <div className="h-6 border-b border-dotted border-slate-400 mt-1 text-slate-400 text-left font-mono text-[11px] pl-2">
+                      <div className="border border-slate-300 rounded-lg p-1.5 bg-slate-50/40">
+                        <span className="font-bold text-slate-600 text-[10px] block">تاريخ الولادة:</span>
+                        <div className="h-5 border-b border-dotted border-slate-400 mt-0.5 text-slate-400 text-left font-mono text-[10px]">
                           ..... / ..... / 20..... م
                         </div>
                       </div>
-                      <div className="border border-slate-300 rounded-lg p-2 bg-slate-50/40">
-                        <span className="font-bold text-slate-600 text-[11px] block">مكان الولادة (المحافظة / المدينة):</span>
-                        <div className="h-6 border-b border-dotted border-slate-400 mt-1"></div>
+                      <div className="border border-slate-300 rounded-lg p-1.5 bg-slate-50/40">
+                        <span className="font-bold text-slate-600 text-[10px] block">مكان الولادة (المدينة):</span>
+                        <div className="h-5 border-b border-dotted border-slate-400 mt-0.5"></div>
                       </div>
-                      <div className="border border-slate-300 rounded-lg p-2 bg-slate-50/40 col-span-2">
-                        <span className="font-bold text-slate-600 text-[11px] block">الحالة الصحية للطالب (سليم / أمراض مزمنة أو حساسية):</span>
-                        <div className="h-6 border-b border-dotted border-slate-400 mt-1"></div>
+                      <div className="border border-slate-300 rounded-lg p-1.5 bg-slate-50/40">
+                        <span className="font-bold text-slate-600 text-[10px] block">الحالة الصحية للطالب:</span>
+                        <div className="h-5 border-b border-dotted border-slate-400 mt-0.5"></div>
                       </div>
                     </div>
                   </div>
 
                   {/* Section 2: البيانات العائلية ومحل السكن */}
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2 border-b border-slate-200 pb-1">
-                      <span className="w-2.5 h-2.5 rounded-full bg-slate-800"></span>
-                      <h4 className="text-xs font-black text-slate-800">ثانياً: البيانات العائلية ومحل الإقامة</h4>
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-1.5 border-b border-slate-200 pb-0.5">
+                      <span className="w-2 h-2 rounded-full bg-slate-800"></span>
+                      <h4 className="text-[11px] font-black text-slate-800">ثانياً: البيانات العائلية ومحل الإقامة</h4>
                     </div>
-                    <div className="grid grid-cols-2 gap-3 text-xs">
-                      <div className="border border-slate-300 rounded-lg p-2 bg-slate-50/40">
-                        <span className="font-bold text-slate-600 text-[11px] block">اسم الأب:</span>
-                        <div className="h-6 border-b border-dotted border-slate-400 mt-1"></div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-xs">
+                      <div className="border border-slate-300 rounded-lg p-1.5 bg-slate-50/40">
+                        <span className="font-bold text-slate-600 text-[10px] block">اسم الأب:</span>
+                        <div className="h-5 border-b border-dotted border-slate-400 mt-0.5"></div>
                       </div>
-                      <div className="border border-slate-300 rounded-lg p-2 bg-slate-50/40">
-                        <span className="font-bold text-slate-600 text-[11px] block">اسم الجد:</span>
-                        <div className="h-6 border-b border-dotted border-slate-400 mt-1"></div>
+                      <div className="border border-slate-300 rounded-lg p-1.5 bg-slate-50/40">
+                        <span className="font-bold text-slate-600 text-[10px] block">اسم الجد:</span>
+                        <div className="h-5 border-b border-dotted border-slate-400 mt-0.5"></div>
                       </div>
-                      <div className="border border-slate-300 rounded-lg p-2 bg-slate-50/40">
-                        <span className="font-bold text-slate-600 text-[11px] block">اسم الأم الثلاثي:</span>
-                        <div className="h-6 border-b border-dotted border-slate-400 mt-1"></div>
+                      <div className="border border-slate-300 rounded-lg p-1.5 bg-slate-50/40">
+                        <span className="font-bold text-slate-600 text-[10px] block">اسم الأم الثلاثي:</span>
+                        <div className="h-5 border-b border-dotted border-slate-400 mt-0.5"></div>
                       </div>
-                      <div className="border border-slate-300 rounded-lg p-2 bg-slate-50/40">
-                        <span className="font-bold text-slate-600 text-[11px] block">نسبة الأم (الكنية):</span>
-                        <div className="h-6 border-b border-dotted border-slate-400 mt-1"></div>
+                      <div className="border border-slate-300 rounded-lg p-1.5 bg-slate-50/40">
+                        <span className="font-bold text-slate-600 text-[10px] block">نسبة الأم (الكنية):</span>
+                        <div className="h-5 border-b border-dotted border-slate-400 mt-0.5"></div>
                       </div>
-                      <div className="border border-slate-300 rounded-lg p-2 bg-slate-50/40">
-                        <span className="font-bold text-slate-600 text-[11px] block">مكان الإقامة / المنطقة:</span>
-                        <div className="h-6 border-b border-dotted border-slate-400 mt-1"></div>
+                      <div className="border border-slate-300 rounded-lg p-1.5 bg-slate-50/40 col-span-2">
+                        <span className="font-bold text-slate-600 text-[10px] block">مكان الإقامة / المنطقة:</span>
+                        <div className="h-5 border-b border-dotted border-slate-400 mt-0.5"></div>
                       </div>
-                      <div className="border border-slate-300 rounded-lg p-2 bg-slate-50/40">
-                        <span className="font-bold text-slate-600 text-[11px] block">العنوان التفصيلي (الشارع - البناء):</span>
-                        <div className="h-6 border-b border-dotted border-slate-400 mt-1"></div>
+                      <div className="border border-slate-300 rounded-lg p-1.5 bg-slate-50/40 col-span-2">
+                        <span className="font-bold text-slate-600 text-[10px] block">العنوان التفصيلي (الشارع - البناء):</span>
+                        <div className="h-5 border-b border-dotted border-slate-400 mt-0.5"></div>
                       </div>
                     </div>
                   </div>
 
                   {/* Section 3: القيد الأكاديمي والخدمات */}
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2 border-b border-slate-200 pb-1">
-                      <span className="w-2.5 h-2.5 rounded-full bg-slate-800"></span>
-                      <h4 className="text-xs font-black text-slate-800">ثالثاً: القيد الأكاديمي والخدمات المدرسية</h4>
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-1.5 border-b border-slate-200 pb-0.5">
+                      <span className="w-2 h-2 rounded-full bg-slate-800"></span>
+                      <h4 className="text-[11px] font-black text-slate-800">ثالثاً: القيد الأكاديمي والخدمات المدرسية</h4>
                     </div>
-                    <div className="grid grid-cols-2 gap-3 text-xs">
-                      <div className="border border-slate-300 rounded-lg p-2 bg-slate-50/40">
-                        <span className="font-bold text-slate-600 text-[11px] block">الصف المطلوب التسجيل فيه:</span>
-                        <div className="h-6 border-b border-dotted border-slate-400 mt-1"></div>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 text-xs">
+                      <div className="border border-slate-300 rounded-lg p-1.5 bg-slate-50/40">
+                        <span className="font-bold text-slate-600 text-[10px] block">الصف المطلوب التسجيل فيه:</span>
+                        <div className="h-5 border-b border-dotted border-slate-400 mt-0.5"></div>
                       </div>
-                      <div className="border border-slate-300 rounded-lg p-2 bg-slate-50/40 flex items-center justify-between">
-                        <span className="font-bold text-slate-600 text-[11px]">الفوج / الدوام:</span>
-                        <div className="flex items-center gap-3 font-bold text-slate-800">
-                          <span>[ &nbsp; ] الفوج الصباحي ☀️</span>
-                          <span>[ &nbsp; ] الفوج المسائي 🌙</span>
+                      <div className="border border-slate-300 rounded-lg p-1.5 bg-slate-50/40 flex items-center justify-between">
+                        <span className="font-bold text-slate-600 text-[10px]">الفوج / الدوام:</span>
+                        <div className="flex items-center gap-2 font-bold text-slate-800 text-[10px]">
+                          <span>[ &nbsp; ] صباحي ☀️</span>
+                          <span>[ &nbsp; ] مسائي 🌙</span>
                         </div>
                       </div>
-                      <div className="border border-slate-300 rounded-lg p-2 bg-slate-50/40">
-                        <span className="font-bold text-slate-600 text-[11px] block">اسم المدرسة السابقة (إن وجدت):</span>
-                        <div className="h-6 border-b border-dotted border-slate-400 mt-1"></div>
+                      <div className="border border-slate-300 rounded-lg p-1.5 bg-slate-50/40">
+                        <span className="font-bold text-slate-600 text-[10px] block">المدرسة السابقة (إن وجدت):</span>
+                        <div className="h-5 border-b border-dotted border-slate-400 mt-0.5"></div>
                       </div>
-                      <div className="border border-slate-300 rounded-lg p-2 bg-slate-50/40 flex items-center justify-between">
-                        <span className="font-bold text-slate-600 text-[11px]">المواصلات:</span>
-                        <div className="flex items-center gap-3 font-bold text-slate-800">
+                      <div className="border border-slate-300 rounded-lg p-1.5 bg-slate-50/40 flex items-center justify-between">
+                        <span className="font-bold text-slate-600 text-[10px]">المواصلات:</span>
+                        <div className="flex items-center gap-2 font-bold text-slate-800 text-[10px]">
                           <span>[ &nbsp; ] حافلة المدرسة</span>
-                          <span>[ &nbsp; ] خاص / مع الولي</span>
+                          <span>[ &nbsp; ] خاص / ولي الأمر</span>
                         </div>
                       </div>
-                      <div className="border border-slate-300 rounded-lg p-2 bg-slate-50/40 flex items-center justify-between">
-                        <span className="font-bold text-slate-600 text-[11px]">تسليم الكتب المدرسية:</span>
-                        <div className="flex items-center gap-3 font-bold text-slate-800">
+                      <div className="border border-slate-300 rounded-lg p-1.5 bg-slate-50/40 flex items-center justify-between">
+                        <span className="font-bold text-slate-600 text-[10px]">الكتب المدرسية:</span>
+                        <div className="flex items-center gap-2 font-bold text-slate-800 text-[10px]">
                           <span>[ &nbsp; ] تم التسليم</span>
-                          <span>[ &nbsp; ] لم يتم التسليم</span>
+                          <span>[ &nbsp; ] لم يتم</span>
                         </div>
                       </div>
-                      <div className="border border-slate-300 rounded-lg p-2 bg-slate-50/40 flex items-center justify-between">
-                        <span className="font-bold text-slate-600 text-[11px]">تسليم اللباس المدرسي:</span>
-                        <div className="flex items-center gap-3 font-bold text-slate-800">
+                      <div className="border border-slate-300 rounded-lg p-1.5 bg-slate-50/40 flex items-center justify-between">
+                        <span className="font-bold text-slate-600 text-[10px]">اللباس المدرسي:</span>
+                        <div className="flex items-center gap-2 font-bold text-slate-800 text-[10px]">
                           <span>[ &nbsp; ] تم التسليم</span>
-                          <span>[ &nbsp; ] لم يتم التسليم</span>
+                          <span>[ &nbsp; ] لم يتم</span>
                         </div>
                       </div>
                     </div>
                   </div>
 
                   {/* Section 4: بيانات ولي الأمر والتواصل */}
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2 border-b border-slate-200 pb-1">
-                      <span className="w-2.5 h-2.5 rounded-full bg-slate-800"></span>
-                      <h4 className="text-xs font-black text-slate-800">رابعاً: بيانات ولي الأمر والوصي القانوني</h4>
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-1.5 border-b border-slate-200 pb-0.5">
+                      <span className="w-2 h-2 rounded-full bg-slate-800"></span>
+                      <h4 className="text-[11px] font-black text-slate-800">رابعاً: بيانات ولي الأمر والوصي القانوني</h4>
                     </div>
-                    <div className="grid grid-cols-2 gap-3 text-xs">
-                      <div className="border border-slate-300 rounded-lg p-2 bg-slate-50/40">
-                        <span className="font-bold text-slate-600 text-[11px] block">اسم ولي الأمر والنسبة:</span>
-                        <div className="h-6 border-b border-dotted border-slate-400 mt-1"></div>
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      <div className="border border-slate-300 rounded-lg p-1.5 bg-slate-50/40">
+                        <span className="font-bold text-slate-600 text-[10px] block">اسم ولي الأمر والنسبة:</span>
+                        <div className="h-5 border-b border-dotted border-slate-400 mt-0.5"></div>
                       </div>
-                      <div className="border border-slate-300 rounded-lg p-2 bg-slate-50/40">
-                        <span className="font-bold text-slate-600 text-[11px] block">رقم هاتف التواصل:</span>
-                        <div className="h-6 border-b border-dotted border-slate-400 mt-1"></div>
+                      <div className="border border-slate-300 rounded-lg p-1.5 bg-slate-50/40">
+                        <span className="font-bold text-slate-600 text-[10px] block">رقم هاتف التواصل:</span>
+                        <div className="h-5 border-b border-dotted border-slate-400 mt-0.5"></div>
                       </div>
                     </div>
                   </div>
 
                   {/* Section 5: الإقرار والتواقيع */}
-                  <div className="pt-2 border-t border-slate-300 space-y-3">
-                    <div className="bg-slate-50 p-2 rounded-lg border border-slate-200 text-[10px] leading-relaxed text-slate-700 font-semibold text-justify">
+                  <div className="pt-1.5 border-t border-slate-300 space-y-1.5">
+                    <div className="bg-slate-50 p-1.5 rounded-lg border border-slate-200 text-[9px] leading-relaxed text-slate-700 font-semibold text-justify">
                       <span className="font-black text-slate-900">إقرار وتعهد ولي الأمر: </span>
                       أتعهد أنا ولي أمر الطالب المذكور أعلاه بصحة كافة البيانات والمعلومات الواردة في هذه الاستمارة، والالتزام التام بكافة القوانين واللوائح والتعليمات المدرسية الصادرة عن إدارة المدرسة الدولية الخاصة.
                     </div>
 
-                    <div className="grid grid-cols-3 text-center text-xs font-black text-slate-800 gap-3 pt-1">
-                      <div className="border border-slate-200 rounded-lg p-2 bg-slate-50/50">
-                        <p className="text-[11px] text-slate-600 font-bold mb-1">توقيع ولي الأمر / الوصي:</p>
-                        <div className="h-8 border-b border-dashed border-slate-300 mb-1"></div>
-                        <span className="text-[9px] text-slate-400 font-normal">الاسم والتوقيع</span>
+                    <div className="grid grid-cols-3 text-center text-xs font-black text-slate-800 gap-2 pt-1">
+                      <div className="border border-slate-200 rounded-lg p-1.5 bg-slate-50/50">
+                        <p className="text-[9.5px] text-slate-600 font-bold mb-0.5">توقيع ولي الأمر / الوصي:</p>
+                        <div className="h-6 border-b border-dashed border-slate-300 mb-0.5"></div>
+                        <span className="text-[8.5px] text-slate-400 font-normal">الاسم والتوقيع</span>
                       </div>
-                      <div className="border border-slate-200 rounded-lg p-2 bg-slate-50/50">
-                        <p className="text-[11px] text-slate-600 font-bold mb-1">تدقيق ومصادقة شؤون الطلاب:</p>
-                        <div className="h-8 border-b border-dashed border-slate-300 mb-1"></div>
-                        <span className="text-[9px] text-slate-400 font-normal">أمين السر / مسجل الطلاب</span>
+                      <div className="border border-slate-200 rounded-lg p-1.5 bg-slate-50/50">
+                        <p className="text-[9.5px] text-slate-600 font-bold mb-0.5">تدقيق ومصادقة شؤون الطلاب:</p>
+                        <div className="h-6 border-b border-dashed border-slate-300 mb-0.5"></div>
+                        <span className="text-[8.5px] text-slate-400 font-normal">أمين السر / مسجل الطلاب</span>
                       </div>
-                      <div className="border border-slate-200 rounded-lg p-2 bg-slate-50/50">
-                        <p className="text-[11px] text-slate-600 font-bold mb-1">خاتم وتوقيع المدير العام:</p>
-                        <div className="h-8 border-b border-dashed border-slate-300 mb-1"></div>
-                        <span className="text-[9px] text-slate-400 font-normal">المدرسة الدولية الخاصة</span>
+                      <div className="border border-slate-200 rounded-lg p-1.5 bg-slate-50/50">
+                        <p className="text-[9.5px] text-slate-600 font-bold mb-0.5">خاتم وتوقيع المدير العام:</p>
+                        <div className="h-6 border-b border-dashed border-slate-300 mb-0.5"></div>
+                        <span className="text-[8.5px] text-slate-400 font-normal">المدرسة الدولية الخاصة</span>
                       </div>
                     </div>
                   </div>

@@ -63,14 +63,27 @@ export const printElementById = (elementId: string, docTitle: string = 'وثيق
             }
             @page {
               size: A4 portrait;
-              margin: 8mm 8mm 8mm 8mm;
+              margin: 5mm 6mm 5mm 6mm;
             }
             @media print {
-              body {
+              html, body {
                 padding: 0 !important;
+                margin: 0 !important;
+                height: auto !important;
               }
               .no-print {
                 display: none !important;
+              }
+              .a4-single-page {
+                page-break-inside: avoid !important;
+                break-inside: avoid !important;
+                page-break-before: avoid !important;
+                break-before: avoid !important;
+                page-break-after: avoid !important;
+                break-after: avoid !important;
+                max-height: 284mm !important;
+                box-sizing: border-box !important;
+                overflow: hidden !important;
               }
             }
             .dir-ltr {
@@ -79,7 +92,7 @@ export const printElementById = (elementId: string, docTitle: string = 'وثيق
           </style>
         </head>
         <body class="bg-white text-slate-900">
-          <div class="max-w-4xl mx-auto p-2 bg-white">
+          <div class="w-full max-w-[210mm] mx-auto p-0 bg-white">
             ${contentHtml}
           </div>
         </body>

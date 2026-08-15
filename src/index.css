@@ -14,15 +14,17 @@ body {
 @media print {
   @page {
     size: A4 portrait;
-    margin: 8mm 8mm 8mm 8mm;
+    margin: 5mm 6mm 5mm 6mm;
   }
 
+  html,
   body {
     background-color: #ffffff !important;
     color: #000000 !important;
     margin: 0 !important;
     padding: 0 !important;
     overflow: visible !important;
+    height: auto !important;
   }
 
   /* Hide background elements, navigation, and headers during print */
@@ -55,9 +57,24 @@ body {
     max-width: 100% !important;
     width: 100% !important;
     margin: 0 auto !important;
+    padding: 0 !important;
     border-radius: 0 !important;
     page-break-inside: avoid !important;
+    break-inside: avoid !important;
     display: block !important;
+  }
+
+  /* Strict Single-Page A4 Container Rule */
+  .a4-single-page {
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+    page-break-before: avoid !important;
+    break-before: avoid !important;
+    page-break-after: avoid !important;
+    break-after: avoid !important;
+    max-height: 284mm !important;
+    box-sizing: border-box !important;
+    overflow: hidden !important;
   }
 
   /* Force background colors and exact border styling in print output */
