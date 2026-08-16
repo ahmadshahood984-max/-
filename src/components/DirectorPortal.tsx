@@ -10929,16 +10929,18 @@ ${sampleEval}
                     </div>
                   </div>
 
-                  {/* 2. Official Title Banner (حقل دائري ملون وأنيق) */}
-                  <div className="flex justify-center my-2">
-                    <div className="bg-sky-50 border-2 border-sky-400/80 px-6 py-1.5 rounded-full text-center shadow-xs">
-                      <h3 className="text-sm font-black text-sky-950 tracking-tight whitespace-nowrap">استمارة طلب تسجيل وقيد طالب جديد في المدرسة الدولية الخاصة</h3>
+                  {/* 2. Official Title Banner (حقل دائري ملون وأنيق يتوسط الصفحة والجدول) */}
+                  <div className="w-full flex items-center justify-center my-2.5">
+                    <div className="bg-sky-50 border-2 border-sky-400/80 px-8 py-2 rounded-full flex items-center justify-center text-center shadow-xs mx-auto">
+                      <h3 className="text-sm font-black text-sky-950 tracking-tight whitespace-nowrap text-center leading-normal">
+                        استمارة طلب تسجيل وقيد طالب جديد في المدرسة الدولية الخاصة
+                      </h3>
                     </div>
                   </div>
 
                   {/* 3. Section 1: البيانات الشخصية والمدنية للطالب */}
                   <div className="space-y-1.5 mb-2">
-                    <div className="flex items-center justify-between border-b border-emerald-600/70 pb-0.5 px-1">
+                    <div className="flex items-center justify-between border-b border-emerald-600/70 pb-2 pt-0.5 px-1">
                       <div className="flex items-center gap-1.5">
                         <span className="w-2 h-2 rounded-full bg-emerald-600"></span>
                         <h4 className="text-xs font-bold text-emerald-800 tracking-wide">أولاً: بيانات الطالب الشخصية والمدنية</h4>
@@ -11022,7 +11024,7 @@ ${sampleEval}
 
                   {/* 4. Section 2: بيانات الوالدين والعائلة ومحل الإقامة */}
                   <div className="space-y-1.5 mb-2">
-                    <div className="flex items-center justify-between border-b border-indigo-600/70 pb-0.5 px-1">
+                    <div className="flex items-center justify-between border-b border-indigo-600/70 pb-2 pt-0.5 px-1">
                       <div className="flex items-center gap-1.5">
                         <span className="w-2 h-2 rounded-full bg-indigo-600"></span>
                         <h4 className="text-xs font-bold text-indigo-800 tracking-wide">ثانياً: بيانات الوالدين والعائلة ومحل الإقامة</h4>
@@ -11075,7 +11077,7 @@ ${sampleEval}
 
                   {/* 5. Section 3: القيد الأكاديمي والخدمات المدرسية */}
                   <div className="space-y-1.5 mb-2">
-                    <div className="flex items-center justify-between border-b border-amber-600/70 pb-0.5 px-1">
+                    <div className="flex items-center justify-between border-b border-amber-600/70 pb-2 pt-0.5 px-1">
                       <div className="flex items-center gap-1.5">
                         <span className="w-2 h-2 rounded-full bg-amber-600"></span>
                         <h4 className="text-xs font-bold text-amber-900 tracking-wide">ثالثاً: القيد الأكاديمي والخدمات المدرسية</h4>
@@ -11154,7 +11156,7 @@ ${sampleEval}
 
                   {/* 6. Section 4: بيانات ولي الأمر والوصي القانوني وهواتف التواصل */}
                   <div className="space-y-1.5 mb-2">
-                    <div className="flex items-center justify-between border-b border-slate-600/70 pb-0.5 px-1">
+                    <div className="flex items-center justify-between border-b border-slate-600/70 pb-2 pt-0.5 px-1">
                       <div className="flex items-center gap-1.5">
                         <span className="w-2 h-2 rounded-full bg-slate-700"></span>
                         <h4 className="text-xs font-bold text-slate-800 tracking-wide">رابعاً: بيانات ولي الأمر والوصي القانوني وهواتف التواصل</h4>
@@ -11375,16 +11377,18 @@ ${sampleEval}
                     </div>
                   </div>
 
-                  {/* 2. Official Title Banner (حقل دائري ملون وأنيق) */}
-                  <div className="flex justify-center my-2">
-                    <div className="bg-sky-50 border-2 border-sky-400/80 px-6 py-1.5 rounded-full text-center shadow-xs">
-                      <h3 className="text-sm font-black text-sky-950 tracking-tight whitespace-nowrap">استمارة طلب تسجيل وقيد طالب جديد في المدرسة الدولية الخاصة</h3>
+                  {/* 2. Official Title Banner (حقل دائري ملون وأنيق يتوسط الصفحة والجدول) */}
+                  <div className="w-full flex items-center justify-center my-2.5">
+                    <div className="bg-sky-50 border-2 border-sky-400/80 px-8 py-2 rounded-full flex items-center justify-center text-center shadow-xs mx-auto">
+                      <h3 className="text-sm font-black text-sky-950 tracking-tight whitespace-nowrap text-center leading-normal">
+                        استمارة طلب تسجيل وقيد طالب جديد في المدرسة الدولية الخاصة
+                      </h3>
                     </div>
                   </div>
 
                   {/* 3. Section 1: البيانات الشخصية والمدنية للطالب */}
                   <div className="space-y-1.5 mb-2">
-                    <div className="flex items-center justify-between border-b border-emerald-600/70 pb-0.5 px-1">
+                    <div className="flex items-center justify-between border-b border-emerald-600/70 pb-2 pt-0.5 px-1">
                       <div className="flex items-center gap-1.5">
                         <span className="w-2 h-2 rounded-full bg-emerald-600"></span>
                         <h4 className="text-xs font-bold text-emerald-800 tracking-wide">أولاً: بيانات الطالب الشخصية والمدنية</h4>
@@ -11456,7 +11460,7 @@ ${sampleEval}
 
                   {/* 4. Section 2: بيانات الوالدين والعائلة ومحل الإقامة */}
                   <div className="space-y-1.5 mb-2">
-                    <div className="flex items-center justify-between border-b border-indigo-600/70 pb-0.5 px-1">
+                    <div className="flex items-center justify-between border-b border-indigo-600/70 pb-2 pt-0.5 px-1">
                       <div className="flex items-center gap-1.5">
                         <span className="w-2 h-2 rounded-full bg-indigo-600"></span>
                         <h4 className="text-xs font-bold text-indigo-800 tracking-wide">ثانياً: بيانات الوالدين والعائلة ومحل الإقامة</h4>
@@ -11497,7 +11501,7 @@ ${sampleEval}
 
                   {/* 5. Section 3: القيد الأكاديمي والخدمات المدرسية */}
                   <div className="space-y-1.5 mb-2">
-                    <div className="flex items-center justify-between border-b border-amber-600/70 pb-0.5 px-1">
+                    <div className="flex items-center justify-between border-b border-amber-600/70 pb-2 pt-0.5 px-1">
                       <div className="flex items-center gap-1.5">
                         <span className="w-2 h-2 rounded-full bg-amber-600"></span>
                         <h4 className="text-xs font-bold text-amber-900 tracking-wide">ثالثاً: القيد الأكاديمي والخدمات المدرسية</h4>
@@ -11552,7 +11556,7 @@ ${sampleEval}
 
                   {/* 6. Section 4: بيانات ولي الأمر وهواتف التواصل */}
                   <div className="space-y-1.5 mb-2">
-                    <div className="flex items-center justify-between border-b border-slate-600/70 pb-0.5 px-1">
+                    <div className="flex items-center justify-between border-b border-slate-600/70 pb-2 pt-0.5 px-1">
                       <div className="flex items-center gap-1.5">
                         <span className="w-2 h-2 rounded-full bg-slate-700"></span>
                         <h4 className="text-xs font-bold text-slate-800 tracking-wide">رابعاً: بيانات ولي الأمر والوصي القانوني وهواتف التواصل</h4>
