@@ -29,18 +29,27 @@ export interface Student {
   unifiedNo?: string;
   nationalId?: string;
   fatherName?: string;
+  fatherJob?: string;
   motherName?: string;
+  motherJob?: string;
   motherMaidenName?: string;
   grandfatherName?: string;
   birthPlace?: string;
   residencePlace?: string;
+  residenceCity?: string;
   address?: string;
   previousSchool?: string;
   healthStatus?: string;
+  bloodTypeOrHealth?: string;
   transportation?: string;
   booksStatus?: string;
   uniformStatus?: string;
   parentPhone?: string;
+  parentBackupPhone?: string;
+  guardianRelation?: string;
+  guardianNationalId?: string;
+  avatar?: string;
+  photo?: string;
 }
 
 export interface Parent {
