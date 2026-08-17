@@ -6955,7 +6955,7 @@ if __name__ == "__main__":
                             return (
                               <tr key={student.id} className="hover:bg-slate-50/40 font-medium text-slate-600">
                                 <td className="p-2 border-l border-slate-150 text-center text-slate-400 bg-slate-50 font-mono">{idx + 1}</td>
-                                <td className="p-3 border-l border-slate-150 font-mono text-sky-700 font-semibold">{student.rollNo}</td>
+                                <td className="p-3 border-l border-slate-150 font-mono text-sky-700 font-semibold">{student.unifiedNo || student.rollNo || student.nationalId || '-'}</td>
                                 <td className="p-3 border-l border-slate-150 font-bold text-slate-800">{student.name}</td>
                                 <td className="p-3 border-l border-slate-150">{student.parentName || parentObj?.name || `ولي أمر ${student.name}`}</td>
                                 <td className="p-3 border-l border-slate-150 text-center font-mono text-emerald-700 font-bold text-[11px] dir-ltr">
@@ -11015,19 +11015,39 @@ ${sampleEval}
                 {/* Printable Content Body */}
                 <div
                   id="printable-student-card"
-                  className="a4-single-page p-6 sm:p-7 print:p-5 bg-white text-slate-950 min-h-[1060px] flex flex-col justify-between"
+                  className="a4-single-page p-6 sm:p-7 print:p-5 bg-white text-slate-950 min-h-[1060px] flex flex-col justify-between relative overflow-hidden"
                   style={{ minHeight: '1060px' }}
                 >
-                  {/* 1. Header (Ministry & School + Logo in Center + Student Photo on Left) */}
-                  <div className="border-b-2 border-slate-900 pb-2.5 mb-2">
-                    <div className="flex items-center justify-between gap-2">
-                      {/* Right: Ministry & School Info */}
-                      <div className="space-y-0.5 text-right w-2/5 shrink-0">
-                        <p className="text-[11px] font-bold text-slate-700 whitespace-nowrap">الجمهورية العربية السورية</p>
-                        <p className="text-[11px] font-bold text-slate-700 whitespace-nowrap">وزارة التربية والتعليم</p>
-                        <h2 className="text-base font-black text-slate-950 tracking-tight whitespace-nowrap">المدرسة الدولية الخاصة</h2>
-                        <p className="text-[10px] font-extrabold text-amber-900 whitespace-nowrap">قسم شؤون وقيد الطلاب • 2026/2027</p>
+                  {/* Beautiful Official School Watermark covering the full page (علامة مائية لشعار المدرسة يغطي كامل الصفحة) */}
+                  <div className="print-watermark-layer absolute inset-0 w-full h-full flex items-center justify-center pointer-events-none z-0 overflow-hidden select-none">
+                    {schoolAppIcon ? (
+                      <img
+                        src={schoolAppIcon}
+                        alt="شعار المدرسة علامة مائية"
+                        className="w-[88%] h-[82%] max-w-[720px] max-h-[860px] object-contain filter grayscale contrast-125 opacity-[0.07] print:opacity-[0.08] transform scale-105"
+                      />
+                    ) : (
+                      <div className="w-[85%] h-[78%] max-w-[650px] max-h-[780px] rounded-full border-[14px] border-amber-950/20 flex flex-col items-center justify-center text-center p-8 transform -rotate-12 opacity-[0.07] print:opacity-[0.08]">
+                        <div className="w-40 h-40 rounded-full border-8 border-amber-950/30 flex items-center justify-center mb-4">
+                          <GraduationCap className="w-24 h-24 text-amber-950/60" />
+                        </div>
+                        <span className="text-4xl font-black text-amber-950/70 tracking-tight leading-tight">المدرسة الدولية الخاصة</span>
+                        <span className="text-base font-bold text-amber-900/60 mt-3">قسم شؤون وقيد الطلاب • 2026/2027</span>
                       </div>
+                    )}
+                  </div>
+
+                  <div className="relative z-10 flex flex-col justify-between h-full space-y-2">
+                    {/* 1. Header (Ministry & School + Logo in Center + Student Photo on Left) */}
+                    <div className="border-b-2 border-slate-900 pb-2.5 mb-2">
+                      <div className="flex items-center justify-between gap-2">
+                        {/* Right: Ministry & School Info */}
+                        <div className="space-y-0.5 text-right w-2/5 shrink-0">
+                          <p className="text-[11px] font-bold text-slate-700 whitespace-nowrap">الجمهورية العربية السورية</p>
+                          <p className="text-[11px] font-bold text-slate-700 whitespace-nowrap">وزارة التربية والتعليم</p>
+                          <h2 className="text-base font-black text-slate-950 tracking-tight whitespace-nowrap">المدرسة الدولية الخاصة</h2>
+                          <p className="text-[10px] font-extrabold text-amber-900 whitespace-nowrap">قسم شؤون وقيد الطلاب • 2026/2027</p>
+                        </div>
 
                       {/* Center: School Logo (Enlarged to fit header nicely) */}
                       <div className="flex flex-col items-center justify-center text-center flex-1">
@@ -11359,16 +11379,21 @@ ${sampleEval}
                       </div>
                     </div>
 
-                    {/* Footer with Date & Time at bottom of the page */}
-                    <div className="pt-2 border-t border-slate-300 flex items-center justify-between text-[9.5px] text-slate-600 font-bold">
-                      <span className="font-mono">
-                        تاريخ ووقت الطباعة: {new Date().toLocaleDateString('ar-SY', { year: 'numeric', month: '2-digit', day: '2-digit' })} - {new Date().toLocaleTimeString('ar-SY', { hour: '2-digit', minute: '2-digit' })}
-                      </span>
-                      <span>المدرسة الدولية الخاصة - قسم شؤون وقيد الطلاب</span>
-                      <span>صفحة 1 من 1</span>
+                    {/* 8. Footer with Date, Time & Official Print Info at the bottom of the page */}
+                    <div className="print-document-footer pt-2 border-t-2 border-slate-900 flex items-center justify-between text-[10px] text-slate-900 font-black bg-slate-100/90 print:bg-transparent px-3 py-1.5 rounded-b-xl shrink-0 mt-2">
+                      <div className="flex items-center gap-1.5 font-mono text-slate-950">
+                        <Clock className="w-3.5 h-3.5 text-slate-800 inline shrink-0" />
+                        <span>تاريخ ووقت الطباعة:</span>
+                        <span className="text-red-700 font-extrabold" dir="ltr">
+                          {new Date().toLocaleDateString('ar-SY', { year: 'numeric', month: '2-digit', day: '2-digit' })} - {new Date().toLocaleTimeString('ar-SY', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}
+                        </span>
+                      </div>
+                      <span className="text-slate-950 font-black tracking-wide">المدرسة الدولية الخاصة • قسم شؤون وقيد الطلاب</span>
+                      <span className="text-slate-900 font-extrabold bg-slate-200/90 px-2.5 py-0.5 rounded border border-slate-400/80 shadow-2xs">صفحة 1 من 1</span>
                     </div>
                   </div>
                 </div>
+              </div>
 
                 {/* Status Toast Banner */}
                 {printToastMsg && (
@@ -11463,19 +11488,39 @@ ${sampleEval}
                 {/* Printable Blank Form Content */}
                 <div
                   id="printable-blank-form"
-                  className="a4-single-page p-6 sm:p-7 print:p-5 bg-white text-slate-950 min-h-[1060px] flex flex-col justify-between"
+                  className="a4-single-page p-6 sm:p-7 print:p-5 bg-white text-slate-950 min-h-[1060px] flex flex-col justify-between relative overflow-hidden"
                   style={{ minHeight: '1060px' }}
                 >
-                  {/* 1. Header (Ministry & School + Logo in Center + Student Photo on Left) */}
-                  <div className="border-b-2 border-slate-900 pb-2 mb-2">
-                    <div className="flex items-center justify-between gap-2">
-                      {/* Right: Ministry & School Info */}
-                      <div className="space-y-0.5 text-right w-2/5 shrink-0">
-                        <p className="text-[11px] font-bold text-slate-700 whitespace-nowrap">الجمهورية العربية السورية</p>
-                        <p className="text-[11px] font-bold text-slate-700 whitespace-nowrap">وزارة التربية والتعليم</p>
-                        <h2 className="text-base font-black text-slate-950 tracking-tight whitespace-nowrap">المدرسة الدولية الخاصة</h2>
-                        <p className="text-[10px] font-extrabold text-amber-900 whitespace-nowrap">قسم شؤون وقيد الطلاب • 2026/2027</p>
+                  {/* Beautiful Official School Watermark covering the full page (علامة مائية لشعار المدرسة يغطي كامل الصفحة) */}
+                  <div className="print-watermark-layer absolute inset-0 w-full h-full flex items-center justify-center pointer-events-none z-0 overflow-hidden select-none">
+                    {schoolAppIcon ? (
+                      <img
+                        src={schoolAppIcon}
+                        alt="شعار المدرسة علامة مائية"
+                        className="w-[88%] h-[82%] max-w-[720px] max-h-[860px] object-contain filter grayscale contrast-125 opacity-[0.07] print:opacity-[0.08] transform scale-105"
+                      />
+                    ) : (
+                      <div className="w-[85%] h-[78%] max-w-[650px] max-h-[780px] rounded-full border-[14px] border-amber-950/20 flex flex-col items-center justify-center text-center p-8 transform -rotate-12 opacity-[0.07] print:opacity-[0.08]">
+                        <div className="w-40 h-40 rounded-full border-8 border-amber-950/30 flex items-center justify-center mb-4">
+                          <GraduationCap className="w-24 h-24 text-amber-950/60" />
+                        </div>
+                        <span className="text-4xl font-black text-amber-950/70 tracking-tight leading-tight">المدرسة الدولية الخاصة</span>
+                        <span className="text-base font-bold text-amber-900/60 mt-3">قسم شؤون وقيد الطلاب • 2026/2027</span>
                       </div>
+                    )}
+                  </div>
+
+                  <div className="relative z-10 flex flex-col justify-between h-full space-y-2">
+                    {/* 1. Header (Ministry & School + Logo in Center + Student Photo on Left) */}
+                    <div className="border-b-2 border-slate-900 pb-2 mb-2">
+                      <div className="flex items-center justify-between gap-2">
+                        {/* Right: Ministry & School Info */}
+                        <div className="space-y-0.5 text-right w-2/5 shrink-0">
+                          <p className="text-[11px] font-bold text-slate-700 whitespace-nowrap">الجمهورية العربية السورية</p>
+                          <p className="text-[11px] font-bold text-slate-700 whitespace-nowrap">وزارة التربية والتعليم</p>
+                          <h2 className="text-base font-black text-slate-950 tracking-tight whitespace-nowrap">المدرسة الدولية الخاصة</h2>
+                          <p className="text-[10px] font-extrabold text-amber-900 whitespace-nowrap">قسم شؤون وقيد الطلاب • 2026/2027</p>
+                        </div>
 
                       {/* Center: School Logo (Larger Size) */}
                       <div className="flex flex-col items-center justify-center text-center flex-1">
@@ -11749,16 +11794,21 @@ ${sampleEval}
                       </div>
                     </div>
 
-                    {/* Footer with Date & Time at bottom of the page */}
-                    <div className="pt-2 border-t border-slate-300 flex items-center justify-between text-[9px] text-slate-500 font-medium">
-                      <span className="font-mono">
-                        تاريخ ووقت الطباعة: {new Date().toLocaleDateString('ar-SY', { year: 'numeric', month: '2-digit', day: '2-digit' })} - {new Date().toLocaleTimeString('ar-SY', { hour: '2-digit', minute: '2-digit' })}
-                      </span>
-                      <span>المدرسة الدولية الخاصة - قسم شؤون وقيد الطلاب</span>
-                      <span>صفحة 1 من 1</span>
+                    {/* 8. Footer with Date, Time & Official Print Info at the bottom of the page */}
+                    <div className="print-document-footer pt-2 border-t-2 border-slate-900 flex items-center justify-between text-[10px] text-slate-900 font-black bg-slate-100/90 print:bg-transparent px-3 py-1.5 rounded-b-xl shrink-0 mt-2">
+                      <div className="flex items-center gap-1.5 font-mono text-slate-950">
+                        <Clock className="w-3.5 h-3.5 text-slate-800 inline shrink-0" />
+                        <span>تاريخ ووقت الطباعة:</span>
+                        <span className="text-red-700 font-extrabold" dir="ltr">
+                          {new Date().toLocaleDateString('ar-SY', { year: 'numeric', month: '2-digit', day: '2-digit' })} - {new Date().toLocaleTimeString('ar-SY', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}
+                        </span>
+                      </div>
+                      <span className="text-slate-950 font-black tracking-wide">المدرسة الدولية الخاصة • قسم شؤون وقيد الطلاب</span>
+                      <span className="text-slate-900 font-extrabold bg-slate-200/90 px-2.5 py-0.5 rounded border border-slate-400/80 shadow-2xs">صفحة 1 من 1</span>
                     </div>
                   </div>
                 </div>
+              </div>
 
                 {/* Status Toast Banner */}
                 {printToastMsg && (

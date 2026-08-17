@@ -52,11 +52,9 @@ body {
     background-color: #ffffff !important;
   }
 
-  /* Hide all background elements, navigation, headers, sidebars, tools and non-print elements */
+  /* Hide non-print elements */
   nav,
   aside,
-  header,
-  footer,
   .no-print,
   .no-print *,
   button,
@@ -117,17 +115,44 @@ body {
     break-before: avoid !important;
     page-break-after: avoid !important;
     break-after: avoid !important;
-    min-height: 284mm !important;
-    max-height: 287mm !important;
+    min-height: 282mm !important;
     height: 100% !important;
     box-sizing: border-box !important;
-    overflow: hidden !important;
+    position: relative !important;
     display: flex !important;
     flex-direction: column !important;
     justify-content: space-between !important;
     background: #ffffff !important;
     background-color: #ffffff !important;
     width: 100% !important;
+  }
+
+  /* Watermark styling for high quality print covering entire page */
+  .print-watermark-layer {
+    position: absolute !important;
+    inset: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    pointer-events: none !important;
+    z-index: 0 !important;
+    overflow: hidden !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* Document Footer with Date and Time */
+  .print-document-footer {
+    display: flex !important;
+    visibility: visible !important;
+    width: 100% !important;
+    margin-top: auto !important;
+    position: relative !important;
+    z-index: 10 !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
   }
 
   /* Force background colors and exact border styling in print output */
