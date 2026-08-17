@@ -196,7 +196,8 @@ const sanitizeClonedTreeForHtml2Canvas = (clonedDoc: Document, clonedElement: HT
 };
 
 /**
- * Universal print helper designed to work seamlessly in iframes, desktop, and mobile browsers.
+ * Universal print helper designed to work seamlessly in iframes, desktop, and mobile browsers (including Android Chrome & iOS).
+ * It mounts an isolated copy of the target element directly in the document and activates strict print isolation CSS.
  */
 export const printElementById = (elementId: string, docTitle: string = 'وثيقة رسمية'): boolean => {
   try {
@@ -207,112 +208,55 @@ export const printElementById = (elementId: string, docTitle: string = 'وثيق
       return true;
     }
 
-    // Direct invocation with standard browser print dialog
-    try {
-      window.print();
-      return true;
-    } catch (directPrintErr) {
-      console.warn('Standard window.print failed, attempting iframe print isolation:', directPrintErr);
+    // 1. Remove any previously created print isolation mount
+    const prevMount = document.getElementById('universal-print-container');
+    if (prevMount) {
+      prevMount.remove();
     }
 
-    // Fallback: Standalone iframe print
-    const contentHtml = element.outerHTML;
-    const printIframe = document.createElement('iframe');
-    printIframe.setAttribute('style', 'position:fixed;right:0;bottom:0;width:10px;height:10px;border:0;opacity:0;z-index:-1000;');
-    printIframe.setAttribute('id', 'universal-print-iframe-' + Date.now());
-    document.body.appendChild(printIframe);
+    // 2. Create isolated top-level print mount container attached directly to document.body
+    const printContainer = document.createElement('div');
+    printContainer.id = 'universal-print-container';
+    printContainer.className = 'universal-print-isolated';
+    
+    // Deep clone the target element
+    const clone = element.cloneNode(true) as HTMLElement;
+    clone.id = `${elementId}-print-clone`;
+    printContainer.appendChild(clone);
+    document.body.appendChild(printContainer);
 
-    const iframeDoc = printIframe.contentWindow?.document || printIframe.contentDocument;
-    if (!iframeDoc) {
-      window.print();
-      return true;
+    // Save previous document title and set custom title for PDF/Print dialog
+    const originalTitle = document.title;
+    if (docTitle) {
+      document.title = docTitle;
     }
 
-    const fullHtml = `
-      <!DOCTYPE html>
-      <html lang="ar" dir="rtl">
-        <head>
-          <meta charset="UTF-8" />
-          <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-          <title>${docTitle}</title>
-          <link rel="preconnect" href="https://fonts.googleapis.com">
-          <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-          <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&family=Tajawal:wght@400;500;700;800;900&display=swap" rel="stylesheet">
-          <script src="https://cdn.tailwindcss.com"></script>
-          <style>
-            * {
-              box-sizing: border-box;
-              -webkit-print-color-adjust: exact !important;
-              print-color-adjust: exact !important;
-              color-adjust: exact !important;
-            }
-            body {
-              font-family: 'Tajawal', 'Cairo', system-ui, -apple-system, sans-serif;
-              direction: rtl;
-              text-align: right;
-              background-color: #ffffff !important;
-              color: #0f172a !important;
-              margin: 0;
-              padding: 10px;
-            }
-            @page {
-              size: A4 portrait;
-              margin: 5mm 6mm 5mm 6mm;
-            }
-            @media print {
-              html, body {
-                padding: 0 !important;
-                margin: 0 !important;
-                height: auto !important;
-              }
-              .no-print {
-                display: none !important;
-              }
-              .a4-single-page {
-                page-break-inside: avoid !important;
-                break-inside: avoid !important;
-                page-break-before: avoid !important;
-                break-before: avoid !important;
-                page-break-after: avoid !important;
-                break-after: avoid !important;
-                max-height: 284mm !important;
-                box-sizing: border-box !important;
-                overflow: hidden !important;
-              }
-            }
-            .dir-ltr {
-              direction: ltr;
-            }
-          </style>
-        </head>
-        <body class="bg-white text-slate-900">
-          <div class="w-full max-w-[210mm] mx-auto p-0 bg-white">
-            ${contentHtml}
-          </div>
-        </body>
-      </html>
-    `;
+    // Apply strict isolation class to body
+    document.body.classList.add('body-printing-isolated-mode');
 
-    iframeDoc.open();
-    iframeDoc.write(fullHtml);
-    iframeDoc.close();
+    // Cleanup handler
+    const cleanup = () => {
+      document.body.classList.remove('body-printing-isolated-mode');
+      if (document.body.contains(printContainer)) {
+        document.body.removeChild(printContainer);
+      }
+      document.title = originalTitle;
+      window.removeEventListener('afterprint', cleanup);
+    };
 
+    window.addEventListener('afterprint', cleanup);
+
+    // Trigger window print after brief rendering microtask
     setTimeout(() => {
       try {
-        printIframe.contentWindow?.focus();
-        printIframe.contentWindow?.print();
-      } catch {
+        window.focus();
         window.print();
+      } catch (err) {
+        console.error('Error invoking window.print:', err);
       }
-
-      setTimeout(() => {
-        try {
-          document.body.removeChild(printIframe);
-        } catch {
-          // ignore
-        }
-      }, 4000);
-    }, 300);
+      // Mobile fallback cleanup (in case afterprint does not fire on some Android Chrome / iOS versions)
+      setTimeout(cleanup, 5000);
+    }, 80);
 
     return true;
   } catch (error) {

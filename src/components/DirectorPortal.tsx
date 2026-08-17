@@ -2991,15 +2991,17 @@ ${directivesFormatted}
 
   const handleDeleteSingleItem = (category: 'students' | 'teachers' | 'announcements' | 'messages' | 'excuses' | 'classes' | 'grades' | 'attendance', itemId: string) => {
     if (category === 'students') {
-      const student = students.find(s => s.id === itemId);
+      const currentList = students.length > 0 ? students : sampleRegistryStudents;
+      const student = currentList.find(s => s.id === itemId);
       if (!student) return;
       confirmAndExecute(
         '⚠️ حذف الطالب نهائياً من النظام',
         `هل أنت متأكد من حذف الطالب (${student.name}) نهائياً من النظام؟ سيؤدي ذلك لحذف كافة درجاته، سجلات غيابه وحضوره، وأعذاره الطبية أيضاً. لا يمكن التراجع عن هذه الخطوة!`,
         () => {
-          const updatedStudents = students.filter(s => s.id !== itemId);
+          const updatedStudents = currentList.filter(s => s.id !== itemId);
           setStudents(updatedStudents);
           localStorage.setItem('school_students', JSON.stringify(updatedStudents));
+          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_students', value: JSON.stringify(updatedStudents) } }));
 
           const updatedGrades = grades.filter(g => g.studentId !== itemId);
           setGrades(updatedGrades);
@@ -6114,15 +6116,15 @@ ${directivesFormatted}
                   </div>
 
                   {/* Section 4: رابعاً: بيانات ولي الأمر والوصي القانوني وهواتف التواصل */}
-                  <div className="bg-emerald-50/80 border-2 border-emerald-300 p-5 rounded-2xl space-y-4 shadow-xs">
-                    <div className="flex items-center justify-between border-b border-emerald-200 pb-2.5">
+                  <div className="bg-purple-50/80 border-2 border-purple-300 p-5 rounded-2xl space-y-4 shadow-xs">
+                    <div className="flex items-center justify-between border-b border-purple-200 pb-2.5">
                       <div className="flex items-center gap-2">
-                        <div className="w-7 h-7 rounded-lg bg-emerald-700 text-white flex items-center justify-center font-bold">
+                        <div className="w-7 h-7 rounded-lg bg-purple-700 text-white flex items-center justify-center font-bold">
                           <Users className="w-4 h-4" />
                         </div>
-                        <h3 className="font-black text-sm text-emerald-950">رابعاً: بيانات ولي الأمر والوصي القانوني وهواتف التواصل</h3>
+                        <h3 className="font-black text-sm text-purple-950">رابعاً: بيانات ولي الأمر والوصي القانوني وهواتف التواصل</h3>
                       </div>
-                      <span className="text-[10px] bg-emerald-200 text-emerald-900 font-bold px-2.5 py-0.5 rounded-full border border-emerald-300">
+                      <span className="text-[10px] bg-purple-200 text-purple-900 font-bold px-2.5 py-0.5 rounded-full border border-purple-300">
                         التواصل والوصاية
                       </span>
                     </div>
@@ -6130,7 +6132,7 @@ ${directivesFormatted}
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
                       {/* اسم ولي الأمر / الوصي */}
                       <div className="lg:col-span-2">
-                        <label className="block text-xs font-bold text-emerald-950 mb-1.5">
+                        <label className="block text-xs font-bold text-purple-950 mb-1.5">
                           اسم ولي الأمر / الوصي القانوني والنسبة <span className="text-red-500">*</span>
                         </label>
                         <input
@@ -6139,19 +6141,19 @@ ${directivesFormatted}
                           placeholder="مثال: أحمد عبد الله العلي"
                           value={regStudent.parentName}
                           onChange={e => setRegStudent(prev => ({ ...prev, parentName: e.target.value }))}
-                          className="w-full text-xs border border-emerald-300 bg-white px-3.5 py-2.5 rounded-xl focus:border-emerald-600 focus:outline-none font-bold text-slate-900"
+                          className="w-full text-xs border border-purple-300 bg-white px-3.5 py-2.5 rounded-xl focus:border-purple-600 focus:outline-none font-bold text-slate-900"
                         />
                       </div>
 
                       {/* صلة القرابة */}
                       <div>
-                        <label className="block text-xs font-bold text-emerald-950 mb-1.5">
+                        <label className="block text-xs font-bold text-purple-950 mb-1.5">
                           صلة القرابة بالطالب
                         </label>
                         <select
                           value={regStudent.guardianRelation || 'أب'}
                           onChange={e => setRegStudent(prev => ({ ...prev, guardianRelation: e.target.value }))}
-                          className="w-full text-xs border border-emerald-300 bg-white px-3.5 py-2.5 rounded-xl focus:border-emerald-600 focus:outline-none font-bold text-slate-800"
+                          className="w-full text-xs border border-purple-300 bg-white px-3.5 py-2.5 rounded-xl focus:border-purple-600 focus:outline-none font-bold text-slate-800"
                         >
                           <option value="أب">أب</option>
                           <option value="أم">أم</option>
@@ -6164,7 +6166,7 @@ ${directivesFormatted}
 
                       {/* الرقم الوطني لولي الأمر */}
                       <div>
-                        <label className="block text-xs font-bold text-emerald-950 mb-1.5">
+                        <label className="block text-xs font-bold text-purple-950 mb-1.5">
                           الرقم الوطني لولي الأمر
                         </label>
                         <input
@@ -6172,16 +6174,16 @@ ${directivesFormatted}
                           placeholder="مثال: 0101827364"
                           value={regStudent.guardianNationalId || ''}
                           onChange={e => setRegStudent(prev => ({ ...prev, guardianNationalId: e.target.value }))}
-                          className="w-full text-xs border border-emerald-300 bg-white px-3.5 py-2.5 rounded-xl focus:border-emerald-600 focus:outline-none font-mono font-bold text-slate-800"
+                          className="w-full text-xs border border-purple-300 bg-white px-3.5 py-2.5 rounded-xl focus:border-purple-600 focus:outline-none font-mono font-bold text-slate-800"
                         />
                       </div>
 
                       {/* رقم الهاتف الأساسي / الواتساب */}
                       <div className="lg:col-span-2">
-                        <label className="block text-xs font-bold text-emerald-950 mb-1.5 flex items-center justify-between">
+                        <label className="block text-xs font-bold text-purple-950 mb-1.5 flex items-center justify-between">
                           <span>رقم الهاتف المحمول الأساسي (واتساب / اتصال) <span className="text-red-500">*</span></span>
-                          <span className="text-emerald-700 text-[10px] flex items-center gap-1 font-bold">
-                            <MessageSquare className="w-3 h-3 text-emerald-600" />
+                          <span className="text-purple-700 text-[10px] flex items-center gap-1 font-bold">
+                            <MessageSquare className="w-3 h-3 text-purple-600" />
                             <span>ربط واتساب فوري</span>
                           </span>
                         </label>
@@ -6191,13 +6193,13 @@ ${directivesFormatted}
                           placeholder="مثال: 0501234567 أو 00963912345678"
                           value={regStudent.parentPhone}
                           onChange={e => setRegStudent(prev => ({ ...prev, parentPhone: e.target.value }))}
-                          className="w-full text-xs border-2 border-emerald-400 bg-white px-3.5 py-2.5 rounded-xl focus:border-emerald-600 focus:outline-none font-mono font-black text-emerald-950 shadow-2xs"
+                          className="w-full text-xs border-2 border-purple-400 bg-white px-3.5 py-2.5 rounded-xl focus:border-purple-600 focus:outline-none font-mono font-black text-purple-950 shadow-2xs"
                         />
                       </div>
 
                       {/* رقم هاتف إضافي / طوارئ */}
                       <div className="lg:col-span-2">
-                        <label className="block text-xs font-bold text-emerald-950 mb-1.5">
+                        <label className="block text-xs font-bold text-purple-950 mb-1.5">
                           رقم هاتف إضافي / هاتف الطوارئ والعمل
                         </label>
                         <input
@@ -6205,7 +6207,7 @@ ${directivesFormatted}
                           placeholder="مثال: 0509876543"
                           value={regStudent.parentBackupPhone || ''}
                           onChange={e => setRegStudent(prev => ({ ...prev, parentBackupPhone: e.target.value }))}
-                          className="w-full text-xs border border-emerald-300 bg-white px-3.5 py-2.5 rounded-xl focus:border-emerald-600 focus:outline-none font-mono font-bold text-slate-800"
+                          className="w-full text-xs border border-purple-300 bg-white px-3.5 py-2.5 rounded-xl focus:border-purple-600 focus:outline-none font-mono font-bold text-slate-800"
                         />
                       </div>
                     </div>
@@ -7281,161 +7283,6 @@ if __name__ == "__main__":
                     </div>
                   );
                 })()}
-
-                {editingStudent && (
-                  <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
-                    <motion.div
-                      initial={{ opacity: 0, scale: 0.95 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      exit={{ opacity: 0, scale: 0.95 }}
-                      className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-200 text-right"
-                      style={{ direction: 'rtl' }}
-                    >
-                      <h3 className="font-bold text-slate-800 text-base mb-2 flex items-center gap-2">
-                        <span>✏️ تعديل بيانات الطالب بالكامل والتحكم بالاسم</span>
-                      </h3>
-                      <p className="text-xs text-slate-500 mb-4">
-                        يمكنك تعديل الاسم بالكامل، رقم القيد/الموحد، واسم ولي الأمر المرتبط للتعديل الشامل.
-                      </p>
-                      
-                      <div className="space-y-4">
-                        <div>
-                          <label className="block text-xs font-semibold text-slate-600 mb-1.5">اسم الطالب بالكامل:</label>
-                          <input
-                            type="text"
-                            value={editingStudent.name}
-                            onChange={e => setEditingStudent({ ...editingStudent, name: e.target.value })}
-                            className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl bg-white focus:border-indigo-500 focus:outline-none"
-                            placeholder="اسم الطالب الثلاثي"
-                          />
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-4">
-                          <div>
-                            <label className="block text-xs font-semibold text-slate-600 mb-1.5">الرقم الموحد / رقم القيد:</label>
-                            <input
-                              type="text"
-                              value={editingStudent.rollNo}
-                              onChange={e => setEditingStudent({ ...editingStudent, rollNo: e.target.value })}
-                              className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl bg-white focus:border-indigo-500 focus:outline-none font-mono"
-                              placeholder="الرقم الموحد"
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-xs font-semibold text-slate-600 mb-1.5">تاريخ الميلاد:</label>
-                            <input
-                              type="date"
-                              value={editingStudent.dob}
-                              onChange={e => setEditingStudent({ ...editingStudent, dob: e.target.value })}
-                              className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl bg-white focus:border-indigo-500 focus:outline-none font-mono"
-                            />
-                          </div>
-                        </div>
-
-                        <div>
-                          <label className="block text-xs font-semibold text-slate-600 mb-1.5">اسم ولي الأمر المرتبط:</label>
-                          <input
-                            type="text"
-                            value={editingStudent.parentName || ''}
-                            onChange={e => setEditingStudent({ ...editingStudent, parentName: e.target.value })}
-                            className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl bg-white focus:border-indigo-500 focus:outline-none"
-                            placeholder="اسم ولي أمر الطالب"
-                          />
-                        </div>
-
-                        <div>
-                          <label className="block text-xs font-semibold text-slate-600 mb-1.5 flex items-center gap-1 justify-end">
-                            <span>رقم واتساب ولي الأمر (📲):</span>
-                          </label>
-                          <input
-                            type="tel"
-                            value={editingStudentPhone}
-                            onChange={e => setEditingStudentPhone(e.target.value)}
-                            className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl bg-white focus:border-indigo-500 focus:outline-none font-mono text-right"
-                            placeholder="أدخل رقم واتساب ولي الأمر (مثال: 0501234567)"
-                          />
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-4">
-                          <div>
-                            <label className="block text-xs font-semibold text-slate-600 mb-1.5">الصف والشعبة:</label>
-                            <select
-                              value={editingStudent.classId}
-                              onChange={e => setEditingStudent({ ...editingStudent, classId: e.target.value })}
-                              className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl bg-white focus:border-indigo-500 focus:outline-none"
-                            >
-                              {classes.map(c => (
-                                <option key={c.id} value={c.id}>{c.name}</option>
-                              ))}
-                            </select>
-                          </div>
-                          <div>
-                            <label className="block text-xs font-semibold text-slate-600 mb-1.5">الجنس:</label>
-                            <select
-                              value={editingStudent.gender}
-                              onChange={e => setEditingStudent({ ...editingStudent, gender: e.target.value as 'male' | 'female' })}
-                              className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl bg-white focus:border-indigo-500 focus:outline-none"
-                            >
-                              <option value="male">ذكر</option>
-                              <option value="female">أنثى</option>
-                            </select>
-                          </div>
-                        </div>
-                      </div>
-                      
-                      <div className="flex gap-2 mt-6 justify-end">
-                        <button
-                          type="button"
-                          onClick={() => setEditingStudent(null)}
-                          className="px-4 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50 rounded-xl transition cursor-pointer"
-                        >
-                          إلغاء
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (!editingStudent.name.trim()) {
-                              alert('يرجى إدخال اسم الطالب');
-                              return;
-                            }
-                            if (!editingStudent.rollNo.trim()) {
-                              alert('يرجى إدخال الرقم الموحد');
-                              return;
-                            }
-                            
-                            // Save changes
-                            const updatedStudents = students.map(s => s.id === editingStudent.id ? editingStudent : s);
-                            setStudents(updatedStudents);
-                            localStorage.setItem('school_students', JSON.stringify(updatedStudents));
-
-                            // Sync with parent name and phone if found
-                            const parentToSync = parents.find(p => p.id === editingStudent.parentId || p.childrenIds.includes(editingStudent.id));
-                            if (parentToSync) {
-                              const updatedParents = parents.map(p => {
-                                if (p.id === parentToSync.id) {
-                                  return { 
-                                    ...p, 
-                                    name: editingStudent.parentName || p.name,
-                                    phone: editingStudentPhone || p.phone
-                                  };
-                                }
-                                return p;
-                              });
-                              setParents(updatedParents);
-                              localStorage.setItem('school_parents', JSON.stringify(updatedParents));
-                            }
-
-                            alert(`✅ تم حفظ تعديلات الطالب (${editingStudent.name}) بنجاح!`);
-                            setEditingStudent(null);
-                          }}
-                          className="px-4 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl transition shadow-sm cursor-pointer"
-                        >
-                          حفظ التعديلات 💾
-                        </button>
-                      </div>
-                    </motion.div>
-                  </div>
-                )}
               </AnimatePresence>
             </motion.div>
           )}
@@ -10855,6 +10702,281 @@ ${sampleEval}
               </motion.div>
             </div>
           )}
+
+          {/* Edit Student Full Modal */}
+          {editingStudent && (
+            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-[9999] overflow-y-auto">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="bg-white rounded-3xl max-w-2xl w-full p-6 shadow-2xl border border-slate-200 text-right my-8 max-h-[90vh] overflow-y-auto"
+                style={{ direction: 'rtl' }}
+              >
+                <div className="flex items-center justify-between border-b border-slate-100 pb-4 mb-4">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-10 h-10 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold">
+                      <Edit className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h3 className="font-black text-slate-900 text-base">تعديل بيانات الطالب: {editingStudent.name}</h3>
+                      <p className="text-[11px] text-slate-500 font-semibold">تعديل وحفظ البيانات الشخصية والأكاديمية للطالب</p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setEditingStudent(null)}
+                    className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-xl transition cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (!editingStudent.name.trim()) {
+                      alert('يرجى كتابة اسم الطالب.');
+                      return;
+                    }
+                    const currentList = students.length > 0 ? students : sampleRegistryStudents;
+                    const exists = currentList.some(s => s.id === editingStudent.id);
+                    const updatedStudents = exists
+                      ? currentList.map(s => s.id === editingStudent.id ? editingStudent : s)
+                      : [...currentList, editingStudent];
+
+                    setStudents(updatedStudents);
+                    localStorage.setItem('school_students', JSON.stringify(updatedStudents));
+                    window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_students', value: JSON.stringify(updatedStudents) } }));
+
+                    // Update parent
+                    const parentPhoneVal = editingStudentPhone || editingStudent.parentPhone || '';
+                    if (editingStudent.parentId || parentPhoneVal) {
+                      const updatedParents = parents.map(p => {
+                        if (p.id === editingStudent.parentId || p.childrenIds.includes(editingStudent.id)) {
+                          return {
+                            ...p,
+                            name: editingStudent.parentName || p.name,
+                            phone: parentPhoneVal || p.phone
+                          };
+                        }
+                        return p;
+                      });
+                      setParents(updatedParents);
+                      localStorage.setItem('school_parents', JSON.stringify(updatedParents));
+                      window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_parents', value: JSON.stringify(updatedParents) } }));
+                    }
+
+                    alert(`✅ تم حفظ وتحديث بيانات الطالب (${editingStudent.name}) بنجاح.`);
+                    setEditingStudent(null);
+                  }}
+                  className="space-y-4 text-xs font-normal"
+                >
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                    {/* اسم الطالب */}
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">اسم الطالب واللقب (النسبة) *</label>
+                      <input
+                        type="text"
+                        required
+                        value={editingStudent.name}
+                        onChange={e => setEditingStudent({ ...editingStudent, name: e.target.value })}
+                        className="w-full text-xs border border-slate-300 rounded-xl p-2.5 bg-white focus:border-indigo-600 focus:outline-none font-medium text-slate-900"
+                      />
+                    </div>
+
+                    {/* الصف الدراسي */}
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">الصف والشعبة *</label>
+                      <select
+                        value={editingStudent.classId}
+                        onChange={e => setEditingStudent({ ...editingStudent, classId: e.target.value })}
+                        className="w-full text-xs border border-slate-300 rounded-xl p-2.5 bg-white focus:border-indigo-600 focus:outline-none font-medium text-slate-900"
+                      >
+                        {classes.map(c => (
+                          <option key={c.id} value={c.id}>{c.name}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* الفوج */}
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">الفوج / الدوام</label>
+                      <select
+                        value={editingStudent.shift || 'morning'}
+                        onChange={e => setEditingStudent({ ...editingStudent, shift: e.target.value as any })}
+                        className="w-full text-xs border border-slate-300 rounded-xl p-2.5 bg-white focus:border-indigo-600 focus:outline-none font-medium text-slate-900"
+                      >
+                        <option value="morning">☀️ الفوج الصباحي</option>
+                        <option value="evening">🌙 الفوج المسائي</option>
+                      </select>
+                    </div>
+
+                    {/* الرقم الموحد */}
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">الرقم الموحد</label>
+                      <input
+                        type="text"
+                        value={editingStudent.unifiedNo || ''}
+                        onChange={e => setEditingStudent({ ...editingStudent, unifiedNo: e.target.value })}
+                        className="w-full text-xs border border-slate-300 rounded-xl p-2.5 bg-white focus:border-indigo-600 focus:outline-none font-mono font-medium text-slate-900"
+                      />
+                    </div>
+
+                    {/* الرقم الشخصي / الوطني */}
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">الرقم الشخصي / الوطني</label>
+                      <input
+                        type="text"
+                        value={editingStudent.nationalId || editingStudent.rollNo || ''}
+                        onChange={e => setEditingStudent({ ...editingStudent, nationalId: e.target.value, rollNo: e.target.value })}
+                        className="w-full text-xs border border-slate-300 rounded-xl p-2.5 bg-white focus:border-indigo-600 focus:outline-none font-mono font-medium text-slate-900"
+                      />
+                    </div>
+
+                    {/* الجنس */}
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">الجنس</label>
+                      <select
+                        value={editingStudent.gender || 'male'}
+                        onChange={e => setEditingStudent({ ...editingStudent, gender: e.target.value as any })}
+                        className="w-full text-xs border border-slate-300 rounded-xl p-2.5 bg-white focus:border-indigo-600 focus:outline-none font-medium text-slate-900"
+                      >
+                        <option value="male">ذكر</option>
+                        <option value="female">أنثى</option>
+                      </select>
+                    </div>
+
+                    {/* اسم الأب */}
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">اسم الأب</label>
+                      <input
+                        type="text"
+                        value={editingStudent.fatherName || ''}
+                        onChange={e => setEditingStudent({ ...editingStudent, fatherName: e.target.value })}
+                        className="w-full text-xs border border-slate-300 rounded-xl p-2.5 bg-white focus:border-indigo-600 focus:outline-none font-medium text-slate-900"
+                      />
+                    </div>
+
+                    {/* اسم الأم */}
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">اسم الأم</label>
+                      <input
+                        type="text"
+                        value={editingStudent.motherName || ''}
+                        onChange={e => setEditingStudent({ ...editingStudent, motherName: e.target.value })}
+                        className="w-full text-xs border border-slate-300 rounded-xl p-2.5 bg-white focus:border-indigo-600 focus:outline-none font-medium text-slate-900"
+                      />
+                    </div>
+
+                    {/* اسم ولي الأمر */}
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">اسم ولي الأمر</label>
+                      <input
+                        type="text"
+                        value={editingStudent.parentName || ''}
+                        onChange={e => setEditingStudent({ ...editingStudent, parentName: e.target.value })}
+                        className="w-full text-xs border border-slate-300 rounded-xl p-2.5 bg-white focus:border-indigo-600 focus:outline-none font-medium text-slate-900"
+                      />
+                    </div>
+
+                    {/* رقم هاتف / واتساب ولي الأمر */}
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">رقم هاتف / واتساب ولي الأمر</label>
+                      <input
+                        type="tel"
+                        value={editingStudentPhone || editingStudent.parentPhone || ''}
+                        onChange={e => {
+                          setEditingStudentPhone(e.target.value);
+                          setEditingStudent({ ...editingStudent, parentPhone: e.target.value });
+                        }}
+                        className="w-full text-xs border border-slate-300 rounded-xl p-2.5 bg-white focus:border-indigo-600 focus:outline-none font-mono font-medium text-slate-900"
+                      />
+                    </div>
+
+                    {/* تاريخ الولادة */}
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">تاريخ الولادة</label>
+                      <input
+                        type="date"
+                        value={editingStudent.dob || ''}
+                        onChange={e => setEditingStudent({ ...editingStudent, dob: e.target.value })}
+                        className="w-full text-xs border border-slate-300 rounded-xl p-2.5 bg-white focus:border-indigo-600 focus:outline-none font-mono font-medium text-slate-900"
+                      />
+                    </div>
+
+                    {/* مكان الولادة والسكن */}
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">مكان الولادة / السكن</label>
+                      <input
+                        type="text"
+                        value={editingStudent.birthPlace || editingStudent.residencePlace || editingStudent.address || ''}
+                        onChange={e => setEditingStudent({ ...editingStudent, birthPlace: e.target.value, residencePlace: e.target.value, address: e.target.value })}
+                        className="w-full text-xs border border-slate-300 rounded-xl p-2.5 bg-white focus:border-indigo-600 focus:outline-none font-medium text-slate-900"
+                      />
+                    </div>
+
+                    {/* المواصلات */}
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">المواصلات</label>
+                      <select
+                        value={editingStudent.transportation || 'حافلة المدرسة'}
+                        onChange={e => setEditingStudent({ ...editingStudent, transportation: e.target.value })}
+                        className="w-full text-xs border border-slate-300 rounded-xl p-2.5 bg-white focus:border-indigo-600 focus:outline-none font-medium text-slate-900"
+                      >
+                        <option value="حافلة المدرسة">حافلة المدرسة</option>
+                        <option value="خاص / مشياً">خاص / مشياً</option>
+                        <option value="دراجة / سيارة خاصة">دراجة / سيارة خاصة</option>
+                      </select>
+                    </div>
+
+                    {/* تسليم الكتب */}
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">تسليم الكتب</label>
+                      <select
+                        value={editingStudent.booksStatus || 'تم التسليم'}
+                        onChange={e => setEditingStudent({ ...editingStudent, booksStatus: e.target.value })}
+                        className="w-full text-xs border border-slate-300 rounded-xl p-2.5 bg-white focus:border-indigo-600 focus:outline-none font-medium text-slate-900"
+                      >
+                        <option value="تم التسليم">تم التسليم</option>
+                        <option value="لم يتم التسليم">لم يتم التسليم</option>
+                      </select>
+                    </div>
+
+                    {/* تسليم اللباس */}
+                    <div className="sm:col-span-2">
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">تسليم اللباس المدرسي</label>
+                      <select
+                        value={editingStudent.uniformStatus || 'تم التسليم'}
+                        onChange={e => setEditingStudent({ ...editingStudent, uniformStatus: e.target.value })}
+                        className="w-full text-xs border border-slate-300 rounded-xl p-2.5 bg-white focus:border-indigo-600 focus:outline-none font-medium text-slate-900"
+                      >
+                        <option value="تم التسليم">تم التسليم</option>
+                        <option value="لم يتم التسليم">لم يتم التسليم</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="flex gap-2 pt-4 border-t border-slate-100 justify-end">
+                    <button
+                      type="button"
+                      onClick={() => setEditingStudent(null)}
+                      className="px-4 py-2.5 text-xs font-semibold text-slate-500 hover:bg-slate-100 rounded-xl transition cursor-pointer"
+                    >
+                      إلغاء
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-6 py-2.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl transition shadow-md shadow-indigo-100 cursor-pointer flex items-center gap-1.5"
+                    >
+                      <Save className="w-4 h-4" />
+                      <span>حفظ التعديلات والتحديث 💾</span>
+                    </button>
+                  </div>
+                </form>
+              </motion.div>
+            </div>
+          )}
         </AnimatePresence>
         {/* Student Individual Printable Card Modal (استمارة بطاقة الطالب الرسمية الشاملة لكافة البيانات) */}
         <AnimatePresence>
@@ -10954,7 +11076,7 @@ ${sampleEval}
                       {/* 1. الرقم التسلسلي (مصغر) */}
                       <div className="border border-slate-300 rounded-xl p-2 bg-slate-50/60 col-span-2">
                         <span className="font-bold text-slate-700 text-[10.5px] block mb-1">الرقم التسلسلي:</span>
-                        <div className="h-6 border-b border-dotted border-slate-500 font-mono font-black text-red-600 text-xs pt-0.5 text-center">
+                        <div className="h-6 border-b border-dotted border-slate-500 font-mono font-medium text-red-600 text-xs pt-0.5 text-center">
                           #{regStudentCardModal.serialNo || '1'}
                         </div>
                       </div>
@@ -10962,7 +11084,7 @@ ${sampleEval}
                       {/* 2. الرقم الموحد (مصغر) */}
                       <div className="border border-slate-300 rounded-xl p-2 bg-slate-50/60 col-span-2">
                         <span className="font-bold text-slate-700 text-[10.5px] block mb-1">الرقم الموحد:</span>
-                        <div className="h-6 border-b border-dotted border-slate-500 font-mono font-black text-red-600 text-xs pt-0.5 text-center">
+                        <div className="h-6 border-b border-dotted border-slate-500 font-mono font-medium text-red-600 text-xs pt-0.5 text-center">
                           #{regStudentCardModal.unifiedNo || '75'}
                         </div>
                       </div>
@@ -10970,7 +11092,7 @@ ${sampleEval}
                       {/* 3. اسم الطالب واللقب (النسبة) */}
                       <div className="border border-slate-300 rounded-xl p-2 bg-slate-50/60 col-span-5">
                         <span className="font-bold text-slate-700 text-[10.5px] block mb-1">اسم الطالب واللقب (النسبة):</span>
-                        <div className="h-6 border-b border-dotted border-slate-500 font-black text-red-600 text-xs pt-0.5 truncate">
+                        <div className="h-6 border-b border-dotted border-slate-500 font-normal text-red-600 text-xs pt-0.5 truncate">
                           {regStudentCardModal.name || '—'}
                         </div>
                       </div>
@@ -10978,7 +11100,7 @@ ${sampleEval}
                       {/* 4. الرقم الوطني / القيد المدني */}
                       <div className="border border-slate-300 rounded-xl p-2 bg-slate-50/60 col-span-3">
                         <span className="font-bold text-slate-700 text-[10.5px] block mb-1">الرقم الوطني / القيد المدني:</span>
-                        <div className="h-6 border-b border-dotted border-slate-500 font-mono font-black text-red-600 text-xs pt-0.5">
+                        <div className="h-6 border-b border-dotted border-slate-500 font-mono font-medium text-red-600 text-xs pt-0.5">
                           {regStudentCardModal.nationalId || regStudentCardModal.rollNo || '—'}
                         </div>
                       </div>
@@ -10986,11 +11108,11 @@ ${sampleEval}
                       {/* 5. الجنس */}
                       <div className="border border-slate-300 rounded-xl p-2 bg-slate-50/60 col-span-3 flex items-center justify-between">
                         <span className="font-bold text-slate-700 text-[10.5px]">الجنس:</span>
-                        <div className="flex items-center gap-2 font-black text-xs">
-                          <span className={regStudentCardModal.gender === 'male' ? 'text-red-600 font-black bg-red-50 px-1 rounded' : 'text-slate-500'}>
+                        <div className="flex items-center gap-2 font-medium text-xs">
+                          <span className={regStudentCardModal.gender === 'male' ? 'text-red-600 font-bold bg-red-50 px-1 rounded' : 'text-slate-500'}>
                             [{regStudentCardModal.gender === 'male' ? ' ✓ ' : '   '}] ذكر
                           </span>
-                          <span className={regStudentCardModal.gender === 'female' ? 'text-red-600 font-black bg-red-50 px-1 rounded' : 'text-slate-500'}>
+                          <span className={regStudentCardModal.gender === 'female' ? 'text-red-600 font-bold bg-red-50 px-1 rounded' : 'text-slate-500'}>
                             [{regStudentCardModal.gender === 'female' ? ' ✓ ' : '   '}] أنثى
                           </span>
                         </div>
@@ -10999,7 +11121,7 @@ ${sampleEval}
                       {/* 6. تاريخ الولادة */}
                       <div className="border border-slate-300 rounded-xl p-2 bg-slate-50/60 col-span-3">
                         <span className="font-bold text-slate-700 text-[10.5px] block mb-1">تاريخ الولادة:</span>
-                        <div className="h-6 border-b border-dotted border-slate-500 font-mono font-black text-red-600 text-xs pt-0.5">
+                        <div className="h-6 border-b border-dotted border-slate-500 font-mono font-medium text-red-600 text-xs pt-0.5">
                           {regStudentCardModal.dob || '—'}
                         </div>
                       </div>
@@ -11007,7 +11129,7 @@ ${sampleEval}
                       {/* 7. مكان الولادة والمحافظة */}
                       <div className="border border-slate-300 rounded-xl p-2 bg-slate-50/60 col-span-3">
                         <span className="font-bold text-slate-700 text-[10.5px] block mb-1">مكان الولادة والمحافظة:</span>
-                        <div className="h-6 border-b border-dotted border-slate-500 font-black text-red-600 text-xs pt-0.5 truncate">
+                        <div className="h-6 border-b border-dotted border-slate-500 font-normal text-red-600 text-xs pt-0.5 truncate">
                           {regStudentCardModal.birthPlace || '—'}
                         </div>
                       </div>
@@ -11015,7 +11137,7 @@ ${sampleEval}
                       {/* 8. الحالة الصحية للطالب */}
                       <div className="border border-slate-300 rounded-xl p-2 bg-slate-50/60 col-span-3">
                         <span className="font-bold text-slate-700 text-[10.5px] block mb-1">الحالة الصحية للطالب:</span>
-                        <div className="h-6 border-b border-dotted border-slate-500 font-black text-red-600 text-xs pt-0.5 truncate">
+                        <div className="h-6 border-b border-dotted border-slate-500 font-normal text-red-600 text-xs pt-0.5 truncate">
                           {regStudentCardModal.healthStatus || 'سليم وممتاز'}
                         </div>
                       </div>
@@ -11037,38 +11159,38 @@ ${sampleEval}
                     <div className="grid grid-cols-4 gap-2 text-xs">
                       <div className="border border-slate-300 rounded-xl p-2 bg-slate-50/60">
                         <span className="font-bold text-slate-700 text-[11px] block mb-1">اسم الأب وعمله / مهنته:</span>
-                        <div className="h-6 border-b border-dotted border-slate-500 font-black text-red-600 text-xs pt-0.5 truncate">
+                        <div className="h-6 border-b border-dotted border-slate-500 font-normal text-red-600 text-xs pt-0.5 truncate">
                           {regStudentCardModal.fatherName || '—'}{regStudentCardModal.fatherJob ? ` (${regStudentCardModal.fatherJob})` : ''}
                         </div>
                       </div>
                       <div className="border border-slate-300 rounded-xl p-2 bg-slate-50/60">
                         <span className="font-bold text-slate-700 text-[11px] block mb-1">اسم الجد:</span>
-                        <div className="h-6 border-b border-dotted border-slate-500 font-black text-red-600 text-xs pt-0.5">
+                        <div className="h-6 border-b border-dotted border-slate-500 font-normal text-red-600 text-xs pt-0.5">
                           {regStudentCardModal.grandfatherName || '—'}
                         </div>
                       </div>
                       <div className="border border-slate-300 rounded-xl p-2 bg-slate-50/60">
                         <span className="font-bold text-slate-700 text-[11px] block mb-1">اسم الأم وعملها:</span>
-                        <div className="h-6 border-b border-dotted border-slate-500 font-black text-red-600 text-xs pt-0.5 truncate">
+                        <div className="h-6 border-b border-dotted border-slate-500 font-normal text-red-600 text-xs pt-0.5 truncate">
                           {regStudentCardModal.motherName || '—'}{regStudentCardModal.motherJob ? ` (${regStudentCardModal.motherJob})` : ''}
                         </div>
                       </div>
                       <div className="border border-slate-300 rounded-xl p-2 bg-slate-50/60">
                         <span className="font-bold text-slate-700 text-[11px] block mb-1">نسبة الأم:</span>
-                        <div className="h-6 border-b border-dotted border-slate-500 font-black text-red-600 text-xs pt-0.5">
+                        <div className="h-6 border-b border-dotted border-slate-500 font-normal text-red-600 text-xs pt-0.5">
                           {regStudentCardModal.motherMaidenName || '—'}
                         </div>
                       </div>
 
                       <div className="border border-slate-300 rounded-xl p-2 bg-slate-50/60 col-span-2">
                         <span className="font-bold text-slate-700 text-[11px] block mb-1">المحافظة والمدينة والحي السكني:</span>
-                        <div className="h-6 border-b border-dotted border-slate-500 font-black text-red-600 text-xs pt-0.5 truncate">
+                        <div className="h-6 border-b border-dotted border-slate-500 font-normal text-red-600 text-xs pt-0.5 truncate">
                           {regStudentCardModal.residencePlace || regStudentCardModal.residenceCity || '—'}
                         </div>
                       </div>
                       <div className="border border-slate-300 rounded-xl p-2 bg-slate-50/60 col-span-2">
                         <span className="font-bold text-slate-700 text-[11px] block mb-1">العنوان التفصيلي (الشارع - البناء - الطابق):</span>
-                        <div className="h-6 border-b border-dotted border-slate-500 font-black text-red-600 text-xs pt-0.5 truncate">
+                        <div className="h-6 border-b border-dotted border-slate-500 font-normal text-red-600 text-xs pt-0.5 truncate">
                           {regStudentCardModal.address || '—'}
                         </div>
                       </div>
@@ -11090,63 +11212,63 @@ ${sampleEval}
                     <div className="grid grid-cols-3 gap-2 text-xs">
                       <div className="border border-slate-300 rounded-xl p-2 bg-slate-50/60">
                         <span className="font-bold text-slate-700 text-[11px] block mb-1">الصف والشعبة المطلوب التسجيل فيها:</span>
-                        <div className="h-6 border-b border-dotted border-slate-500 font-black text-red-600 text-xs pt-0.5">
+                        <div className="h-6 border-b border-dotted border-slate-500 font-normal text-red-600 text-xs pt-0.5">
                           {classes.find(c => c.id === regStudentCardModal.classId)?.name || regStudentCardModal.customClassName || (regStudentCardModal.classId && regStudentCardModal.classId !== 'class-default' ? regStudentCardModal.classId : 'الصف الأول الابتدائي')}
                         </div>
                       </div>
                       <div className="border border-slate-300 rounded-xl p-2 bg-slate-50/60 flex items-center justify-between">
                         <span className="font-bold text-slate-700 text-[11px]">الفوج / الدوام:</span>
-                        <div className="flex items-center gap-2 font-black text-xs">
-                          <span className={regStudentCardModal.shift !== 'evening' ? 'text-red-600 font-black bg-red-50 px-1 rounded' : 'text-slate-500'}>
+                        <div className="flex items-center gap-2 font-medium text-xs">
+                          <span className={regStudentCardModal.shift !== 'evening' ? 'text-red-600 font-bold bg-red-50 px-1 rounded' : 'text-slate-500'}>
                             [{regStudentCardModal.shift !== 'evening' ? ' ✓ ' : '   '}] صباحي ☀️
                           </span>
-                          <span className={regStudentCardModal.shift === 'evening' ? 'text-red-600 font-black bg-red-50 px-1 rounded' : 'text-slate-500'}>
+                          <span className={regStudentCardModal.shift === 'evening' ? 'text-red-600 font-bold bg-red-50 px-1 rounded' : 'text-slate-500'}>
                             [{regStudentCardModal.shift === 'evening' ? ' ✓ ' : '   '}] مسائي 🌙
                           </span>
                         </div>
                       </div>
                       <div className="border border-slate-300 rounded-xl p-2 bg-slate-50/60">
                         <span className="font-bold text-slate-700 text-[11px] block mb-1">المدرسة السابقة (المحافظة):</span>
-                        <div className="h-6 border-b border-dotted border-slate-500 font-black text-red-600 text-xs pt-0.5 truncate">
+                        <div className="h-6 border-b border-dotted border-slate-500 font-normal text-red-600 text-xs pt-0.5 truncate">
                           {regStudentCardModal.previousSchool || 'لا يوجد'}
                         </div>
                       </div>
 
                       <div className="border border-slate-300 rounded-xl p-2 bg-slate-50/60 flex items-center justify-between">
                         <span className="font-bold text-slate-700 text-[11px]">خدمة المواصلات:</span>
-                        <div className="flex items-center gap-2 font-black text-[11px]">
-                          <span className={regStudentCardModal.transportation?.includes('حافلة') ? 'text-red-600 font-black bg-red-50 px-1 rounded' : 'text-slate-500'}>
+                        <div className="flex items-center gap-2 font-medium text-[11px]">
+                          <span className={regStudentCardModal.transportation?.includes('حافلة') ? 'text-red-600 font-bold bg-red-50 px-1 rounded' : 'text-slate-500'}>
                             [{regStudentCardModal.transportation?.includes('حافلة') ? ' ✓ ' : '   '}] حافلة المدرسة
                           </span>
-                          <span className={!regStudentCardModal.transportation?.includes('حافلة') ? 'text-red-600 font-black bg-red-50 px-1 rounded' : 'text-slate-500'}>
+                          <span className={!regStudentCardModal.transportation?.includes('حافلة') ? 'text-red-600 font-bold bg-red-50 px-1 rounded' : 'text-slate-500'}>
                             [{!regStudentCardModal.transportation?.includes('حافلة') ? ' ✓ ' : '   '}] خاص / ولي الأمر
                           </span>
                         </div>
                       </div>
                       <div className="border border-slate-300 rounded-xl p-2 bg-slate-50/60 flex items-center justify-between">
                         <span className="font-bold text-slate-700 text-[11px]">الكتب المدرسية:</span>
-                        <div className="flex items-center gap-1.5 font-black text-[11px]">
-                          <span className={regStudentCardModal.booksStatus?.includes('تسليم') || !regStudentCardModal.booksStatus ? 'text-red-600 font-black bg-red-50 px-1 rounded' : 'text-slate-500'}>
+                        <div className="flex items-center gap-1.5 font-medium text-[11px]">
+                          <span className={regStudentCardModal.booksStatus?.includes('تسليم') || !regStudentCardModal.booksStatus ? 'text-red-600 font-bold bg-red-50 px-1 rounded' : 'text-slate-500'}>
                             [{regStudentCardModal.booksStatus?.includes('تسليم') || !regStudentCardModal.booksStatus ? ' ✓ ' : '   '}] تم التسليم
                           </span>
-                          <span className={regStudentCardModal.booksStatus?.includes('مؤجل') ? 'text-red-600 font-black bg-red-50 px-1 rounded' : 'text-slate-500'}>
+                          <span className={regStudentCardModal.booksStatus?.includes('مؤجل') ? 'text-red-600 font-bold bg-red-50 px-1 rounded' : 'text-slate-500'}>
                             [{regStudentCardModal.booksStatus?.includes('مؤجل') ? ' ✓ ' : '   '}] مؤجل
                           </span>
-                          <span className={regStudentCardModal.booksStatus?.includes('غير') ? 'text-red-600 font-black bg-red-50 px-1 rounded' : 'text-slate-500'}>
+                          <span className={regStudentCardModal.booksStatus?.includes('غير') ? 'text-red-600 font-bold bg-red-50 px-1 rounded' : 'text-slate-500'}>
                             [{regStudentCardModal.booksStatus?.includes('غير') ? ' ✓ ' : '   '}] غير مطلوب
                           </span>
                         </div>
                       </div>
                       <div className="border border-slate-300 rounded-xl p-2 bg-slate-50/60 flex items-center justify-between">
                         <span className="font-bold text-slate-700 text-[11px]">اللباس المدرسي:</span>
-                        <div className="flex items-center gap-1.5 font-black text-[11px]">
-                          <span className={regStudentCardModal.uniformStatus?.includes('تسليم') || !regStudentCardModal.uniformStatus ? 'text-red-600 font-black bg-red-50 px-1 rounded' : 'text-slate-500'}>
+                        <div className="flex items-center gap-1.5 font-medium text-[11px]">
+                          <span className={regStudentCardModal.uniformStatus?.includes('تسليم') || !regStudentCardModal.uniformStatus ? 'text-red-600 font-bold bg-red-50 px-1 rounded' : 'text-slate-500'}>
                             [{regStudentCardModal.uniformStatus?.includes('تسليم') || !regStudentCardModal.uniformStatus ? ' ✓ ' : '   '}] تم التسليم
                           </span>
-                          <span className={regStudentCardModal.uniformStatus?.includes('مؤجل') ? 'text-red-600 font-black bg-red-50 px-1 rounded' : 'text-slate-500'}>
+                          <span className={regStudentCardModal.uniformStatus?.includes('مؤجل') ? 'text-red-600 font-bold bg-red-50 px-1 rounded' : 'text-slate-500'}>
                             [{regStudentCardModal.uniformStatus?.includes('مؤجل') ? ' ✓ ' : '   '}] مؤجل
                           </span>
-                          <span className={regStudentCardModal.uniformStatus?.includes('غير') ? 'text-red-600 font-black bg-red-50 px-1 rounded' : 'text-slate-500'}>
+                          <span className={regStudentCardModal.uniformStatus?.includes('غير') ? 'text-red-600 font-bold bg-red-50 px-1 rounded' : 'text-slate-500'}>
                             [{regStudentCardModal.uniformStatus?.includes('غير') ? ' ✓ ' : '   '}] غير مطلوب
                           </span>
                         </div>
@@ -11156,45 +11278,45 @@ ${sampleEval}
 
                   {/* 6. Section 4: بيانات ولي الأمر والوصي القانوني وهواتف التواصل */}
                   <div className="space-y-1.5 mb-2">
-                    <div className="flex items-center justify-between border-b border-slate-600/70 pb-2 pt-0.5 px-1">
+                    <div className="flex items-center justify-between border-b-2 border-purple-600/80 pb-2 pt-0.5 px-1 bg-purple-50/50 rounded-t-lg">
                       <div className="flex items-center gap-1.5">
-                        <span className="w-2 h-2 rounded-full bg-slate-700"></span>
-                        <h4 className="text-xs font-bold text-slate-800 tracking-wide">رابعاً: بيانات ولي الأمر والوصي القانوني وهواتف التواصل</h4>
+                        <span className="w-2.5 h-2.5 rounded-full bg-purple-600 shadow-2xs"></span>
+                        <h4 className="text-xs font-black text-purple-900 tracking-wide">رابعاً: بيانات ولي الأمر والوصي القانوني وهواتف التواصل</h4>
                       </div>
-                      <span className="text-[9.5px] text-slate-800 font-bold px-2 py-0.5 rounded border border-slate-300">
+                      <span className="text-[9.5px] text-purple-900 font-extrabold px-2.5 py-0.5 rounded-md border border-purple-300 bg-purple-100/80 shadow-2xs">
                         التواصل والوصاية
                       </span>
                     </div>
 
                     <div className="grid grid-cols-4 gap-2 text-xs">
-                      <div className="border border-slate-300 rounded-xl p-2.5 bg-slate-50/60 col-span-2">
-                        <span className="font-bold text-slate-700 text-[11px] block mb-1">اسم ولي الأمر / الوصي القانوني والنسبة:</span>
-                        <div className="h-6 border-b border-dotted border-slate-500 font-black text-red-600 text-xs pt-0.5 truncate">
+                      <div className="border border-purple-200/80 rounded-xl p-2.5 bg-purple-50/30 col-span-2">
+                        <span className="font-bold text-purple-950 text-[11px] block mb-1">اسم ولي الأمر / الوصي القانوني والنسبة:</span>
+                        <div className="h-6 border-b border-dotted border-purple-400 font-normal text-red-600 text-xs pt-0.5 truncate">
                           {regStudentCardModal.parentName || (regStudentCardModal.name ? `ولي أمر ${regStudentCardModal.name}` : '—')}
                         </div>
                       </div>
-                      <div className="border border-slate-300 rounded-xl p-2.5 bg-slate-50/60">
-                        <span className="font-bold text-slate-700 text-[11px] block mb-1">صلة القرابة بالطالب:</span>
-                        <div className="h-6 border-b border-dotted border-slate-500 font-black text-red-600 text-xs pt-0.5">
+                      <div className="border border-purple-200/80 rounded-xl p-2.5 bg-purple-50/30">
+                        <span className="font-bold text-purple-950 text-[11px] block mb-1">صلة القرابة بالطالب:</span>
+                        <div className="h-6 border-b border-dotted border-purple-400 font-normal text-red-600 text-xs pt-0.5">
                           {regStudentCardModal.guardianRelation || 'أب'}
                         </div>
                       </div>
-                      <div className="border border-slate-300 rounded-xl p-2.5 bg-slate-50/60">
-                        <span className="font-bold text-slate-700 text-[11px] block mb-1">الرقم الوطني لولي الأمر:</span>
-                        <div className="h-6 border-b border-dotted border-slate-500 font-mono font-black text-red-600 text-xs pt-0.5">
+                      <div className="border border-purple-200/80 rounded-xl p-2.5 bg-purple-50/30">
+                        <span className="font-bold text-purple-950 text-[11px] block mb-1">الرقم الوطني لولي الأمر:</span>
+                        <div className="h-6 border-b border-dotted border-purple-400 font-mono font-medium text-red-600 text-xs pt-0.5">
                           {regStudentCardModal.guardianNationalId || '—'}
                         </div>
                       </div>
 
-                      <div className="border border-slate-300 rounded-xl p-2.5 bg-slate-50/60 col-span-2">
-                        <span className="font-bold text-slate-700 text-[11px] block mb-1">رقم الهاتف المحمول الأساسي للتواصل (واتساب / اتصال):</span>
-                        <div className="h-6 border-b border-dotted border-slate-500 font-mono font-black text-red-600 text-xs pt-0.5 dir-ltr text-right">
+                      <div className="border border-purple-200/80 rounded-xl p-2.5 bg-purple-50/30 col-span-2">
+                        <span className="font-bold text-purple-950 text-[11px] block mb-1">رقم الهاتف المحمول الأساسي للتواصل (واتساب / اتصال):</span>
+                        <div className="h-6 border-b border-dotted border-purple-400 font-mono font-medium text-red-600 text-xs pt-0.5 dir-ltr text-right">
                           {regStudentCardModal.parentPhone || '—'}
                         </div>
                       </div>
-                      <div className="border border-slate-300 rounded-xl p-2.5 bg-slate-50/60 col-span-2">
-                        <span className="font-bold text-slate-700 text-[11px] block mb-1">رقم هاتف إضافي / هاتف الطوارئ والعمل:</span>
-                        <div className="h-6 border-b border-dotted border-slate-500 font-mono font-black text-red-600 text-xs pt-0.5 dir-ltr text-right">
+                      <div className="border border-purple-200/80 rounded-xl p-2.5 bg-purple-50/30 col-span-2">
+                        <span className="font-bold text-purple-950 text-[11px] block mb-1">رقم هاتف إضافي / هاتف الطوارئ والعمل:</span>
+                        <div className="h-6 border-b border-dotted border-purple-400 font-mono font-medium text-red-600 text-xs pt-0.5 dir-ltr text-right">
                           {regStudentCardModal.parentBackupPhone || '—'}
                         </div>
                       </div>
@@ -11556,37 +11678,37 @@ ${sampleEval}
 
                   {/* 6. Section 4: بيانات ولي الأمر وهواتف التواصل */}
                   <div className="space-y-1.5 mb-2">
-                    <div className="flex items-center justify-between border-b border-slate-600/70 pb-2 pt-0.5 px-1">
+                    <div className="flex items-center justify-between border-b-2 border-purple-600/80 pb-2 pt-0.5 px-1 bg-purple-50/50 rounded-t-lg">
                       <div className="flex items-center gap-1.5">
-                        <span className="w-2 h-2 rounded-full bg-slate-700"></span>
-                        <h4 className="text-xs font-bold text-slate-800 tracking-wide">رابعاً: بيانات ولي الأمر والوصي القانوني وهواتف التواصل</h4>
+                        <span className="w-2.5 h-2.5 rounded-full bg-purple-600 shadow-2xs"></span>
+                        <h4 className="text-xs font-black text-purple-900 tracking-wide">رابعاً: بيانات ولي الأمر والوصي القانوني وهواتف التواصل</h4>
                       </div>
-                      <span className="text-[9.5px] text-slate-800 font-bold px-2 py-0.5 rounded border border-slate-300">
+                      <span className="text-[9.5px] text-purple-900 font-extrabold px-2.5 py-0.5 rounded-md border border-purple-300 bg-purple-100/80 shadow-2xs">
                         التواصل والوصاية
                       </span>
                     </div>
 
                     <div className="grid grid-cols-4 gap-2 text-xs">
-                      <div className="border border-slate-300 rounded-xl p-2.5 bg-slate-50/60 col-span-2">
-                        <span className="font-bold text-slate-700 text-[11px] block mb-1">اسم ولي الأمر / الوصي القانوني والنسبة:</span>
-                        <div className="h-6 border-b border-dotted border-slate-500"></div>
+                      <div className="border border-purple-200/80 rounded-xl p-2.5 bg-purple-50/30 col-span-2">
+                        <span className="font-bold text-purple-950 text-[11px] block mb-1">اسم ولي الأمر / الوصي القانوني والنسبة:</span>
+                        <div className="h-6 border-b border-dotted border-purple-400"></div>
                       </div>
-                      <div className="border border-slate-300 rounded-xl p-2.5 bg-slate-50/60">
-                        <span className="font-bold text-slate-700 text-[11px] block mb-1">صلة القرابة بالطالب:</span>
-                        <div className="h-6 border-b border-dotted border-slate-500"></div>
+                      <div className="border border-purple-200/80 rounded-xl p-2.5 bg-purple-50/30">
+                        <span className="font-bold text-purple-950 text-[11px] block mb-1">صلة القرابة بالطالب:</span>
+                        <div className="h-6 border-b border-dotted border-purple-400"></div>
                       </div>
-                      <div className="border border-slate-300 rounded-xl p-2.5 bg-slate-50/60">
-                        <span className="font-bold text-slate-700 text-[11px] block mb-1">الرقم الوطني لولي الأمر:</span>
-                        <div className="h-6 border-b border-dotted border-slate-500"></div>
+                      <div className="border border-purple-200/80 rounded-xl p-2.5 bg-purple-50/30">
+                        <span className="font-bold text-purple-950 text-[11px] block mb-1">الرقم الوطني لولي الأمر:</span>
+                        <div className="h-6 border-b border-dotted border-purple-400"></div>
                       </div>
 
-                      <div className="border border-slate-300 rounded-xl p-2.5 bg-slate-50/60 col-span-2">
-                        <span className="font-bold text-slate-700 text-[11px] block mb-1">رقم الهاتف المحمول الأساسي للتواصل (واتساب / اتصال):</span>
-                        <div className="h-6 border-b border-dotted border-slate-500"></div>
+                      <div className="border border-purple-200/80 rounded-xl p-2.5 bg-purple-50/30 col-span-2">
+                        <span className="font-bold text-purple-950 text-[11px] block mb-1">رقم الهاتف المحمول الأساسي للتواصل (واتساب / اتصال):</span>
+                        <div className="h-6 border-b border-dotted border-purple-400"></div>
                       </div>
-                      <div className="border border-slate-300 rounded-xl p-2.5 bg-slate-50/60 col-span-2">
-                        <span className="font-bold text-slate-700 text-[11px] block mb-1">رقم هاتف إضافي / هاتف الطوارئ والعمل:</span>
-                        <div className="h-6 border-b border-dotted border-slate-500"></div>
+                      <div className="border border-purple-200/80 rounded-xl p-2.5 bg-purple-50/30 col-span-2">
+                        <span className="font-bold text-purple-950 text-[11px] block mb-1">رقم هاتف إضافي / هاتف الطوارئ والعمل:</span>
+                        <div className="h-6 border-b border-dotted border-purple-400"></div>
                       </div>
                     </div>
                   </div>
