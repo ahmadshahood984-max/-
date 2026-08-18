@@ -6123,7 +6123,7 @@ ${directivesFormatted}
                 <div className="bg-emerald-50/50 border border-emerald-200/80 p-4 md:p-5 rounded-2xl space-y-4">
                   <div className="flex items-center gap-2 text-xs font-black text-emerald-950">
                     <Filter className="w-4 h-4 text-emerald-600" />
-                    <span>تصفية سجل الطلاب حسب (الصف الدراسي / الفوج الصباحي والمسائي / القائمة المنسدلة)</span>
+                    <span>تصفية وبحث في سجل الطلاب المسجلين حسب (الصف الدراسي / القائمة المنسدلة)</span>
                   </div>
 
                   {/* Grid of Selects + Search */}
@@ -6201,47 +6201,8 @@ ${directivesFormatted}
                   </div>
 
                   {/* Filter Pills / Chips */}
-                  <div className="space-y-2 pt-2 border-t border-emerald-200/60 text-xs">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-bold text-slate-600 text-[11px]">تصفية سريعة للفوج:</span>
-                      <button
-                        type="button"
-                        onClick={() => setRegShiftFilter('all')}
-                        className={`px-3 py-1 rounded-full text-[11px] font-bold transition cursor-pointer ${
-                          regShiftFilter === 'all'
-                            ? 'bg-emerald-700 text-white shadow-2xs'
-                            : 'bg-white text-slate-700 border border-slate-200 hover:bg-emerald-50'
-                        }`}
-                      >
-                        جميع الأفواج
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setRegShiftFilter('morning')}
-                        className={`px-3 py-1 rounded-full text-[11px] font-bold transition cursor-pointer flex items-center gap-1 ${
-                          regShiftFilter === 'morning'
-                            ? 'bg-amber-600 text-white shadow-2xs'
-                            : 'bg-white text-slate-700 border border-slate-200 hover:bg-amber-50'
-                        }`}
-                      >
-                        <span>☀️</span>
-                        <span>الفوج الصباحي ({allRegistryStudents.filter(s => s.shift === 'morning').length})</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setRegShiftFilter('evening')}
-                        className={`px-3 py-1 rounded-full text-[11px] font-bold transition cursor-pointer flex items-center gap-1 ${
-                          regShiftFilter === 'evening'
-                            ? 'bg-purple-700 text-white shadow-2xs'
-                            : 'bg-white text-slate-700 border border-slate-200 hover:bg-purple-50'
-                        }`}
-                      >
-                        <span>🌙</span>
-                        <span>الفوج المسائي ({allRegistryStudents.filter(s => s.shift === 'evening').length})</span>
-                      </button>
-                    </div>
-
-                    <div className="flex items-center gap-1.5 flex-wrap pt-1">
+                  <div className="pt-2 border-t border-emerald-200/60 text-xs">
+                    <div className="flex items-center gap-1.5 flex-wrap">
                       <span className="font-bold text-slate-600 text-[11px]">تصفية الصف الدراسي:</span>
                       <button
                         type="button"
