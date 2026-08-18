@@ -10808,7 +10808,8 @@ ${sampleEval}
                 {/* Printable Content Body */}
                 <div
                   id="printable-student-card"
-                  className="a4-single-page p-6 sm:p-7 print:p-5 bg-white text-slate-950 min-h-[1060px] flex flex-col justify-between relative overflow-hidden"
+                  translate="no"
+                  className="a4-single-page p-6 sm:p-7 print:p-5 bg-white text-slate-950 min-h-[1060px] flex flex-col justify-between relative overflow-hidden notranslate select-none"
                   style={{ minHeight: '1060px' }}
                 >
                   {/* Beautiful Official School Watermark covering the full page (علامة مائية لشعار المدرسة يغطي كامل الصفحة) */}
@@ -11281,7 +11282,8 @@ ${sampleEval}
                 {/* Printable Blank Form Content */}
                 <div
                   id="printable-blank-form"
-                  className="a4-single-page p-6 sm:p-7 print:p-5 bg-white text-slate-950 min-h-[1060px] flex flex-col justify-between relative overflow-hidden"
+                  translate="no"
+                  className="a4-single-page p-6 sm:p-7 print:p-5 bg-white text-slate-950 min-h-[1060px] flex flex-col justify-between relative overflow-hidden notranslate select-none"
                   style={{ minHeight: '1060px' }}
                 >
                   {/* Beautiful Official School Watermark covering the full page (علامة مائية لشعار المدرسة يغطي كامل الصفحة) */}
@@ -11684,7 +11686,7 @@ ${sampleEval}
                   </button>
                 </div>
 
-                <div id="printable-students-manifest" className="p-6 space-y-6 bg-white text-slate-900">
+                <div id="printable-students-manifest" translate="no" className="p-6 space-y-6 bg-white text-slate-900 notranslate select-none">
                   {/* Manifest Header */}
                   <div className="text-center space-y-1 border-b-2 border-slate-800 pb-4">
                     <p className="text-xs font-bold text-slate-600">الجمهورية العربية السورية / وزارة التربية والتعليم</p>

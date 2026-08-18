@@ -11,6 +11,47 @@ body {
   direction: rtl;
 }
 
+/* Suppress all browser translation bubbles, tooltips, and extension floating widgets */
+.notranslate,
+[translate="no"],
+#printable-student-card,
+#printable-blank-form,
+#printable-students-manifest,
+.a4-single-page,
+.print-card-box {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  -moz-user-select: none !important;
+  -ms-user-select: none !important;
+}
+
+/* Hide Google Translate UI elements and hover bubbles */
+.goog-te-banner-frame,
+.goog-te-menu-frame,
+.goog-tooltip,
+.goog-tooltip:hover,
+.goog-text-highlight,
+.skiptranslate,
+#goog-gt-tt,
+#goog-gt-vt,
+.gtx-bubble,
+div[id^="gtx-"],
+div[class*="gtx-"],
+div[class*="translate-bubble"],
+div[class*="translate-popup"],
+div[id*="translate"],
+span[class*="goog-"],
+div[class*="goog-"],
+[aria-label*="translate" i],
+[aria-label*="ترجمة"],
+[title*="translate" i],
+[title*="ترجمة"] {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
 @media print {
   @page {
     size: A4 portrait;

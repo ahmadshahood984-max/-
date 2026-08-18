@@ -187,6 +187,14 @@ const sanitizeClonedTreeForHtml2Canvas = (clonedDoc: Document, clonedElement: HT
       }
     };
 
+    // Remove any Google Translate / browser extension overlays and bubbles from the clone
+    try {
+      const overlays = clonedDoc.querySelectorAll('.goog-te-banner-frame, .goog-tooltip, .gtx-bubble, [id^="gtx-"], [class*="gtx-"], [class*="translate"], [aria-label*="translate" i]');
+      overlays.forEach(el => el.remove());
+    } catch {
+      // ignore
+    }
+
     sanitizeElement(clonedElement);
     const allDescendants = clonedElement.querySelectorAll('*');
     allDescendants.forEach(sanitizeElement);
@@ -214,14 +222,38 @@ export const printElementById = (elementId: string, docTitle: string = 'وثيق
       prevMount.remove();
     }
 
-    // 2. Create isolated top-level print mount container attached directly to document.body
+    // 2. Clear any active user selection and blur active element to prevent translation bubble
+    if (typeof window !== 'undefined') {
+      try {
+        window.getSelection()?.removeAllRanges();
+        if (document.activeElement && document.activeElement instanceof HTMLElement) {
+          document.activeElement.blur();
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    // 3. Create isolated top-level print mount container attached directly to document.body
     const printContainer = document.createElement('div');
     printContainer.id = 'universal-print-container';
-    printContainer.className = 'universal-print-isolated';
+    printContainer.className = 'universal-print-isolated notranslate select-none';
+    printContainer.setAttribute('translate', 'no');
     
     // Deep clone the target element
     const clone = element.cloneNode(true) as HTMLElement;
     clone.id = `${elementId}-print-clone`;
+    clone.classList.add('notranslate', 'select-none');
+    clone.setAttribute('translate', 'no');
+
+    // Remove any Google Translate / extension injected overlays from clone
+    try {
+      const overlays = clone.querySelectorAll('.goog-te-banner-frame, .goog-tooltip, .gtx-bubble, [id^="gtx-"], [class*="gtx-"], [class*="translate"], [aria-label*="translate" i]');
+      overlays.forEach(el => el.remove());
+    } catch {
+      // ignore
+    }
+
     printContainer.appendChild(clone);
     document.body.appendChild(printContainer);
 
