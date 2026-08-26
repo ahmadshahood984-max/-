@@ -1603,46 +1603,201 @@ ${directivesFormatted}
   });
 
   const exportRegistryExcel = () => {
+    try {
+      const headers = [
+        "الرقم التسلسلي",
+        "الرقم الموحد",
+        "الرقم الشخصي / الوطني",
+        "اسم الطالب الكامل",
+        "الجنس",
+        "تاريخ الولادة",
+        "مكان الولادة",
+        "الحالة الصحية / زمرة الدم",
+        "اسم الأب",
+        "مهنة الأب",
+        "اسم الجد",
+        "اسم الأم",
+        "مهنة الأم",
+        "نسبة الأم",
+        "المنطقة والمدينة",
+        "العنوان التفصيلي",
+        "الصف الحالي",
+        "الفوج / الدوام",
+        "المدرسة السابقة",
+        "خدمة المواصلات",
+        "استلام الكتب المدرسية",
+        "استلام اللباس المدرسي",
+        "اسم ولي الأمر",
+        "صلة القرابة",
+        "الرقم الوطني لولي الأمر",
+        "رقم هاتف ولي الأمر (واتساب)",
+        "رقم هاتف إضافي / طوارئ"
+      ];
+
+      const rows = filteredRegistryStudents.map((s, idx) => {
+        const cls = classes.find(c => c.id === s.classId);
+        return [
+          s.serialNo || String(idx + 1),
+          s.unifiedNo || (parseInt(s.rollNo || '', 10) >= 75 ? s.rollNo : '75'),
+          s.nationalId || s.rollNo || '',
+          s.name || '',
+          s.gender === 'female' ? 'أنثى' : 'ذكر',
+          s.dob || '',
+          s.birthPlace || '',
+          s.healthStatus || s.bloodTypeOrHealth || 'سليم',
+          s.fatherName || '',
+          s.fatherJob || '',
+          s.grandfatherName || '',
+          s.motherName || '',
+          s.motherJob || '',
+          s.motherMaidenName || '',
+          s.residencePlace || s.residenceCity || '',
+          s.address || '',
+          cls ? cls.name : (s.classId && s.classId !== 'class-default' ? s.classId : 'الصف الخامس'),
+          s.shift === 'evening' ? 'الفوج المسائي' : 'الفوج الصباحي',
+          s.previousSchool || '',
+          s.transportation || 'حافلة المدرسة',
+          s.booksStatus || 'تم التسليم',
+          s.uniformStatus || 'تم التسليم',
+          s.parentName || `ولي أمر ${s.name}`,
+          s.guardianRelation || 'أب',
+          s.guardianNationalId || '',
+          s.parentPhone || '',
+          s.parentBackupPhone || ''
+        ];
+      });
+
+      const worksheetData = [headers, ...rows];
+      const ws = XLSX.utils.aoa_to_sheet(worksheetData);
+
+      // Auto width calculations
+      ws['!cols'] = [
+        { wch: 14 },
+        { wch: 14 },
+        { wch: 18 },
+        { wch: 25 },
+        { wch: 10 },
+        { wch: 14 },
+        { wch: 14 },
+        { wch: 20 },
+        { wch: 16 },
+        { wch: 16 },
+        { wch: 16 },
+        { wch: 16 },
+        { wch: 16 },
+        { wch: 16 },
+        { wch: 18 },
+        { wch: 28 },
+        { wch: 18 },
+        { wch: 15 },
+        { wch: 20 },
+        { wch: 16 },
+        { wch: 14 },
+        { wch: 14 },
+        { wch: 22 },
+        { wch: 12 },
+        { wch: 18 },
+        { wch: 18 },
+        { wch: 18 }
+      ];
+
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "سجل بيانات الطلاب");
+
+      const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+      const blob = new Blob([wbout], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `سجل_بيانات_الطلاب_المسجلين_${new Date().toISOString().slice(0, 10)}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      setTimeout(() => {
+        if (link.parentNode) link.parentNode.removeChild(link);
+        URL.revokeObjectURL(url);
+      }, 300);
+    } catch (error) {
+      console.error("Error exporting Excel:", error);
+      exportRegistryCSV();
+    }
+  };
+
+  const exportRegistryCSV = () => {
     const headers = [
+      "الرقم التسلسلي",
       "الرقم الموحد",
-      "الرقم الشخصي",
-      "اسم الطالب",
-      "الأب",
-      "الأم",
+      "الرقم الشخصي / الوطني",
+      "اسم الطالب الكامل",
+      "الجنس",
+      "تاريخ الولادة",
+      "مكان الولادة",
+      "الحالة الصحية / زمرة الدم",
+      "اسم الأب",
+      "مهنة الأب",
+      "اسم الجد",
+      "اسم الأم",
+      "مهنة الأم",
+      "نسبة الأم",
+      "المنطقة والمدينة",
+      "العنوان التفصيلي",
       "الصف الحالي",
-      "الفوج",
-      "المواصلات",
-      "تسليم كتب",
-      "تسليم لباس",
-      "ولي الأمر",
-      "واتساب ولي الأمر"
+      "الفوج / الدوام",
+      "المدرسة السابقة",
+      "خدمة المواصلات",
+      "استلام الكتب المدرسية",
+      "استلام اللباس المدرسي",
+      "اسم ولي الأمر",
+      "صلة القرابة",
+      "الرقم الوطني لولي الأمر",
+      "رقم هاتف ولي الأمر (واتساب)",
+      "رقم هاتف إضافي / طوارئ"
     ];
-    const rows = filteredRegistryStudents.map(s => {
+
+    const rows = filteredRegistryStudents.map((s, idx) => {
       const cls = classes.find(c => c.id === s.classId);
       return [
-        s.unifiedNo || '75',
+        s.serialNo || String(idx + 1),
+        s.unifiedNo || (parseInt(s.rollNo || '', 10) >= 75 ? s.rollNo : '75'),
         s.nationalId || s.rollNo || '',
-        s.name,
+        s.name || '',
+        s.gender === 'female' ? 'أنثى' : 'ذكر',
+        s.dob || '',
+        s.birthPlace || '',
+        s.healthStatus || s.bloodTypeOrHealth || 'سليم',
         s.fatherName || '',
+        s.fatherJob || '',
+        s.grandfatherName || '',
         s.motherName || '',
-        cls ? cls.name : 'غير محدد',
+        s.motherJob || '',
+        s.motherMaidenName || '',
+        s.residencePlace || s.residenceCity || '',
+        s.address || '',
+        cls ? cls.name : (s.classId && s.classId !== 'class-default' ? s.classId : 'الصف الخامس'),
         s.shift === 'evening' ? 'الفوج المسائي' : 'الفوج الصباحي',
+        s.previousSchool || '',
         s.transportation || 'حافلة المدرسة',
         s.booksStatus || 'تم التسليم',
         s.uniformStatus || 'تم التسليم',
-        s.parentName || '',
-        s.parentPhone || ''
+        s.parentName || `ولي أمر ${s.name}`,
+        s.guardianRelation || 'أب',
+        s.guardianNationalId || '',
+        s.parentPhone || '',
+        s.parentBackupPhone || ''
       ];
     });
 
-    const csvContent = "data:text/csv;charset=utf-8,\uFEFF" + [headers.join(","), ...rows.map(r => r.map(x => `"${x}"`).join(","))].join("\n");
-    const encodedUri = encodeURI(csvContent);
+    const csvContent = "\uFEFF" + [headers.map(h => `"${h}"`).join(","), ...rows.map(r => r.map(x => `"${String(x).replace(/"/g, '""')}"`).join(","))].join("\n");
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", "تسجيل_بيانات_الطلاب.xlsx");
+    link.href = url;
+    link.download = `سجل_بيانات_الطلاب_المسجلين_${new Date().toISOString().slice(0, 10)}.csv`;
     document.body.appendChild(link);
     link.click();
-    document.body.removeChild(link);
+    setTimeout(() => {
+      if (link.parentNode) link.parentNode.removeChild(link);
+      URL.revokeObjectURL(url);
+    }, 300);
   };
 
   const getNextUnifiedNo = (currentStudents: Student[] = students): string => {
@@ -6106,11 +6261,11 @@ ${directivesFormatted}
                       className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-extrabold px-4 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-md shadow-emerald-600/20"
                     >
                       <Download className="w-4 h-4" />
-                      <span>تصدير إلى (xls.) Excel 📥</span>
+                      <span>تصدير إلى (xlsx.) Excel 📥</span>
                     </button>
                     <button
                       type="button"
-                      onClick={exportRegistryExcel}
+                      onClick={exportRegistryCSV}
                       className="bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold px-3.5 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 border border-slate-700"
                     >
                       <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
@@ -6238,23 +6393,28 @@ ${directivesFormatted}
 
                 {/* Main Interactive Table */}
                 <div className="overflow-x-auto rounded-2xl border border-slate-200 shadow-2xs">
-                  <table className="w-full text-right border-collapse text-xs">
+                  <table className="w-full text-right border-collapse text-xs whitespace-nowrap">
                     <thead>
                       <tr className="bg-slate-100/90 text-slate-800 font-black border-b border-slate-200">
                         <th className="p-3 border-l border-slate-200 text-center w-12 bg-slate-200/50">#</th>
                         <th className="p-3 border-l border-slate-200 text-center font-extrabold text-emerald-900 bg-emerald-50/50">الرقم الموحد</th>
-                        <th className="p-3 border-l border-slate-200 text-center font-extrabold">الرقم الشخصي</th>
-                        <th className="p-3 border-l border-slate-200 font-black text-slate-900">اسم الطالب</th>
-                        <th className="p-3 border-l border-slate-200 font-bold">الأب</th>
-                        <th className="p-3 border-l border-slate-200 font-bold">الأم</th>
+                        <th className="p-3 border-l border-slate-200 text-center font-extrabold">الرقم الوطني / الشخصي</th>
+                        <th className="p-3 border-l border-slate-200 font-black text-slate-900">اسم الطالب الكامل</th>
+                        <th className="p-3 border-l border-slate-200 text-center font-bold">الجنس</th>
+                        <th className="p-3 border-l border-slate-200 font-bold">الولادة والصحة</th>
+                        <th className="p-3 border-l border-slate-200 font-bold">الأب والجد</th>
+                        <th className="p-3 border-l border-slate-200 font-bold">الأم ونسبتها</th>
+                        <th className="p-3 border-l border-slate-200 font-bold">السكن والعنوان</th>
                         <th className="p-3 border-l border-slate-200 font-bold">الصف الحالي</th>
                         <th className="p-3 border-l border-slate-200 text-center font-bold">الفوج</th>
+                        <th className="p-3 border-l border-slate-200 font-bold">المدرسة السابقة</th>
                         <th className="p-3 border-l border-slate-200 text-center font-bold">المواصلات</th>
-                        <th className="p-3 border-l border-slate-200 text-center font-bold">تسليم كتب</th>
-                        <th className="p-3 border-l border-slate-200 text-center font-bold">تسليم لباس</th>
-                        <th className="p-3 border-l border-slate-200 font-extrabold text-slate-900">ولي الأمر</th>
+                        <th className="p-3 border-l border-slate-200 text-center font-bold">الكتب واللباس</th>
+                        <th className="p-3 border-l border-slate-200 font-extrabold text-slate-900">ولي الأمر وصلة القرابة</th>
+                        <th className="p-3 border-l border-slate-200 text-center font-bold">رقم ولي الأمر الوطني</th>
                         <th className="p-3 border-l border-slate-200 text-center font-black text-emerald-800">واتساب ولي الأمر</th>
-                        <th className="p-3 text-center font-black text-slate-900">إجراءات</th>
+                        <th className="p-3 border-l border-slate-200 text-center font-bold">هاتف الطوارئ</th>
+                        <th className="p-3 text-center font-black text-slate-900 sticky left-0 bg-slate-100/95 z-10 shadow-[-4px_0_6px_rgba(0,0,0,0.04)]">إجراءات</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-150">
@@ -6266,13 +6426,13 @@ ${directivesFormatted}
                           return (
                             <tr key={st.id} className="hover:bg-emerald-50/30 transition font-medium text-slate-700">
                               <td className="p-2 border-l border-slate-150 text-center text-slate-400 bg-slate-50 font-mono font-bold text-[11px]">
-                                {idx + 1}
+                                {st.serialNo || idx + 1}
                               </td>
                               <td className="p-2.5 border-l border-slate-150 text-center font-mono text-emerald-800 font-black text-[11px] bg-emerald-50/40">
                                 {st.unifiedNo || (parseInt(st.rollNo || '', 10) >= 75 ? st.rollNo : '75')}
                               </td>
                               <td className="p-2.5 border-l border-slate-150 text-center font-mono text-indigo-700 font-bold text-[11px] bg-slate-50/50">
-                                {st.nationalId || st.rollNo || st.serialNo || '123456789'}
+                                {st.nationalId || st.rollNo || st.serialNo || '-'}
                               </td>
                               <td className="p-2.5 border-l border-slate-150 font-extrabold text-slate-900">
                                 <div className="flex items-center gap-2">
@@ -6286,11 +6446,38 @@ ${directivesFormatted}
                                   <span>{st.name}</span>
                                 </div>
                               </td>
-                              <td className="p-2.5 border-l border-slate-150 font-semibold text-slate-700">
-                                {st.fatherName || 'خالد'}
+                              <td className="p-2.5 border-l border-slate-150 text-center">
+                                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${
+                                  st.gender === 'female'
+                                    ? 'bg-pink-50 text-pink-700 border border-pink-200'
+                                    : 'bg-sky-50 text-sky-700 border border-sky-200'
+                                }`}>
+                                  {st.gender === 'female' ? 'أنثى 👧' : 'ذكر 👦'}
+                                </span>
+                              </td>
+                              <td className="p-2.5 border-l border-slate-150 text-xs">
+                                <div className="space-y-0.5">
+                                  <div className="font-mono text-[11px] text-slate-800">{st.dob || '-'} {st.birthPlace ? `(${st.birthPlace})` : ''}</div>
+                                  <div className="text-[10px] text-emerald-700 font-bold">{st.healthStatus || st.bloodTypeOrHealth || 'سليم'}</div>
+                                </div>
                               </td>
                               <td className="p-2.5 border-l border-slate-150 font-semibold text-slate-700">
-                                {st.motherName || 'مريم'}
+                                <div>
+                                  <span className="text-slate-900 font-bold">{st.fatherName || '-'}</span>
+                                  {st.fatherJob && <span className="text-[10px] text-slate-500 mr-1">({st.fatherJob})</span>}
+                                </div>
+                                {st.grandfatherName && <div className="text-[10px] text-slate-500">الجد: {st.grandfatherName}</div>}
+                              </td>
+                              <td className="p-2.5 border-l border-slate-150 font-semibold text-slate-700">
+                                <div>
+                                  <span className="text-slate-900 font-bold">{st.motherName || '-'}</span>
+                                  {st.motherJob && <span className="text-[10px] text-slate-500 mr-1">({st.motherJob})</span>}
+                                </div>
+                                {st.motherMaidenName && <div className="text-[10px] text-slate-500">النسبة: {st.motherMaidenName}</div>}
+                              </td>
+                              <td className="p-2.5 border-l border-slate-150 text-xs">
+                                <div className="font-bold text-slate-800">{st.residencePlace || st.residenceCity || '-'}</div>
+                                {st.address && <div className="text-[10px] text-slate-500 max-w-[140px] truncate" title={st.address}>{st.address}</div>}
                               </td>
                               <td className="p-2.5 border-l border-slate-150">
                                 <span className="inline-block bg-emerald-50 text-emerald-800 border border-emerald-200 text-[11px] font-black px-2 py-0.5 rounded-md">
@@ -6310,29 +6497,36 @@ ${directivesFormatted}
                                   </span>
                                 )}
                               </td>
+                              <td className="p-2.5 border-l border-slate-150 text-xs text-slate-700">
+                                {st.previousSchool || '-'}
+                              </td>
                               <td className="p-2.5 border-l border-slate-150 text-center text-[11px]">
                                 {st.transportation || 'حافلة المدرسة'}
                               </td>
                               <td className="p-2.5 border-l border-slate-150 text-center">
-                                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${
-                                  st.booksStatus === 'تم التسليم' || !st.booksStatus
-                                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                                    : 'bg-rose-50 text-rose-700 border border-rose-200'
-                                }`}>
-                                  {st.booksStatus || 'تم التسليم'}
-                                </span>
-                              </td>
-                              <td className="p-2.5 border-l border-slate-150 text-center">
-                                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${
-                                  st.uniformStatus === 'تم التسليم' || !st.uniformStatus
-                                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                                    : 'bg-rose-50 text-rose-700 border border-rose-200'
-                                }`}>
-                                  {st.uniformStatus || 'تم التسليم'}
-                                </span>
+                                <div className="flex flex-col gap-1">
+                                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                                    st.booksStatus === 'تم التسليم' || !st.booksStatus
+                                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                      : 'bg-rose-50 text-rose-700 border border-rose-200'
+                                  }`}>
+                                    كتب: {st.booksStatus || 'تم التسليم'}
+                                  </span>
+                                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                                    st.uniformStatus === 'تم التسليم' || !st.uniformStatus
+                                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                      : 'bg-rose-50 text-rose-700 border border-rose-200'
+                                  }`}>
+                                    لباس: {st.uniformStatus || 'تم التسليم'}
+                                  </span>
+                                </div>
                               </td>
                               <td className="p-2.5 border-l border-slate-150 font-bold text-slate-800">
-                                {st.parentName || `ولي أمر ${st.name}`}
+                                <div>{st.parentName || `ولي أمر ${st.name}`}</div>
+                                <div className="text-[10px] text-slate-500 font-normal">القرابة: {st.guardianRelation || 'أب'}</div>
+                              </td>
+                              <td className="p-2.5 border-l border-slate-150 text-center font-mono text-[11px] text-slate-700">
+                                {st.guardianNationalId || '-'}
                               </td>
                               <td className="p-2.5 border-l border-slate-150 text-center">
                                 <a
@@ -6345,7 +6539,10 @@ ${directivesFormatted}
                                   <span>{parentPhone}</span>
                                 </a>
                               </td>
-                              <td className="p-2.5 text-center">
+                              <td className="p-2.5 border-l border-slate-150 text-center font-mono text-[11px] text-slate-700">
+                                {st.parentBackupPhone || '-'}
+                              </td>
+                              <td className="p-2.5 text-center sticky left-0 bg-white/95 z-10 shadow-[-4px_0_6px_rgba(0,0,0,0.04)]">
                                 <div className="flex items-center justify-center gap-1.5">
                                   {/* Print & Preview Card Button */}
                                   <button
@@ -6387,7 +6584,7 @@ ${directivesFormatted}
                         })
                       ) : (
                         <tr>
-                          <td colSpan={13} className="p-8 text-center text-slate-400 italic">
+                          <td colSpan={19} className="p-8 text-center text-slate-400 italic">
                             لا يوجد طلاب ينطبق عليهم خيار التصفية المختار.
                           </td>
                         </tr>
@@ -11630,13 +11827,16 @@ ${sampleEval}
                 initial={{ opacity: 0, scale: 0.95 }}
                 animate={{ opacity: 1, scale: 1 }}
                 exit={{ opacity: 0, scale: 0.95 }}
-                className="bg-white rounded-3xl max-w-4xl w-full shadow-2xl border border-slate-200 overflow-hidden text-right my-8"
+                className="bg-white rounded-3xl max-w-6xl w-full shadow-2xl border border-slate-200 overflow-hidden text-right my-8"
                 style={{ direction: 'rtl' }}
               >
                 <div className="bg-slate-900 text-white p-6 flex items-center justify-between no-print">
                   <div className="flex items-center gap-3">
                     <Printer className="w-6 h-6 text-emerald-400" />
-                    <h3 className="text-base font-black">معاينة وطباعة الكشف الكامل للطلاب</h3>
+                    <div>
+                      <h3 className="text-base font-black">معاينة وطباعة الكشف الكامل للطلاب</h3>
+                      <p className="text-xs text-slate-300">يتضمن كافة البيانات والمعلومات المسجلة للطلاب</p>
+                    </div>
                   </div>
                   <button
                     type="button"
@@ -11652,26 +11852,38 @@ ${sampleEval}
                   <div className="text-center space-y-1 border-b-2 border-slate-800 pb-4">
                     <p className="text-xs font-bold text-slate-600">الجمهورية العربية السورية / وزارة التربية والتعليم</p>
                     <h1 className="text-xl font-black text-slate-900">المدرسة الدولية الخاصة</h1>
-                    <p className="text-xs font-bold text-emerald-800">
-                      كشف أسماء الطلاب المسجلين بالكامل (إجمالي: {filteredRegistryStudents.length} طالب)
+                    <p className="text-sm font-black text-emerald-800">
+                      سجل بيانات الطلاب المسجلين بالكامل (إجمالي: {filteredRegistryStudents.length} طالب)
                     </p>
                     <p className="text-[11px] font-mono text-slate-500 font-bold">
                       تاريخ الطباعة: {new Date().toLocaleDateString('ar-SY', { year: 'numeric', month: '2-digit', day: '2-digit' })} - الوقت: {new Date().toLocaleTimeString('ar-SY', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}
                     </p>
                   </div>
 
-                  <div className="overflow-x-auto border border-slate-200 rounded-xl">
-                    <table className="w-full text-right border-collapse text-xs">
+                  <div className="overflow-x-auto border border-slate-300 rounded-xl">
+                    <table className="w-full text-right border-collapse text-[11px] whitespace-nowrap">
                       <thead>
-                        <tr className="bg-slate-100 font-black text-slate-900 border-b border-slate-200">
-                          <th className="p-2 border-l border-slate-200 text-center w-10">#</th>
-                          <th className="p-2 border-l border-slate-200">الرقم الشخصي</th>
-                          <th className="p-2 border-l border-slate-200">اسم الطالب الكامل</th>
-                          <th className="p-2 border-l border-slate-200">اسم الأب</th>
-                          <th className="p-2 border-l border-slate-200">الصف الحالي</th>
-                          <th className="p-2 border-l border-slate-200">الفوج</th>
-                          <th className="p-2 border-l border-slate-200">اسم ولي الأمر</th>
-                          <th className="p-2 text-center">رقم واتساب ولي الأمر</th>
+                        <tr className="bg-slate-100 font-black text-slate-900 border-b border-slate-300 text-center">
+                          <th className="p-2 border-l border-slate-300 w-8">#</th>
+                          <th className="p-2 border-l border-slate-300">الرقم الموحد</th>
+                          <th className="p-2 border-l border-slate-300">الرقم الوطني</th>
+                          <th className="p-2 border-l border-slate-300 text-right">اسم الطالب الكامل</th>
+                          <th className="p-2 border-l border-slate-300">الجنس</th>
+                          <th className="p-2 border-l border-slate-300 text-right">تاريخ ومكان الولادة</th>
+                          <th className="p-2 border-l border-slate-300">الحالة الصحية</th>
+                          <th className="p-2 border-l border-slate-300 text-right">اسم الأب والمهنة</th>
+                          <th className="p-2 border-l border-slate-300 text-right">اسم الجد</th>
+                          <th className="p-2 border-l border-slate-300 text-right">اسم الأم ونسبتها</th>
+                          <th className="p-2 border-l border-slate-300 text-right">مكان السكن والعنوان</th>
+                          <th className="p-2 border-l border-slate-300">الصف الدراسي</th>
+                          <th className="p-2 border-l border-slate-300">الفوج</th>
+                          <th className="p-2 border-l border-slate-300">المدرسة السابقة</th>
+                          <th className="p-2 border-l border-slate-300">المواصلات</th>
+                          <th className="p-2 border-l border-slate-300">الكتب واللباس</th>
+                          <th className="p-2 border-l border-slate-300 text-right">ولي الأمر والقرابة</th>
+                          <th className="p-2 border-l border-slate-300">رقم ولي الأمر الوطني</th>
+                          <th className="p-2 border-l border-slate-300">واتساب ولي الأمر</th>
+                          <th className="p-2">هاتف الطوارئ</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-200 font-medium text-slate-800">
@@ -11679,19 +11891,52 @@ ${sampleEval}
                           const cls = classes.find(c => c.id === st.classId);
                           return (
                             <tr key={st.id} className="hover:bg-slate-50">
-                              <td className="p-2 border-l border-slate-200 text-center font-mono font-bold text-slate-400">{idx + 1}</td>
-                              <td className="p-2 border-l border-slate-200 font-mono font-bold">{st.nationalId || st.rollNo}</td>
-                              <td className="p-2 border-l border-slate-200 font-bold">{st.name}</td>
-                              <td className="p-2 border-l border-slate-200">{st.fatherName || 'خالد'}</td>
-                              <td className="p-2 border-l border-slate-200 font-bold">{cls ? cls.name : 'الصف الخامس'}</td>
-                              <td className="p-2 border-l border-slate-200">{st.shift === 'evening' ? 'المسائي' : 'الصباحي'}</td>
-                              <td className="p-2 border-l border-slate-200">{st.parentName || `ولي أمر ${st.name}`}</td>
-                              <td className="p-2 text-center font-mono font-bold dir-ltr">{st.parentPhone || '0501234567'}</td>
+                              <td className="p-2 border-l border-slate-200 text-center font-mono font-bold text-slate-400">{st.serialNo || idx + 1}</td>
+                              <td className="p-2 border-l border-slate-200 text-center font-mono font-bold text-emerald-800">{st.unifiedNo || (parseInt(st.rollNo || '', 10) >= 75 ? st.rollNo : '75')}</td>
+                              <td className="p-2 border-l border-slate-200 text-center font-mono font-bold text-indigo-700">{st.nationalId || st.rollNo || '-'}</td>
+                              <td className="p-2 border-l border-slate-200 font-bold text-slate-900">{st.name}</td>
+                              <td className="p-2 border-l border-slate-200 text-center">{st.gender === 'female' ? 'أنثى' : 'ذكر'}</td>
+                              <td className="p-2 border-l border-slate-200 font-mono text-[10px]">{st.dob || '-'} {st.birthPlace ? `(${st.birthPlace})` : ''}</td>
+                              <td className="p-2 border-l border-slate-200 text-center text-[10px] font-bold text-emerald-800">{st.healthStatus || st.bloodTypeOrHealth || 'سليم'}</td>
+                              <td className="p-2 border-l border-slate-200">
+                                <span>{st.fatherName || '-'}</span>
+                                {st.fatherJob && <span className="text-[10px] text-slate-500 mr-1">({st.fatherJob})</span>}
+                              </td>
+                              <td className="p-2 border-l border-slate-200">{st.grandfatherName || '-'}</td>
+                              <td className="p-2 border-l border-slate-200">
+                                <span>{st.motherName || '-'}</span>
+                                {st.motherJob && <span className="text-[10px] text-slate-500 mr-1">({st.motherJob})</span>}
+                                {st.motherMaidenName && <span className="text-[10px] text-slate-500 mr-1">[{st.motherMaidenName}]</span>}
+                              </td>
+                              <td className="p-2 border-l border-slate-200 text-[10px]">
+                                <span>{st.residencePlace || st.residenceCity || '-'}</span>
+                                {st.address && <span className="text-slate-500 mr-1">({st.address})</span>}
+                              </td>
+                              <td className="p-2 border-l border-slate-200 font-bold text-center">{cls ? cls.name : 'الصف الخامس'}</td>
+                              <td className="p-2 border-l border-slate-200 text-center">{st.shift === 'evening' ? 'المسائي' : 'الصباحي'}</td>
+                              <td className="p-2 border-l border-slate-200 text-center text-[10px]">{st.previousSchool || '-'}</td>
+                              <td className="p-2 border-l border-slate-200 text-center text-[10px]">{st.transportation || 'حافلة المدرسة'}</td>
+                              <td className="p-2 border-l border-slate-200 text-center text-[10px]">
+                                {st.booksStatus || 'تم التسليم'} / {st.uniformStatus || 'تم التسليم'}
+                              </td>
+                              <td className="p-2 border-l border-slate-200 font-bold">
+                                <span>{st.parentName || `ولي أمر ${st.name}`}</span>
+                                <span className="text-[10px] text-slate-500 mr-1">({st.guardianRelation || 'أب'})</span>
+                              </td>
+                              <td className="p-2 border-l border-slate-200 text-center font-mono text-[10px]">{st.guardianNationalId || '-'}</td>
+                              <td className="p-2 border-l border-slate-200 text-center font-mono font-bold dir-ltr">{st.parentPhone || '-'}</td>
+                              <td className="p-2 text-center font-mono font-bold dir-ltr">{st.parentBackupPhone || '-'}</td>
                             </tr>
                           );
                         })}
                       </tbody>
                     </table>
+                  </div>
+
+                  {/* Manifest Footer */}
+                  <div className="pt-4 border-t border-slate-300 flex items-center justify-between text-xs font-bold text-slate-700">
+                    <div>إجمالي الطلاب المسجلين: <span className="font-black text-emerald-800">{filteredRegistryStudents.length}</span></div>
+                    <div>ختم وتوقيع إدارة المدرسة: _________________________</div>
                   </div>
                 </div>
 
