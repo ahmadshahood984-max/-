@@ -700,8 +700,9 @@ export default function DirectorPortal({
   // Class addition states in Student Affairs
   const [showClassForm, setShowClassForm] = useState(false);
   const [showSubjectModal, setShowSubjectModal] = useState(false);
-  const [newClassName, setNewClassName] = useState('');
   const [newClassGrade, setNewClassGrade] = useState('');
+  const [newClassSection, setNewClassSection] = useState('');
+  const [newClassName, setNewClassName] = useState('');
   const [newClassRoom, setNewClassRoom] = useState('');
   const [newClassTeacherId, setNewClassTeacherId] = useState('');
 
@@ -1581,12 +1582,188 @@ ${directivesFormatted}
 
   // Student Registration Excel Import / Export Template State
   const [showRegExcelImportModal, setShowRegExcelImportModal] = useState<boolean>(false);
+  const [showTemplateExportModal, setShowTemplateExportModal] = useState<boolean>(false);
+  const [templateExportTargetClassId, setTemplateExportTargetClassId] = useState<string>('auto');
+  const [manifestPrintScope, setManifestPrintScope] = useState<'filtered' | 'all'>('filtered');
   const [isProcessingRegExcelImport, setIsProcessingRegExcelImport] = useState<boolean>(false);
   const [regExcelParsedRows, setRegExcelParsedRows] = useState<any[] | null>(null);
   const [regExcelFileName, setRegExcelFileName] = useState<string>('');
   const [regExcelDefaultClassId, setRegExcelDefaultClassId] = useState<string>('auto');
   const [regExcelUpdateExisting, setRegExcelUpdateExisting] = useState<boolean>(true);
   const regExcelFileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // --- UNIFIED NUMBER (الرقم الموحد) 30 NUMBERS RESTRICTION PER CLASS ---
+  const getSortedClassesForUnifiedNumbers = (allClasses: Class[]): Class[] => {
+    return [...allClasses].sort((a, b) => {
+      // 1. Shift: morning before evening
+      const shiftA = a.shift === 'evening' ? 1 : 0;
+      const shiftB = b.shift === 'evening' ? 1 : 0;
+      if (shiftA !== shiftB) return shiftA - shiftB;
+
+      // 2. Grade rank (الأول، الثاني، الثالث، ...)
+      const getGradeRank = (grade: string = '', name: string = ''): number => {
+        const s = (grade + ' ' + name).toLowerCase();
+        if (s.includes('أول') || s.includes('اول') || s.includes('1') || s.includes('الأول')) return 1;
+        if (s.includes('ثاني') || s.includes('ثانى') || s.includes('2') || s.includes('الثاني')) return 2;
+        if (s.includes('ثالث') || s.includes('3') || s.includes('الثالث')) return 3;
+        if (s.includes('رابع') || s.includes('4') || s.includes('الرابع')) return 4;
+        if (s.includes('خامس') || s.includes('5') || s.includes('الخامس')) return 5;
+        if (s.includes('سادس') || s.includes('6') || s.includes('السادس')) return 6;
+        if (s.includes('سابع') || s.includes('7') || s.includes('السابع')) return 7;
+        if (s.includes('ثامن') || s.includes('8') || s.includes('الثامن')) return 8;
+        if (s.includes('تاسع') || s.includes('9') || s.includes('التاسع')) return 9;
+        if (s.includes('عاشر') || s.includes('10')) return 10;
+        if (s.includes('حادي عشر') || s.includes('11')) return 11;
+        if (s.includes('ثاني عشر') || s.includes('12') || s.includes('بكالوريا')) return 12;
+        return 50;
+      };
+
+      const rankA = getGradeRank(a.grade, a.name);
+      const rankB = getGradeRank(b.grade, b.name);
+      if (rankA !== rankB) return rankA - rankB;
+
+      // 3. Section rank (أ، ب، ج، ...)
+      const getSectionRank = (nameStr: string = ''): number => {
+        if (nameStr.includes('أ') || nameStr.includes('ا') || nameStr.includes('1')) return 1;
+        if (nameStr.includes('ب') || nameStr.includes('2')) return 2;
+        if (nameStr.includes('ج') || nameStr.includes('3')) return 3;
+        if (nameStr.includes('د') || nameStr.includes('4')) return 4;
+        if (nameStr.includes('هـ') || nameStr.includes('ه') || nameStr.includes('5')) return 5;
+        return 50;
+      };
+      const secA = getSectionRank(a.name);
+      const secB = getSectionRank(b.name);
+      if (secA !== secB) return secA - secB;
+
+      return (a.name || '').localeCompare(b.name || '', 'ar');
+    });
+  };
+
+  const getClassUnifiedRange = (classIdentifier: string, allClasses: Class[]) => {
+    const sorted = getSortedClassesForUnifiedNumbers(allClasses);
+    let idx = sorted.findIndex(c => c.id === classIdentifier || c.name === classIdentifier || c.grade === classIdentifier);
+    if (idx === -1) {
+      idx = 0;
+    }
+    const cls = sorted[idx] || null;
+    const start = (idx * 30) + 1;
+    const end = (idx + 1) * 30;
+    const allowedNumbers: number[] = [];
+    for (let n = start; n <= end; n++) {
+      allowedNumbers.push(n);
+    }
+    const label = cls ? `${cls.name} (${cls.shift === 'evening' ? 'الفوج المسائي' : 'الفوج الصباحي'})` : `الصف ${idx + 1}`;
+    return {
+      classObj: cls,
+      classIndex: idx,
+      start,
+      end,
+      label,
+      allowedNumbers
+    };
+  };
+
+  const getNextUnifiedNoForClass = (
+    classIdentifier: string,
+    allClasses: Class[],
+    currentStudents: Student[] = []
+  ): { nextNo: string; isFull: boolean; countUsed: number; total: number } => {
+    const range = getClassUnifiedRange(classIdentifier, allClasses);
+    const usedNumbers = new Set<number>();
+    for (const s of currentStudents) {
+      if (s.id.startsWith('demo-')) continue;
+      const val = s.unifiedNo || s.rollNo;
+      if (val) {
+        const num = parseInt(String(val).replace(/\D/g, ''), 10);
+        if (!isNaN(num) && num >= range.start && num <= range.end) {
+          usedNumbers.add(num);
+        }
+      }
+    }
+
+    for (let n = range.start; n <= range.end; n++) {
+      if (!usedNumbers.has(n)) {
+        return {
+          nextNo: String(n),
+          isFull: false,
+          countUsed: usedNumbers.size,
+          total: 30
+        };
+      }
+    }
+
+    return {
+      nextNo: String(range.start),
+      isFull: true,
+      countUsed: 30,
+      total: 30
+    };
+  };
+
+  const isUnifiedNoValidForClass = (
+    unifiedNo: string | number | undefined,
+    classIdentifier: string,
+    allClasses: Class[],
+    currentStudents: Student[] = [],
+    excludeStudentId?: string
+  ): { isValid: boolean; start: number; end: number; message?: string; className: string } => {
+    const range = getClassUnifiedRange(classIdentifier, allClasses);
+    const className = range.classObj ? range.classObj.name : 'الصف المحدد';
+
+    if (!unifiedNo || String(unifiedNo).trim() === '') {
+      return {
+        isValid: false,
+        start: range.start,
+        end: range.end,
+        className,
+        message: `الرقم الموحد مطلوب. الأرقام المخصصة لـ (${className}) هي حصراً من ${range.start} إلى ${range.end} (30 رقماً فقط).`
+      };
+    }
+
+    const num = parseInt(String(unifiedNo).replace(/\D/g, ''), 10);
+    if (isNaN(num)) {
+      return {
+        isValid: false,
+        start: range.start,
+        end: range.end,
+        className,
+        message: `الرقم الموحد غير صحيح. يجب أن يكون رقماً بين ${range.start} و ${range.end}.`
+      };
+    }
+
+    if (num < range.start || num > range.end) {
+      return {
+        isValid: false,
+        start: range.start,
+        end: range.end,
+        className,
+        message: `الرقم الموحد (${num}) غير مخصص لهذا الصف! الأرقام المخصصة لـ (${className}) هي من ${range.start} إلى ${range.end} فقط (30 رقماً ابتداءً من الصف الأول صباحي).`
+      };
+    }
+
+    const duplicateStudent = currentStudents.find(s => {
+      if (excludeStudentId && s.id === excludeStudentId) return false;
+      const sNum = parseInt(String(s.unifiedNo || s.rollNo || '').replace(/\D/g, ''), 10);
+      return sNum === num;
+    });
+
+    if (duplicateStudent) {
+      return {
+        isValid: false,
+        start: range.start,
+        end: range.end,
+        className,
+        message: `الرقم الموحد (${num}) مستخدم ومسجل مسبقاً للطالب (${duplicateStudent.name}) في هذا الصف!`
+      };
+    }
+
+    return {
+      isValid: true,
+      start: range.start,
+      end: range.end,
+      className
+    };
+  };
 
   const sampleRegistryStudents: Student[] = [];
 
@@ -1611,7 +1788,7 @@ ${directivesFormatted}
     return true;
   }).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
 
-  const exportRegistryExcel = () => {
+  const exportRegistryExcel = (exportAll: boolean = true) => {
     try {
       const headers = [
         "الرقم التسلسلي",
@@ -1643,11 +1820,13 @@ ${directivesFormatted}
         "رقم هاتف إضافي / طوارئ"
       ];
 
-      const rows = filteredRegistryStudents.map((s, idx) => {
+      const targetList = exportAll ? allRegistryStudents : filteredRegistryStudents;
+
+      const rows = targetList.map((s, idx) => {
         const cls = classes.find(c => c.id === s.classId);
         return [
           s.serialNo || String(idx + 1),
-          s.unifiedNo || (parseInt(s.rollNo || '', 10) >= 75 ? s.rollNo : '75'),
+          s.unifiedNo || s.rollNo || '',
           s.nationalId || s.rollNo || '',
           s.name || '',
           s.gender === 'female' ? 'أنثى' : 'ذكر',
@@ -1718,20 +1897,22 @@ ${directivesFormatted}
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = `سجل_بيانات_الطلاب_المسجلين_${new Date().toISOString().slice(0, 10)}.xlsx`;
+      link.download = `سجل_بيانات_الطلاب_${exportAll ? 'المدرسة_بالكامل' : 'المحدد'}_${new Date().toISOString().slice(0, 10)}.xlsx`;
       document.body.appendChild(link);
       link.click();
       setTimeout(() => {
         if (link.parentNode) link.parentNode.removeChild(link);
         URL.revokeObjectURL(url);
       }, 300);
+      setPrintToastMsg(`📥 تم تصدير بيانات ${targetList.length} طالب إلى Excel بنجاح!`);
+      setTimeout(() => setPrintToastMsg(null), 4000);
     } catch (error) {
       console.error("Error exporting Excel:", error);
-      exportRegistryCSV();
+      exportRegistryCSV(exportAll);
     }
   };
 
-  const exportRegistryCSV = () => {
+  const exportRegistryCSV = (exportAll: boolean = false) => {
     const headers = [
       "الرقم التسلسلي",
       "الرقم الموحد",
@@ -1762,11 +1943,13 @@ ${directivesFormatted}
       "رقم هاتف إضافي / طوارئ"
     ];
 
-    const rows = filteredRegistryStudents.map((s, idx) => {
+    const targetList = exportAll ? allRegistryStudents : filteredRegistryStudents;
+
+    const rows = targetList.map((s, idx) => {
       const cls = classes.find(c => c.id === s.classId);
       return [
         s.serialNo || String(idx + 1),
-        s.unifiedNo || (parseInt(s.rollNo || '', 10) >= 75 ? s.rollNo : '75'),
+        s.unifiedNo || s.rollNo || '',
         s.nationalId || s.rollNo || '',
         s.name || '',
         s.gender === 'female' ? 'أنثى' : 'ذكر',
@@ -1800,7 +1983,7 @@ ${directivesFormatted}
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `سجل_بيانات_الطلاب_المسجلين_${new Date().toISOString().slice(0, 10)}.csv`;
+    link.download = `سجل_بيانات_الطلاب_${exportAll ? 'المدرسة_بالكامل' : 'المحدد'}_${new Date().toISOString().slice(0, 10)}.csv`;
     document.body.appendChild(link);
     link.click();
     setTimeout(() => {
@@ -1809,15 +1992,143 @@ ${directivesFormatted}
     }, 300);
   };
 
-  const exportRegistryExcelTemplate = () => {
+  const exportRegistryExcelTemplate = (targetClassId?: string) => {
     try {
+      const sortedClasses = getSortedClassesForUnifiedNumbers(classes);
+      if (sortedClasses.length === 0) {
+        alert("يرجى إضافة صف دراسي واحد على الأقل قبل تحميل القالب.");
+        return;
+      }
+
+      // If user wants all classes in one workbook with separate sheets:
+      if (targetClassId === 'all_classes') {
+        const wb = XLSX.utils.book_new();
+
+        sortedClasses.forEach((cls) => {
+          const range = getClassUnifiedRange(cls.id, classes);
+          const headers = [
+            "الرقم التسلسلي",
+            `الرقم الموحد (مخصص للصف: ${range.start} إلى ${range.end} فقط - 30 رقم)`,
+            "الرقم الشخصي / الوطني",
+            "اسم الطالب الكامل",
+            "الجنس (ذكر/أنثى)",
+            "تاريخ الولادة (YYYY-MM-DD)",
+            "مكان الولادة",
+            "الحالة الصحية / زمرة الدم",
+            "اسم الأب",
+            "مهنة الأب",
+            "اسم الجد",
+            "اسم الأم",
+            "مهنة الأم",
+            "نسبة الأم",
+            "المنطقة والمدينة",
+            "العنوان التفصيلي",
+            "الصف الحالي",
+            "الفوج / الدوام",
+            "المدرسة السابقة",
+            "خدمة المواصلات",
+            "استلام الكتب المدرسية",
+            "استلام اللباس المدرسي",
+            "اسم ولي الأمر",
+            "صلة القرابة",
+            "الرقم الوطني لولي الأمر",
+            "رقم هاتف ولي الأمر (واتساب)",
+            "رقم هاتف إضافي / طوارئ"
+          ];
+
+          // Exactly 30 rows for this class populated with its 30 designated unified numbers
+          const rows = Array.from({ length: 30 }, (_, i) => {
+            const currentUnifiedNo = range.start + i;
+            return [
+              String(i + 1),
+              String(currentUnifiedNo),
+              "", // nationalId
+              "", // name
+              i % 2 === 0 ? "ذكر" : "أنثى",
+              "", // dob
+              "", // birthPlace
+              "سليم",
+              "", "", "", "", "", "", "", "",
+              cls.name,
+              cls.shift === 'evening' ? "الفوج المسائي" : "الفوج الصباحي",
+              "", "حافلة المدرسة", "تم التسليم", "تم التسليم", "", "أب", "", "", ""
+            ];
+          });
+
+          const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+          ws['!cols'] = [
+            { wch: 14 },
+            { wch: 32 },
+            { wch: 20 },
+            { wch: 28 },
+            { wch: 14 },
+            { wch: 22 },
+            { wch: 14 },
+            { wch: 20 },
+            { wch: 16 },
+            { wch: 16 },
+            { wch: 16 },
+            { wch: 16 },
+            { wch: 16 },
+            { wch: 16 },
+            { wch: 20 },
+            { wch: 30 },
+            { wch: 20 },
+            { wch: 16 },
+            { wch: 22 },
+            { wch: 18 },
+            { wch: 18 },
+            { wch: 18 },
+            { wch: 24 },
+            { wch: 14 },
+            { wch: 20 },
+            { wch: 22 },
+            { wch: 22 }
+          ];
+
+          const sheetName = `${cls.name} (${cls.shift === 'evening' ? 'مسائي' : 'صباحي'})`.slice(0, 31).replace(/[\\/?*[\]]/g, '-');
+          XLSX.utils.book_append_sheet(wb, ws, sheetName);
+        });
+
+        const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+        const blob = new Blob([wbout], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `قوالب_تسجيل_الطلاب_كافة_الصفوف_30_رقم_لكل_صف.xlsx`;
+        document.body.appendChild(link);
+        link.click();
+        setTimeout(() => {
+          if (link.parentNode) link.parentNode.removeChild(link);
+          URL.revokeObjectURL(url);
+        }, 300);
+
+        setPrintToastMsg("📥 تم تحميل مصنف Excel الشامل لكافة الصفوف (30 رقماً موحداً لكل صف) بنجاح!");
+        setShowTemplateExportModal(false);
+        setTimeout(() => setPrintToastMsg(null), 5000);
+        return;
+      }
+
+      // Single class template:
+      let selectedClassId = targetClassId;
+      if (!selectedClassId || selectedClassId === 'auto') {
+        if (regClassFilter !== 'all') {
+          selectedClassId = regClassFilter;
+        } else {
+          selectedClassId = sortedClasses[0].id;
+        }
+      }
+
+      const targetCls = sortedClasses.find(c => c.id === selectedClassId || c.name === selectedClassId) || sortedClasses[0];
+      const range = getClassUnifiedRange(targetCls.id, classes);
+
       const headers = [
         "الرقم التسلسلي",
-        "الرقم الموحد",
+        `الرقم الموحد (مخصص للصف: ${range.start} إلى ${range.end} فقط - 30 رقم)`,
         "الرقم الشخصي / الوطني",
         "اسم الطالب الكامل",
-        "الجنس",
-        "تاريخ الولادة",
+        "الجنس (ذكر/أنثى)",
+        "تاريخ الولادة (YYYY-MM-DD)",
         "مكان الولادة",
         "الحالة الصحية / زمرة الدم",
         "اسم الأب",
@@ -1841,86 +2152,49 @@ ${directivesFormatted}
         "رقم هاتف إضافي / طوارئ"
       ];
 
-      const sampleRow1 = [
-        "1",
-        "75",
-        "0123456789",
-        "مثال: أحمد محمد العلي",
-        "ذكر",
-        "2016-04-12",
-        "دمشق",
-        "سليم (O+)",
-        "محمد",
-        "مهندس",
-        "عبد الله",
-        "مريم",
-        "معلمة",
-        "النجار",
-        "دمشق - المزة",
-        "شارع الجلاء بناء 4",
-        classes[0]?.name || "الصف الأول",
-        "الفوج الصباحي",
-        "روضة براعم المستقبل",
-        "حافلة المدرسة",
-        "تم التسليم",
-        "تم التسليم",
-        "محمد العلي",
-        "أب",
-        "0123456789",
-        "0944123456",
-        "0112345678"
-      ];
+      // Exactly 30 rows restricted to this class and its 30 numbers
+      const rows = Array.from({ length: 30 }, (_, i) => {
+        const currentUnifiedNo = range.start + i;
+        const isSample = i === 0;
+        return [
+          String(i + 1),
+          String(currentUnifiedNo),
+          isSample ? "0123456789" : "",
+          isSample ? "مثال: أحمد محمد العلي" : "",
+          isSample ? "ذكر" : (i % 2 === 0 ? "ذكر" : "أنثى"),
+          isSample ? "2016-04-12" : "",
+          isSample ? "دمشق" : "",
+          isSample ? "سليم (O+)" : "سليم",
+          isSample ? "محمد" : "",
+          isSample ? "مهندس" : "",
+          isSample ? "عبد الله" : "",
+          isSample ? "مريم" : "",
+          isSample ? "معلمة" : "",
+          isSample ? "النجار" : "",
+          isSample ? "دمشق - المزة" : "",
+          isSample ? "شارع الجلاء بناء 4" : "",
+          targetCls.name,
+          targetCls.shift === 'evening' ? "الفوج المسائي" : "الفوج الصباحي",
+          isSample ? "روضة براعم المستقبل" : "",
+          "حافلة المدرسة",
+          "تم التسليم",
+          "تم التسليم",
+          isSample ? "محمد العلي" : "",
+          "أب",
+          isSample ? "0123456789" : "",
+          isSample ? "0944123456" : "",
+          isSample ? "0112345678" : ""
+        ];
+      });
 
-      const sampleRow2 = [
-        "2",
-        "76",
-        "0987654321",
-        "مثال: سارة خالد المنصور",
-        "أنثى",
-        "2017-08-25",
-        "حلب",
-        "سليمة (A+)",
-        "خالد",
-        "طبيب",
-        "محمود",
-        "هدى",
-        "صيدلانية",
-        "الخطيب",
-        "حلب - الشهباء",
-        "شارع النيل عمارة 12",
-        classes[1]?.name || classes[0]?.name || "الصف الثاني",
-        "الفوج الصباحي",
-        "مدرسة النور الخاصة",
-        "خاصة / بدون باص",
-        "تم التسليم",
-        "تم التسليم",
-        "خالد المنصور",
-        "أب",
-        "0987654321",
-        "0933987654",
-        "0219876543"
-      ];
-
-      // Empty formatted rows ready for user data entry
-      const emptyRows = Array.from({ length: 25 }, (_, i) => [
-        String(i + 3),
-        String(77 + i),
-        "", "", "", "", "", "", "", "", "", "", "", "", "", "",
-        classes[0]?.name || "الصف الأول",
-        "الفوج الصباحي",
-        "", "حافلة المدرسة", "تم التسليم", "تم التسليم", "", "أب", "", "", ""
-      ]);
-
-      const wsData = [headers, sampleRow1, sampleRow2, ...emptyRows];
-      const ws = XLSX.utils.aoa_to_sheet(wsData);
-
+      const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
       ws['!cols'] = [
         { wch: 14 },
-        { wch: 14 },
+        { wch: 32 },
         { wch: 20 },
         { wch: 28 },
-        { wch: 10 },
         { wch: 14 },
+        { wch: 22 },
         { wch: 14 },
         { wch: 20 },
         { wch: 16 },
@@ -1931,7 +2205,7 @@ ${directivesFormatted}
         { wch: 16 },
         { wch: 20 },
         { wch: 30 },
-        { wch: 18 },
+        { wch: 20 },
         { wch: 16 },
         { wch: 22 },
         { wch: 18 },
@@ -1945,14 +2219,15 @@ ${directivesFormatted}
       ];
 
       const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, "نموذج تسجيل بيانات الطلاب");
+      const sheetName = `${targetCls.name}`.slice(0, 31).replace(/[\\/?*[\]]/g, '-');
+      XLSX.utils.book_append_sheet(wb, ws, sheetName);
 
       const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
       const blob = new Blob([wbout], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = `قالب_تعبئة_بيانات_الطلاب.xlsx`;
+      link.download = `قالب_تسجيل_${targetCls.name.replace(/\s+/g, '_')}_الأرقام_${range.start}_إلى_${range.end}.xlsx`;
       document.body.appendChild(link);
       link.click();
       setTimeout(() => {
@@ -1960,7 +2235,8 @@ ${directivesFormatted}
         URL.revokeObjectURL(url);
       }, 300);
 
-      setPrintToastMsg("📥 تم تصدير وتحميل قالب إكسل لتعبئة بيانات الطلاب بنجاح!");
+      setPrintToastMsg(`📥 تم تحميل قالب إكسل لـ (${targetCls.name}) مقيداً بالأرقام الموحدة [${range.start} - ${range.end}] بنجاح!`);
+      setShowTemplateExportModal(false);
       setTimeout(() => setPrintToastMsg(null), 5000);
     } catch (err) {
       console.error("Failed to export Excel template:", err);
@@ -2130,6 +2406,7 @@ ${directivesFormatted}
       let importedCount = 0;
       let updatedCount = 0;
       let updatedPhoneCount = 0;
+      const rejectedRows: { name: string; class: string; unifiedNo: string; reason: string }[] = [];
       const updatedStudents = [...students];
       const updatedParents = [...parents];
 
@@ -2146,6 +2423,10 @@ ${directivesFormatted}
           }
         }
 
+        const currentClass = classes.find(c => c.id === finalClassId);
+        const classNameText = currentClass ? currentClass.name : 'الصف المختار';
+        const classRange = getClassUnifiedRange(finalClassId, classes);
+
         const parentName = row.parentName || `ولي أمر ${studentName}`;
         const parentPhone = row.parentPhone ? String(row.parentPhone).trim() : '';
 
@@ -2158,13 +2439,46 @@ ${directivesFormatted}
           return false;
         });
 
+        // Strictly validate or allocate Unified Number within the 30-number range of finalClassId
+        let targetUnifiedNo = row.unifiedNo ? String(row.unifiedNo).trim() : '';
+        if (targetUnifiedNo) {
+          const valRes = isUnifiedNoValidForClass(
+            targetUnifiedNo,
+            finalClassId,
+            classes,
+            updatedStudents,
+            existingStudentIndex !== -1 ? updatedStudents[existingStudentIndex].id : undefined
+          );
+          if (!valRes.isValid) {
+            rejectedRows.push({
+              name: studentName,
+              class: classNameText,
+              unifiedNo: targetUnifiedNo,
+              reason: valRes.message
+            });
+            return; // Reject student outside class allocation
+          }
+        } else {
+          const nextForCls = getNextUnifiedNoForClass(finalClassId, classes, updatedStudents);
+          if (!nextForCls.nextNo) {
+            rejectedRows.push({
+              name: studentName,
+              class: classNameText,
+              unifiedNo: 'غير متوفر',
+              reason: `الصف (${classNameText}) مكتمل السعة (30 رقماً موحداً محجوزة بالكامل للأرقام ${classRange.start}-${classRange.end}).`
+            });
+            return;
+          }
+          targetUnifiedNo = nextForCls.nextNo;
+        }
+
         if (existingStudentIndex !== -1) {
           if (regExcelUpdateExisting) {
             const current = updatedStudents[existingStudentIndex];
             updatedStudents[existingStudentIndex] = {
               ...current,
               serialNo: row.serialNo || current.serialNo,
-              unifiedNo: row.unifiedNo || current.unifiedNo,
+              unifiedNo: targetUnifiedNo || current.unifiedNo,
               nationalId: row.nationalId || current.nationalId,
               name: studentName,
               gender: row.gender || current.gender,
@@ -2228,7 +2542,7 @@ ${directivesFormatted}
           updatedParents.push({
             id: parentId,
             name: parentName,
-            phone: parentPhone || ('05' + String(row.unifiedNo || '75').padEnd(8, '0').slice(0, 8)),
+            phone: parentPhone || ('05' + String(targetUnifiedNo || '75').padEnd(8, '0').slice(0, 8)),
             email: parentEmail,
             childrenIds: [studentId]
           });
@@ -2237,8 +2551,8 @@ ${directivesFormatted}
         updatedStudents.push({
           id: studentId,
           serialNo: row.serialNo,
-          unifiedNo: row.unifiedNo,
-          rollNo: row.unifiedNo || row.nationalId,
+          unifiedNo: targetUnifiedNo,
+          rollNo: targetUnifiedNo || row.nationalId,
           nationalId: row.nationalId,
           name: studentName,
           classId: finalClassId,
@@ -2290,6 +2604,11 @@ ${directivesFormatted}
       if (updatedPhoneCount > 0) {
         successMsg += `\n📲 وتم تحديث أرقام أولياء الأمور لـ ${updatedPhoneCount} طالب.`;
       }
+      if (rejectedRows.length > 0) {
+        successMsg += `\n\n⚠️ تم استبعاد (${rejectedRows.length}) سجل لمخالفة قيد الـ 30 رقماً الموحد للصف:\n` +
+          rejectedRows.slice(0, 6).map(r => `• ${r.name} (${r.class}) - الرقم [${r.unifiedNo}]: ${r.reason}`).join('\n') +
+          (rejectedRows.length > 6 ? `\n... وهناك ${rejectedRows.length - 6} سجلات أخرى مرفوضة لنفس السبب.` : '');
+      }
       alert(successMsg);
     } catch (error) {
       console.error("Error importing Excel rows:", error);
@@ -2299,28 +2618,18 @@ ${directivesFormatted}
     }
   };
 
-  const getNextUnifiedNo = (currentStudents: Student[] = students): string => {
-    const list = currentStudents.filter(s => !s.id.startsWith('demo-'));
-    let maxUnified = 74;
-    for (const s of list) {
-      const val = s.unifiedNo || (parseInt(s.rollNo || '', 10) >= 75 ? s.rollNo : undefined);
-      if (val) {
-        const num = parseInt(String(val).replace(/\D/g, ''), 10);
-        if (!isNaN(num) && num > maxUnified) {
-          maxUnified = num;
-        }
-      }
-    }
-    if (maxUnified >= 75) {
-      return String(maxUnified + 1);
-    }
-    return '75';
+  const getNextUnifiedNo = (targetClassIdentifier?: string, currentStudents: Student[] = students): string => {
+    const classIdToUse = targetClassIdentifier || regStudent?.classId || (classes.length > 0 ? classes[0].id : '');
+    const res = getNextUnifiedNoForClass(classIdToUse, classes, currentStudents);
+    return res.nextNo;
   };
 
   const handleAutoFillDemoStudent = () => {
+    const targetClass = classes.length > 0 ? classes[0] : null;
+    const targetClassId = targetClass ? targetClass.id : '';
     setRegStudent({
       serialNo: String(students.length + 11),
-      unifiedNo: getNextUnifiedNo(students),
+      unifiedNo: getNextUnifiedNo(targetClassId, students),
       nationalId: '0102938475',
       name: 'محمد أحمد العلي',
       fatherName: 'أحمد',
@@ -2334,9 +2643,9 @@ ${directivesFormatted}
       residencePlace: 'الحي الغربي - المزة',
       residenceCity: 'دمشق / المزة',
       address: 'شارع الجلاء - بناء الياسمين - طابق 3',
-      classId: classes.length > 0 ? classes[0].id : '',
-      customClassName: classes.length > 0 ? classes[0].name : 'الصف الخامس الابتدائي',
-      shift: activeCohort === 'evening' ? 'evening' : 'morning',
+      classId: targetClassId,
+      customClassName: targetClass ? targetClass.name : 'الصف الأول الابتدائي',
+      shift: targetClass?.shift || (activeCohort === 'evening' ? 'evening' : 'morning'),
       previousSchool: 'مدرسة الأمل الابتدائية (دمشق)',
       healthStatus: 'سليم وممتاز (فصيلة الدم O+)',
       bloodTypeOrHealth: 'سليم وممتاز (فصيلة الدم O+)',
@@ -2354,10 +2663,12 @@ ${directivesFormatted}
     });
   };
 
-  const handleClearRegForm = () => {
+  const handleClearRegForm = (classIdOverride?: string) => {
+    const targetClassId = classIdOverride || (classes.length > 0 ? classes[0].id : '');
+    const foundCls = classes.find(c => c.id === targetClassId);
     setRegStudent({
       serialNo: String(students.length + 1),
-      unifiedNo: getNextUnifiedNo(students),
+      unifiedNo: getNextUnifiedNo(targetClassId, students),
       nationalId: '',
       name: '',
       fatherName: '',
@@ -2371,9 +2682,9 @@ ${directivesFormatted}
       residencePlace: '',
       residenceCity: '',
       address: '',
-      classId: classes.length > 0 ? classes[0].id : '',
-      customClassName: classes.length > 0 ? classes[0].name : '',
-      shift: activeCohort === 'evening' ? 'evening' : 'morning',
+      classId: targetClassId,
+      customClassName: foundCls ? foundCls.name : '',
+      shift: foundCls?.shift || (activeCohort === 'evening' ? 'evening' : 'morning'),
       previousSchool: '',
       healthStatus: 'سليم / ممتاز',
       bloodTypeOrHealth: '',
@@ -2412,7 +2723,7 @@ ${directivesFormatted}
       parentName: regStudent.parentName.trim() || (regStudent.name.trim() ? `ولي أمر ${regStudent.name.trim()}` : 'ولي الأمر'),
       shift: regStudent.shift || (activeCohort === 'evening' ? 'evening' : 'morning'),
       serialNo: regStudent.serialNo || '1',
-      unifiedNo: regStudent.unifiedNo || getNextUnifiedNo(students),
+      unifiedNo: regStudent.unifiedNo || getNextUnifiedNo(regStudent.classId, students),
       nationalId: regStudent.nationalId || '',
       fatherName: regStudent.fatherName || '',
       fatherJob: regStudent.fatherJob || '',
@@ -2553,6 +2864,20 @@ ${directivesFormatted}
 
     const chosenShift = regStudent.shift || (activeCohort === 'evening' ? 'evening' : 'morning');
 
+    // Strict validation: Unified Number must be within the 30-number range allocated for this class
+    const unifiedToValidate = regStudent.unifiedNo ? regStudent.unifiedNo.trim() : getNextUnifiedNo(finalClassId, students);
+    const unifiedValidation = isUnifiedNoValidForClass(
+      unifiedToValidate,
+      finalClassId,
+      classes,
+      students
+    );
+
+    if (!unifiedValidation.isValid) {
+      alert(`⚠️ تنبيه التحقق من الرقم الموحد:\n${unifiedValidation.message}\n\nيُشترط أن يلتزم الرقم الموحد بالنطاق المخصص للصف (30 رقماً حصراً لكل صف).`);
+      return;
+    }
+
     addStudent(
       {
         name: regStudent.name.trim(),
@@ -2564,7 +2889,7 @@ ${directivesFormatted}
         parentName: regStudent.parentName.trim(),
         shift: chosenShift,
         serialNo: regStudent.serialNo,
-        unifiedNo: regStudent.unifiedNo || getNextUnifiedNo(students),
+        unifiedNo: unifiedToValidate,
         nationalId: regStudent.nationalId,
         fatherName: regStudent.fatherName,
         fatherJob: regStudent.fatherJob,
@@ -4056,16 +4381,17 @@ ${directivesFormatted}
 
   const handleAddClass = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newClassName.trim() || !newClassGrade.trim()) {
-      alert('الرجاء كتابة اسم الصف والمرحلة الدراسية');
+    if (!newClassGrade.trim()) {
+      alert('الرجاء كتابة الصف / المرحلة الدراسية');
       return;
     }
+    const finalClassName = newClassName.trim() || (newClassSection.trim() ? `${newClassGrade.trim()} - ${newClassSection.trim()}` : newClassGrade.trim());
     const currentShift = newClassShift || (activeCohort === 'evening' ? 'evening' : 'morning');
     const newClassObj: Class = {
       id: `class-${Date.now()}`,
-      name: newClassName.trim(),
+      name: finalClassName,
       grade: newClassGrade.trim(),
-      room: newClassRoom.trim() || 'غير محدد',
+      room: newClassRoom.trim() || (newClassSection.trim() ? `شعبة ${newClassSection.trim()}` : 'غير محدد'),
       teacherId: newClassTeacherId || '',
       shift: currentShift
     };
@@ -4076,10 +4402,11 @@ ${directivesFormatted}
     });
     setNewClassName('');
     setNewClassGrade('');
+    setNewClassSection('');
     setNewClassRoom('');
     setNewClassTeacherId('');
     setShowClassForm(false);
-    alert('🎉 تم إضافة الصف الدراسي والشعبة بنجاح!');
+    alert('🎉 تم إضافة الصف الدراسي والشعبة بنجاح (مع تخصيص 30 رقماً موحداً لها)!');
   };
 
   const handleEditTeacher = (teacher: Teacher) => {
@@ -6023,9 +6350,9 @@ ${directivesFormatted}
 
                       <button
                         type="button"
-                        onClick={exportRegistryExcelTemplate}
+                        onClick={() => setShowTemplateExportModal(true)}
                         className="bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-500/60 text-emerald-300 text-xs font-bold px-3.5 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-sm"
-                        title="تحميل نموذج Excel فارغ مع أمثلة لتعبئة بيانات الطلاب"
+                        title="تحميل نموذج Excel مخصص بـ 30 رقماً موحداً للصف لتعبئة بيانات الطلاب"
                       >
                         <Download className="w-4 h-4 text-emerald-400" />
                         <span>قالب إكسل للتعبئة 📥</span>
@@ -6115,9 +6442,9 @@ ${directivesFormatted}
                 <div className="flex items-center gap-2 flex-wrap">
                   <button
                     type="button"
-                    onClick={exportRegistryExcelTemplate}
+                    onClick={() => setShowTemplateExportModal(true)}
                     className="text-xs font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 px-3 py-1.5 rounded-xl transition flex items-center gap-1.5 cursor-pointer shadow-2xs"
-                    title="تحميل نموذج إكسل فارغ لتعبئة بيانات الطلاب"
+                    title="تحميل نموذج إكسل مخصص بـ 30 رقماً موحداً للصف"
                   >
                     <Download className="w-3.5 h-3.5 text-emerald-700" />
                     <span>قالب Excel للتعبئة 📥</span>
@@ -6165,9 +6492,9 @@ ${directivesFormatted}
                     <div className="flex items-center gap-2 flex-wrap self-start md:self-auto">
                       <button
                         type="button"
-                        onClick={exportRegistryExcelTemplate}
+                        onClick={() => setShowTemplateExportModal(true)}
                         className="bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-300 text-xs font-extrabold px-3.5 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-2xs"
-                        title="تحميل نموذج Excel فارغ مع أمثلة لتعبئة بيانات الطلاب"
+                        title="تحميل نموذج Excel مخصص بـ 30 رقماً موحداً للصف"
                       >
                         <Download className="w-4 h-4 text-emerald-700" />
                         <span>قالب Excel للتعبئة 📥</span>
@@ -6243,21 +6570,43 @@ ${directivesFormatted}
                       </div>
 
                       {/* 2. الرقم الموحد */}
-                      <div>
-                        <label className="block text-xs font-bold text-emerald-900 mb-1.5 flex items-center justify-between">
-                          <span>الرقم الموحد <span className="text-emerald-600 font-extrabold">(تلقائي)</span></span>
-                          <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-1.5 py-0.5 rounded-md font-mono">
-                            من 75 فما فوق
-                          </span>
-                        </label>
-                        <input
-                          type="text"
-                          placeholder="75"
-                          value={regStudent.unifiedNo}
-                          onChange={e => setRegStudent(prev => ({ ...prev, unifiedNo: e.target.value }))}
-                          className="w-full text-xs border-2 border-emerald-300 bg-emerald-50/50 px-3.5 py-2.5 rounded-xl focus:border-emerald-600 focus:bg-white focus:outline-none transition font-mono font-black text-emerald-950 shadow-2xs"
-                        />
-                      </div>
+                      {(() => {
+                        const targetClsId = regStudent.classId || (classes.length > 0 ? classes[0].id : '');
+                        const classRange = getClassUnifiedRange(targetClsId, classes);
+                        const validation = isUnifiedNoValidForClass(regStudent.unifiedNo, targetClsId, classes, students);
+                        return (
+                          <div>
+                            <label className="block text-xs font-bold text-emerald-900 mb-1.5 flex items-center justify-between">
+                              <span>الرقم الموحد <span className="text-emerald-600 font-extrabold">(30 رقماً للصف)</span></span>
+                              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md font-mono ${
+                                validation.isValid
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : 'bg-rose-100 text-rose-800'
+                              }`}>
+                                النطاق: [{classRange.start} - {classRange.end}]
+                              </span>
+                            </label>
+                            <input
+                              type="text"
+                              placeholder={String(classRange.start)}
+                              value={regStudent.unifiedNo}
+                              onChange={e => setRegStudent(prev => ({ ...prev, unifiedNo: e.target.value }))}
+                              className={`w-full text-xs border-2 px-3.5 py-2.5 rounded-xl focus:bg-white focus:outline-none transition font-mono font-black shadow-2xs ${
+                                validation.isValid
+                                  ? 'border-emerald-300 bg-emerald-50/50 text-emerald-950 focus:border-emerald-600'
+                                  : 'border-rose-400 bg-rose-50/50 text-rose-950 focus:border-rose-600'
+                              }`}
+                            />
+                            <p className={`text-[10px] mt-1 font-bold ${
+                              validation.isValid ? 'text-emerald-700' : 'text-rose-600'
+                            }`}>
+                              {validation.isValid
+                                ? `✅ مخصص للصف المحدد (${classRange.start} إلى ${classRange.end})`
+                                : `⚠️ ${validation.message}`}
+                            </p>
+                          </div>
+                        );
+                      })()}
 
                       {/* 3. اسم الطالب */}
                       <div className="lg:col-span-2">
@@ -6527,21 +6876,27 @@ ${directivesFormatted}
                           onChange={e => {
                             const selectedId = e.target.value;
                             const foundCls = classes.find(c => c.id === selectedId);
+                            const nextUnified = getNextUnifiedNo(selectedId, students);
                             setRegStudent(prev => ({
                               ...prev,
                               classId: selectedId,
-                              customClassName: foundCls ? foundCls.name : ''
+                              customClassName: foundCls ? foundCls.name : '',
+                              unifiedNo: nextUnified,
+                              shift: foundCls?.shift || prev.shift
                             }));
                           }}
                           className="w-full text-xs font-bold border border-slate-300 px-3.5 py-2.5 rounded-xl bg-white focus:border-emerald-500 focus:outline-none cursor-pointer text-slate-800 shadow-2xs"
                         >
                           <option value="">-- اختر الصف الحالي --</option>
                           {classes.length > 0 ? (
-                            classes.map(c => (
-                              <option key={c.id} value={c.id}>
-                                {c.name}
-                              </option>
-                            ))
+                            classes.map(c => {
+                              const r = getClassUnifiedRange(c.id, classes);
+                              return (
+                                <option key={c.id} value={c.id}>
+                                  {c.name} {c.shift === 'evening' ? '(مسائي)' : '(صباحي)'} - الأرقام [{r.start} إلى {r.end}]
+                                </option>
+                              );
+                            })
                           ) : (
                             <option value="class-1">الصف الأول الابتدائي (افتراضي)</option>
                           )}
@@ -6831,9 +7186,9 @@ ${directivesFormatted}
 
                     <button
                       type="button"
-                      onClick={exportRegistryExcelTemplate}
+                      onClick={() => setShowTemplateExportModal(true)}
                       className="bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-300 text-xs font-extrabold px-3.5 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-2xs"
-                      title="تحميل نموذج إكسل فارغ مع أمثلة جاهزة لتعبئة بيانات الطلاب"
+                      title="تحميل نموذج إكسل مخصص بـ 30 رقماً موحداً للصف"
                     >
                       <Download className="w-4 h-4 text-emerald-700" />
                       <span>قالب Excel للتعبئة 📥</span>
@@ -6887,8 +7242,8 @@ ${directivesFormatted}
                     <span>تصفية وبحث في سجل الطلاب المسجلين حسب (الصف الدراسي / القائمة المنسدلة)</span>
                   </div>
 
-                  {/* Grid of Selects + Search */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                  {/* Grid of Selects + Search (Without Cohort Quick Filter) */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     {/* Dropdown 1: الصف الدراسي */}
                     <div>
                       <label className="block text-[11px] font-bold text-slate-700 mb-1">الصف الدراسي:</label>
@@ -6906,21 +7261,7 @@ ${directivesFormatted}
                       </select>
                     </div>
 
-                    {/* Dropdown 2: تصفية الفوج / الدوام */}
-                    <div>
-                      <label className="block text-[11px] font-bold text-slate-700 mb-1">تصفية الفوج / الدوام:</label>
-                      <select
-                        value={regShiftFilter}
-                        onChange={e => setRegShiftFilter(e.target.value as any)}
-                        className="w-full text-xs border border-emerald-300 bg-white px-3 py-2 rounded-xl focus:border-emerald-600 focus:outline-none font-semibold text-slate-800 shadow-2xs"
-                      >
-                        <option value="all">جميع الأفواج (الكل)</option>
-                        <option value="morning">☀️ الفوج الصباحي ({allRegistryStudents.filter(s => s.shift === 'morning').length})</option>
-                        <option value="evening">🌙 الفوج المسائي ({allRegistryStudents.filter(s => s.shift === 'evening').length})</option>
-                      </select>
-                    </div>
-
-                    {/* Dropdown 3: قائمة الطلاب للمعاينة */}
+                    {/* Dropdown 2: قائمة الطلاب للمعاينة */}
                     <div>
                       <label className="block text-[11px] font-bold text-slate-700 mb-1">قائمة الطلاب ({filteredRegistryStudents.length}):</label>
                       <select
@@ -6938,7 +7279,7 @@ ${directivesFormatted}
                           const cls = classes.find(c => c.id === s.classId);
                           return (
                             <option key={s.id} value={s.id}>
-                              {s.name} - {cls ? cls.name : 'الصف الخامس'}
+                              {s.name} - {cls ? cls.name : 'الصف الدراسي'}
                             </option>
                           );
                         })}
@@ -10101,28 +10442,96 @@ ${sampleEval}
                   </h3>
                   
                   <form onSubmit={handleAddClass} className="space-y-4">
+                    {/* 1. الصف الدراسي أولاً */}
                     <div>
-                      <label className="block text-xs font-semibold text-slate-600 mb-1.5 font-sans">اسم الشعبة الدراسية *</label>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5 font-sans">
+                        الصف / المرحلة الدراسية <span className="text-red-500">*</span>
+                      </label>
                       <input
                         type="text"
-                        value={newClassName}
-                        onChange={e => setNewClassName(e.target.value)}
-                        placeholder="مثال: الصف الأول - أ"
-                        className="w-full text-sm border border-slate-200 px-3.5 py-2.5 rounded-xl focus:border-indigo-500 focus:outline-none"
+                        value={newClassGrade}
+                        onChange={e => {
+                          const val = e.target.value;
+                          setNewClassGrade(val);
+                          setNewClassName(newClassSection ? `${val} - ${newClassSection}` : val);
+                        }}
+                        placeholder="مثال: الصف الأول، الصف الثاني، الصف الثالث..."
+                        className="w-full text-sm font-bold border border-slate-300 bg-slate-50/50 px-3.5 py-2.5 rounded-xl focus:border-indigo-500 focus:bg-white focus:outline-none transition shadow-2xs"
                         required
                       />
                     </div>
 
+                    {/* 2. الشعبة تحته مباشرة */}
                     <div>
-                      <label className="block text-xs font-semibold text-slate-600 mb-1.5 font-sans">الصف / المرحلة الدراسية *</label>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5 font-sans">
+                        الشعبة الدراسية <span className="text-red-500">*</span>
+                      </label>
                       <input
                         type="text"
-                        value={newClassGrade}
-                        onChange={e => setNewClassGrade(e.target.value)}
-                        placeholder="مثال: الأول، الثاني، الثالث"
-                        className="w-full text-sm border border-slate-200 px-3.5 py-2.5 rounded-xl focus:border-indigo-500 focus:outline-none"
+                        value={newClassSection}
+                        onChange={e => {
+                          const val = e.target.value;
+                          setNewClassSection(val);
+                          setNewClassName(newClassGrade ? `${newClassGrade} - ${val}` : val);
+                        }}
+                        placeholder="مثال: شعبة أ، شعبة ب، الشعبة الأولى..."
+                        className="w-full text-sm font-bold border border-slate-300 bg-slate-50/50 px-3.5 py-2.5 rounded-xl focus:border-indigo-500 focus:bg-white focus:outline-none transition shadow-2xs"
                         required
                       />
+                    </div>
+
+                    {/* 3. اسم الصف والشعبة الكامل */}
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 mb-1.5 font-sans">
+                        اسم الصف والشعبة الكامل المعتمد
+                      </label>
+                      <input
+                        type="text"
+                        value={newClassName}
+                        onChange={e => setNewClassName(e.target.value)}
+                        placeholder="مثال: الصف الأول الابتدائي - شعبة أ"
+                        className="w-full text-sm border border-slate-200 px-3.5 py-2.5 rounded-xl focus:border-indigo-500 focus:outline-none font-bold text-slate-800"
+                        required
+                      />
+                    </div>
+
+                    {/* 4. الفوج / الدوام */}
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 mb-1.5 font-sans">الفوج / الدوام</label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setNewClassShift('morning')}
+                          className={`py-2 px-3 rounded-xl text-xs font-black transition cursor-pointer border flex items-center justify-center gap-1.5 ${
+                            newClassShift === 'morning'
+                              ? 'bg-amber-50 border-amber-400 text-amber-900 shadow-2xs'
+                              : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                          }`}
+                        >
+                          <span>☀️ الفوج الصباحي</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setNewClassShift('evening')}
+                          className={`py-2 px-3 rounded-xl text-xs font-black transition cursor-pointer border flex items-center justify-center gap-1.5 ${
+                            newClassShift === 'evening'
+                              ? 'bg-indigo-50 border-indigo-400 text-indigo-900 shadow-2xs'
+                              : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                          }`}
+                        >
+                          <span>🌙 الفوج المسائي</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="bg-emerald-50 border border-emerald-200 p-3 rounded-xl text-right">
+                      <p className="text-[11px] font-bold text-emerald-950 flex items-center gap-1.5 justify-end">
+                        <span>نظام الرقم الموحد: 30 رقماً مستقلاً لكل شعبة</span>
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                      </p>
+                      <p className="text-[10px] text-emerald-800 mt-1 font-sans">
+                        يبدأ الترقيم بالترتيب من الصف الأول صباحي بمقدار 30 رقماً موحداً ثابتاً لكل صف ولا يقبل التداخل.
+                      </p>
                     </div>
 
                     <button
@@ -10130,7 +10539,7 @@ ${sampleEval}
                       className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs py-3 rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5 shadow-md shadow-indigo-100"
                     >
                       <Plus className="w-4 h-4" />
-                      <span>حفظ وإضافة الصف الدراسى</span>
+                      <span>حفظ وإضافة الصف الدراسي والشعبة</span>
                     </button>
                   </form>
                 </div>
@@ -10146,6 +10555,7 @@ ${sampleEval}
                     {classes.filter(matchesCohort).map(cls => {
                       const teacher = teachers.find(t => t.id === cls.teacherId);
                       const studentCount = students.filter(s => s.classId === cls.id).length;
+                      const range = getClassUnifiedRange(cls.id, classes);
                       return (
                         <div key={cls.id} className="p-4 rounded-2xl border border-slate-100 hover:border-indigo-100 bg-slate-50/50 hover:bg-indigo-50/10 transition flex items-center justify-between gap-4">
                           <button
@@ -10164,16 +10574,27 @@ ${sampleEval}
                           </button>
                           
                           <div className="text-right flex-1">
-                            <span className="font-bold text-slate-800 text-xs block">{cls.name}</span>
-                            <div className="text-[10px] text-slate-400 font-sans mt-1 space-y-0.5">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-[10px] font-mono font-bold text-emerald-700 bg-emerald-100/70 border border-emerald-200 px-2 py-0.5 rounded-md">
+                                موحد: [{range.start} - {range.end}]
+                              </span>
+                              <span className="font-black text-slate-800 text-xs block">{cls.name}</span>
+                            </div>
+                            <div className="text-[10px] text-slate-400 font-sans mt-1.5 space-y-0.5">
                               <div className="flex items-center gap-1 justify-end">
-                                <span className="font-semibold text-slate-500">{cls.grade}</span>
+                                <span className="font-semibold text-slate-600">{cls.grade}</span>
                                 <span>الصف / المرحلة:</span>
+                              </div>
+                              <div className="flex items-center gap-1 justify-end">
+                                <span className={`font-semibold ${cls.shift === 'evening' ? 'text-indigo-600' : 'text-amber-600'}`}>
+                                  {cls.shift === 'evening' ? '🌙 الفوج المسائي' : '☀️ الفوج الصباحي'}
+                                </span>
+                                <span>الفوج:</span>
                               </div>
                               {cls.room && cls.room !== 'غير محدد' && (
                                 <div className="flex items-center gap-1 justify-end">
                                   <span className="font-semibold text-slate-500">{cls.room}</span>
-                                  <span>القاعة:</span>
+                                  <span>القاعة / الشعبة:</span>
                                 </div>
                               )}
                               {teacher && (
@@ -10182,9 +10603,9 @@ ${sampleEval}
                                   <span>رائد الفصل:</span>
                                 </div>
                               )}
-                              <div className="flex items-center gap-1 justify-end text-emerald-600 font-semibold">
-                                <span>{studentCount} طالب</span>
-                                <span>القيد:</span>
+                              <div className="flex items-center gap-1 justify-end text-emerald-600 font-bold">
+                                <span>{studentCount} / 30 طالب</span>
+                                <span>المسجلون:</span>
                               </div>
                             </div>
                           </div>
@@ -12436,14 +12857,41 @@ ${sampleEval}
                 className="bg-white rounded-3xl max-w-6xl w-full shadow-2xl border border-slate-200 overflow-hidden text-right my-8"
                 style={{ direction: 'rtl' }}
               >
-                <div className="bg-slate-900 text-white p-6 flex items-center justify-between no-print">
+                <div className="bg-slate-900 text-white p-6 flex flex-wrap items-center justify-between gap-4 no-print">
                   <div className="flex items-center gap-3">
                     <Printer className="w-6 h-6 text-emerald-400" />
                     <div>
                       <h3 className="text-base font-black">معاينة وطباعة الكشف الكامل للطلاب</h3>
-                      <p className="text-xs text-slate-300">يتضمن كافة البيانات والمعلومات المسجلة للطلاب</p>
+                      <p className="text-xs text-slate-300">يتضمن كافة البيانات والمعلومات المسجلة للطلاب مرتبة أبجدياً أ-ي</p>
                     </div>
                   </div>
+
+                  {/* Scope Selector (All vs Filtered) */}
+                  <div className="flex items-center gap-2 bg-slate-800 p-1 rounded-xl border border-slate-700">
+                    <button
+                      type="button"
+                      onClick={() => setManifestPrintScope('all')}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
+                        manifestPrintScope === 'all'
+                          ? 'bg-emerald-600 text-white shadow-xs'
+                          : 'text-slate-300 hover:text-white'
+                      }`}
+                    >
+                      كافة طلاب المدرسة بالكامل ({allRegistryStudents.length} طالب)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setManifestPrintScope('filtered')}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
+                        manifestPrintScope === 'filtered'
+                          ? 'bg-emerald-600 text-white shadow-xs'
+                          : 'text-slate-300 hover:text-white'
+                      }`}
+                    >
+                      الطلاب المصفين فقط ({filteredRegistryStudents.length} طالب)
+                    </button>
+                  </div>
+
                   <button
                     type="button"
                     onClick={() => setRegManifestPrintModal(false)}
@@ -12453,98 +12901,103 @@ ${sampleEval}
                   </button>
                 </div>
 
-                <div id="printable-students-manifest" translate="no" className="p-6 space-y-6 bg-white text-slate-900 notranslate select-none">
-                  {/* Manifest Header */}
-                  <div className="text-center space-y-1 border-b-2 border-slate-800 pb-4">
-                    <p className="text-xs font-bold text-slate-600">الجمهورية العربية السورية / وزارة التربية والتعليم</p>
-                    <h1 className="text-xl font-black text-slate-900">المدرسة الدولية الخاصة</h1>
-                    <p className="text-sm font-black text-emerald-800">
-                      سجل بيانات الطلاب المسجلين بالكامل (إجمالي: {filteredRegistryStudents.length} طالب)
-                    </p>
-                    <p className="text-[11px] font-mono text-slate-500 font-bold">
-                      تاريخ الطباعة: {new Date().toLocaleDateString('ar-SY', { year: 'numeric', month: '2-digit', day: '2-digit' })} - الوقت: {new Date().toLocaleTimeString('ar-SY', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}
-                    </p>
-                  </div>
+                {(() => {
+                  const manifestStudents = manifestPrintScope === 'all' ? allRegistryStudents : filteredRegistryStudents;
+                  return (
+                    <div id="printable-students-manifest" translate="no" className="p-6 space-y-6 bg-white text-slate-900 notranslate select-none">
+                      {/* Manifest Header */}
+                      <div className="text-center space-y-1 border-b-2 border-slate-800 pb-4">
+                        <p className="text-xs font-bold text-slate-600">الجمهورية العربية السورية / وزارة التربية والتعليم</p>
+                        <h1 className="text-xl font-black text-slate-900">المدرسة الدولية الخاصة</h1>
+                        <p className="text-sm font-black text-emerald-800">
+                          سجل بيانات الطلاب المسجلين بالكامل (إجمالي: {manifestStudents.length} طالب) - {manifestPrintScope === 'all' ? 'كافة المراحل والشعب' : 'حسب التصفية'}
+                        </p>
+                        <p className="text-[11px] font-mono text-slate-500 font-bold">
+                          تاريخ الطباعة: {new Date().toLocaleDateString('ar-SY', { year: 'numeric', month: '2-digit', day: '2-digit' })} - الوقت: {new Date().toLocaleTimeString('ar-SY', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}
+                        </p>
+                      </div>
 
-                  <div className="overflow-x-auto border border-slate-300 rounded-xl">
-                    <table className="w-full text-right border-collapse text-[11px] whitespace-nowrap">
-                      <thead>
-                        <tr className="bg-slate-100 font-black text-slate-900 border-b border-slate-300 text-center">
-                          <th className="p-2 border-l border-slate-300 w-8">#</th>
-                          <th className="p-2 border-l border-slate-300">الرقم الموحد</th>
-                          <th className="p-2 border-l border-slate-300">الرقم الوطني</th>
-                          <th className="p-2 border-l border-slate-300 text-right">اسم الطالب الكامل</th>
-                          <th className="p-2 border-l border-slate-300">الجنس</th>
-                          <th className="p-2 border-l border-slate-300 text-right">تاريخ ومكان الولادة</th>
-                          <th className="p-2 border-l border-slate-300">الحالة الصحية</th>
-                          <th className="p-2 border-l border-slate-300 text-right">اسم الأب والمهنة</th>
-                          <th className="p-2 border-l border-slate-300 text-right">اسم الجد</th>
-                          <th className="p-2 border-l border-slate-300 text-right">اسم الأم ونسبتها</th>
-                          <th className="p-2 border-l border-slate-300 text-right">مكان السكن والعنوان</th>
-                          <th className="p-2 border-l border-slate-300">الصف الدراسي</th>
-                          <th className="p-2 border-l border-slate-300">الفوج</th>
-                          <th className="p-2 border-l border-slate-300">المدرسة السابقة</th>
-                          <th className="p-2 border-l border-slate-300">المواصلات</th>
-                          <th className="p-2 border-l border-slate-300">الكتب واللباس</th>
-                          <th className="p-2 border-l border-slate-300 text-right">ولي الأمر والقرابة</th>
-                          <th className="p-2 border-l border-slate-300">رقم ولي الأمر الوطني</th>
-                          <th className="p-2 border-l border-slate-300">واتساب ولي الأمر</th>
-                          <th className="p-2">هاتف الطوارئ</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-200 font-medium text-slate-800">
-                        {filteredRegistryStudents.map((st, idx) => {
-                          const cls = classes.find(c => c.id === st.classId);
-                          return (
-                            <tr key={st.id} className="hover:bg-slate-50">
-                              <td className="p-2 border-l border-slate-200 text-center font-mono font-bold text-slate-400">{st.serialNo || idx + 1}</td>
-                              <td className="p-2 border-l border-slate-200 text-center font-mono font-bold text-emerald-800">{st.unifiedNo || (parseInt(st.rollNo || '', 10) >= 75 ? st.rollNo : '75')}</td>
-                              <td className="p-2 border-l border-slate-200 text-center font-mono font-bold text-indigo-700">{st.nationalId || st.rollNo || '-'}</td>
-                              <td className="p-2 border-l border-slate-200 font-bold text-slate-900">{st.name}</td>
-                              <td className="p-2 border-l border-slate-200 text-center">{st.gender === 'female' ? 'أنثى' : 'ذكر'}</td>
-                              <td className="p-2 border-l border-slate-200 font-mono text-[10px]">{st.dob || '-'} {st.birthPlace ? `(${st.birthPlace})` : ''}</td>
-                              <td className="p-2 border-l border-slate-200 text-center text-[10px] font-bold text-emerald-800">{st.healthStatus || st.bloodTypeOrHealth || 'سليم'}</td>
-                              <td className="p-2 border-l border-slate-200">
-                                <span>{st.fatherName || '-'}</span>
-                                {st.fatherJob && <span className="text-[10px] text-slate-500 mr-1">({st.fatherJob})</span>}
-                              </td>
-                              <td className="p-2 border-l border-slate-200">{st.grandfatherName || '-'}</td>
-                              <td className="p-2 border-l border-slate-200">
-                                <span>{st.motherName || '-'}</span>
-                                {st.motherJob && <span className="text-[10px] text-slate-500 mr-1">({st.motherJob})</span>}
-                                {st.motherMaidenName && <span className="text-[10px] text-slate-500 mr-1">[{st.motherMaidenName}]</span>}
-                              </td>
-                              <td className="p-2 border-l border-slate-200 text-[10px]">
-                                <span>{st.residencePlace || st.residenceCity || '-'}</span>
-                                {st.address && <span className="text-slate-500 mr-1">({st.address})</span>}
-                              </td>
-                              <td className="p-2 border-l border-slate-200 font-bold text-center">{cls ? cls.name : 'الصف الخامس'}</td>
-                              <td className="p-2 border-l border-slate-200 text-center">{st.shift === 'evening' ? 'المسائي' : 'الصباحي'}</td>
-                              <td className="p-2 border-l border-slate-200 text-center text-[10px]">{st.previousSchool || '-'}</td>
-                              <td className="p-2 border-l border-slate-200 text-center text-[10px]">{st.transportation || 'حافلة المدرسة'}</td>
-                              <td className="p-2 border-l border-slate-200 text-center text-[10px]">
-                                {st.booksStatus || 'تم التسليم'} / {st.uniformStatus || 'تم التسليم'}
-                              </td>
-                              <td className="p-2 border-l border-slate-200 font-bold">
-                                <span>{st.parentName || `ولي أمر ${st.name}`}</span>
-                                <span className="text-[10px] text-slate-500 mr-1">({st.guardianRelation || 'أب'})</span>
-                              </td>
-                              <td className="p-2 border-l border-slate-200 text-center font-mono text-[10px]">{st.guardianNationalId || '-'}</td>
-                              <td className="p-2 border-l border-slate-200 text-center font-mono font-bold dir-ltr">{st.parentPhone || '-'}</td>
-                              <td className="p-2 text-center font-mono font-bold dir-ltr">{st.parentBackupPhone || '-'}</td>
+                      <div className="overflow-x-auto border border-slate-300 rounded-xl">
+                        <table className="w-full text-right border-collapse text-[11px] whitespace-nowrap">
+                          <thead>
+                            <tr className="bg-slate-100 font-black text-slate-900 border-b border-slate-300 text-center">
+                              <th className="p-2 border-l border-slate-300 w-8">#</th>
+                              <th className="p-2 border-l border-slate-300">الرقم الموحد</th>
+                              <th className="p-2 border-l border-slate-300">الرقم الوطني</th>
+                              <th className="p-2 border-l border-slate-300 text-right">اسم الطالب الكامل</th>
+                              <th className="p-2 border-l border-slate-300">الجنس</th>
+                              <th className="p-2 border-l border-slate-300 text-right">تاريخ ومكان الولادة</th>
+                              <th className="p-2 border-l border-slate-300">الحالة الصحية</th>
+                              <th className="p-2 border-l border-slate-300 text-right">اسم الأب والمهنة</th>
+                              <th className="p-2 border-l border-slate-300 text-right">اسم الجد</th>
+                              <th className="p-2 border-l border-slate-300 text-right">اسم الأم ونسبتها</th>
+                              <th className="p-2 border-l border-slate-300 text-right">مكان السكن والعنوان</th>
+                              <th className="p-2 border-l border-slate-300">الصف الدراسي</th>
+                              <th className="p-2 border-l border-slate-300">الفوج</th>
+                              <th className="p-2 border-l border-slate-300">المدرسة السابقة</th>
+                              <th className="p-2 border-l border-slate-300">المواصلات</th>
+                              <th className="p-2 border-l border-slate-300">الكتب واللباس</th>
+                              <th className="p-2 border-l border-slate-300 text-right">ولي الأمر والقرابة</th>
+                              <th className="p-2 border-l border-slate-300">رقم ولي الأمر الوطني</th>
+                              <th className="p-2 border-l border-slate-300">واتساب ولي الأمر</th>
+                              <th className="p-2">هاتف الطوارئ</th>
                             </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
+                          </thead>
+                          <tbody className="divide-y divide-slate-200 font-medium text-slate-800">
+                            {manifestStudents.map((st, idx) => {
+                              const cls = classes.find(c => c.id === st.classId);
+                              return (
+                                <tr key={st.id} className="hover:bg-slate-50">
+                                  <td className="p-2 border-l border-slate-200 text-center font-mono font-bold text-slate-400">{st.serialNo || idx + 1}</td>
+                                  <td className="p-2 border-l border-slate-200 text-center font-mono font-bold text-emerald-800">{st.unifiedNo || (parseInt(st.rollNo || '', 10) >= 75 ? st.rollNo : '75')}</td>
+                                  <td className="p-2 border-l border-slate-200 text-center font-mono font-bold text-indigo-700">{st.nationalId || st.rollNo || '-'}</td>
+                                  <td className="p-2 border-l border-slate-200 font-bold text-slate-900">{st.name}</td>
+                                  <td className="p-2 border-l border-slate-200 text-center">{st.gender === 'female' ? 'أنثى' : 'ذكر'}</td>
+                                  <td className="p-2 border-l border-slate-200 font-mono text-[10px]">{st.dob || '-'} {st.birthPlace ? `(${st.birthPlace})` : ''}</td>
+                                  <td className="p-2 border-l border-slate-200 text-center text-[10px] font-bold text-emerald-800">{st.healthStatus || st.bloodTypeOrHealth || 'سليم'}</td>
+                                  <td className="p-2 border-l border-slate-200">
+                                    <span>{st.fatherName || '-'}</span>
+                                    {st.fatherJob && <span className="text-[10px] text-slate-500 mr-1">({st.fatherJob})</span>}
+                                  </td>
+                                  <td className="p-2 border-l border-slate-200">{st.grandfatherName || '-'}</td>
+                                  <td className="p-2 border-l border-slate-200">
+                                    <span>{st.motherName || '-'}</span>
+                                    {st.motherJob && <span className="text-[10px] text-slate-500 mr-1">({st.motherJob})</span>}
+                                    {st.motherMaidenName && <span className="text-[10px] text-slate-500 mr-1">[{st.motherMaidenName}]</span>}
+                                  </td>
+                                  <td className="p-2 border-l border-slate-200 text-[10px]">
+                                    <span>{st.residencePlace || st.residenceCity || '-'}</span>
+                                    {st.address && <span className="text-slate-500 mr-1">({st.address})</span>}
+                                  </td>
+                                  <td className="p-2 border-l border-slate-200 font-bold text-center">{cls ? cls.name : 'الصف الخامس'}</td>
+                                  <td className="p-2 border-l border-slate-200 text-center">{st.shift === 'evening' ? 'المسائي' : 'الصباحي'}</td>
+                                  <td className="p-2 border-l border-slate-200 text-center text-[10px]">{st.previousSchool || '-'}</td>
+                                  <td className="p-2 border-l border-slate-200 text-center text-[10px]">{st.transportation || 'حافلة المدرسة'}</td>
+                                  <td className="p-2 border-l border-slate-200 text-center text-[10px]">
+                                    {st.booksStatus || 'تم التسليم'} / {st.uniformStatus || 'تم التسليم'}
+                                  </td>
+                                  <td className="p-2 border-l border-slate-200 font-bold">
+                                    <span>{st.parentName || `ولي أمر ${st.name}`}</span>
+                                    <span className="text-[10px] text-slate-500 mr-1">({st.guardianRelation || 'أب'})</span>
+                                  </td>
+                                  <td className="p-2 border-l border-slate-200 text-center font-mono text-[10px]">{st.guardianNationalId || '-'}</td>
+                                  <td className="p-2 border-l border-slate-200 text-center font-mono font-bold dir-ltr">{st.parentPhone || '-'}</td>
+                                  <td className="p-2 text-center font-mono font-bold dir-ltr">{st.parentBackupPhone || '-'}</td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
 
-                  {/* Manifest Footer */}
-                  <div className="pt-4 border-t border-slate-300 flex items-center justify-between text-xs font-bold text-slate-700">
-                    <div>إجمالي الطلاب المسجلين: <span className="font-black text-emerald-800">{filteredRegistryStudents.length}</span></div>
-                    <div>ختم وتوقيع إدارة المدرسة: _________________________</div>
-                  </div>
-                </div>
+                      {/* Manifest Footer */}
+                      <div className="pt-4 border-t border-slate-300 flex items-center justify-between text-xs font-bold text-slate-700">
+                        <div>إجمالي الطلاب المسجلين بالكشف: <span className="font-black text-emerald-800">{manifestStudents.length}</span></div>
+                        <div>ختم وتوقيع إدارة المدرسة: _________________________</div>
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 {/* Status Toast Banner */}
                 {printToastMsg && (
@@ -13041,6 +13494,158 @@ ${sampleEval}
                       )}
                     </button>
                   )}
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* Student Registration Excel Template Export Modal (نظام 30 رقماً موحداً لكل صف) */}
+        <AnimatePresence>
+          {showTemplateExportModal && (
+            <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-[10015]">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95, y: 15 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 15 }}
+                className="bg-white rounded-3xl max-w-xl w-full shadow-2xl border border-emerald-150 overflow-hidden text-right"
+                style={{ direction: 'rtl' }}
+              >
+                {/* Modal Header */}
+                <div className="bg-gradient-to-r from-emerald-900 via-emerald-800 to-teal-950 text-white p-5 flex items-center justify-between border-b border-emerald-700/50">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-2xl bg-emerald-700/60 border border-emerald-400/40 flex items-center justify-center text-emerald-200">
+                      <FileSpreadsheet className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h3 className="text-base font-black">تحميل قالب Excel لتعبئة بيانات الطلاب</h3>
+                      <p className="text-xs text-emerald-200/90 font-medium mt-0.5">
+                        مقيد ومخصص بـ 30 رقماً موحداً فقط لكل صف ابتداءً من الصف الأول صباحي
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowTemplateExportModal(false)}
+                    className="p-1.5 text-emerald-300 hover:text-white hover:bg-emerald-800/60 rounded-xl transition cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                {/* Modal Body */}
+                <div className="p-6 space-y-5">
+                  {/* Notice Box */}
+                  <div className="bg-emerald-50 border border-emerald-200 p-4 rounded-2xl">
+                    <div className="flex items-center gap-2 text-emerald-950 font-bold text-xs mb-1">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                      <span>قاعدة الترقيم الموحد الإلزامية:</span>
+                    </div>
+                    <p className="text-[11px] text-emerald-800 leading-relaxed font-medium">
+                      يخصص النظام 30 رقماً موحداً فقط لكل شعبة دراسية على حدة، ابتداءً من الصف الأول صباحي بالتسلسل. ويضع القالب تلقائياً هذه الأرقام فقط في عمود الرقم الموحد لضمان عدم حدوث أي خطأ أو تداخل.
+                    </p>
+                  </div>
+
+                  {/* Target Class Selection */}
+                  <div className="space-y-2">
+                    <label className="block text-xs font-bold text-slate-800">
+                      اختر نطاق الصف الدراسي المراد تصدير قالبه: <span className="text-red-500">*</span>
+                    </label>
+                    <select
+                      value={templateExportTargetClassId}
+                      onChange={e => setTemplateExportTargetClassId(e.target.value)}
+                      className="w-full text-xs font-bold border-2 border-emerald-300 bg-white px-4 py-3 rounded-2xl focus:border-emerald-600 focus:outline-none transition text-slate-800 shadow-2xs cursor-pointer"
+                    >
+                      <option value="auto">🌟 الصف المحدد حالياً بالاستمارة أو أول صف متاح</option>
+                      <option value="all">📚 مصنف شامل لكافة الصفوف (أوراق مستقلة لكل صف)</option>
+                      {classes.map(c => {
+                        const r = getClassUnifiedRange(c.id, classes);
+                        return (
+                          <option key={c.id} value={c.id}>
+                            {c.name} ({c.shift === 'evening' ? 'مسائي' : 'صباحي'}) - الأرقام الموحدة [{r.start} إلى {r.end}] (30 رقماً)
+                          </option>
+                        );
+                      })}
+                    </select>
+                  </div>
+
+                  {/* Range Details Display */}
+                  {(() => {
+                    const targetId = templateExportTargetClassId === 'auto'
+                      ? (regStudent.classId || (classes.length > 0 ? classes[0].id : 'class-1'))
+                      : templateExportTargetClassId;
+                    
+                    if (targetId === 'all') {
+                      return (
+                        <div className="bg-slate-50 border border-slate-200 p-4 rounded-2xl space-y-2 text-xs">
+                          <p className="font-bold text-slate-800">تفاصيل المصنف الشامل لكافة الصفوف ({classes.length} صف):</p>
+                          <div className="max-h-36 overflow-y-auto space-y-1.5 p-1">
+                            {classes.map(c => {
+                              const r = getClassUnifiedRange(c.id, classes);
+                              return (
+                                <div key={c.id} className="flex items-center justify-between bg-white px-3 py-1.5 rounded-xl border border-slate-200 text-[11px]">
+                                  <span className="font-mono font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                                    موحد: [{r.start} - {r.end}]
+                                  </span>
+                                  <span className="font-bold text-slate-700">{c.name} ({c.shift === 'evening' ? 'مسائي' : 'صباحي'})</span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    }
+
+                    const targetClass = classes.find(c => c.id === targetId) || classes[0];
+                    const range = getClassUnifiedRange(targetClass?.id || targetId, classes);
+
+                    return (
+                      <div className="bg-amber-50/70 border border-amber-200 p-4 rounded-2xl space-y-2">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-amber-900 font-bold">الصف المستهدف:</span>
+                          <span className="font-black text-slate-900">{targetClass?.name || 'الصف الأول'}</span>
+                        </div>
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-amber-900 font-bold">الفوج / الدوام:</span>
+                          <span className="font-bold text-amber-800">
+                            {targetClass?.shift === 'evening' ? '🌙 الفوج المسائي' : '☀️ الفوج الصباحي'}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between text-xs pt-1 border-t border-amber-200/80">
+                          <span className="text-emerald-900 font-bold">الأرقام الموحدة المخصصة للقالب:</span>
+                          <span className="font-mono font-black text-emerald-800 bg-emerald-100/80 border border-emerald-300 px-2.5 py-1 rounded-lg text-xs shadow-2xs">
+                            من {range.start} إلى {range.end} (30 رقماً)
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {/* Modal Footer Actions */}
+                <div className="bg-slate-50 p-4 border-t border-slate-200 flex items-center justify-between gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setShowTemplateExportModal(false)}
+                    className="bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 text-xs font-bold px-4 py-2.5 rounded-xl transition cursor-pointer shadow-2xs"
+                  >
+                    إلغاء ❌
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const classIdToExport = templateExportTargetClassId === 'auto'
+                        ? (regStudent.classId || (classes.length > 0 ? classes[0].id : undefined))
+                        : (templateExportTargetClassId === 'all' ? undefined : templateExportTargetClassId);
+                      exportRegistryExcelTemplate(classIdToExport);
+                      setShowTemplateExportModal(false);
+                    }}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black px-6 py-2.5 rounded-xl transition cursor-pointer shadow-md shadow-emerald-600/20 flex items-center gap-2"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>تنزيل القالب المعتمد 📥 (Excel .xlsx)</span>
+                  </button>
                 </div>
               </motion.div>
             </div>
