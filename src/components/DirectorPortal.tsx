@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Users, 
   UserSquare2, 
@@ -1579,6 +1579,15 @@ ${directivesFormatted}
   const [printToastMsg, setPrintToastMsg] = useState<string | null>(null);
   const [previewDocImageModal, setPreviewDocImageModal] = useState<{ url: string; title: string; filename: string; pdfUrl?: string; elementId?: string } | null>(null);
 
+  // Student Registration Excel Import / Export Template State
+  const [showRegExcelImportModal, setShowRegExcelImportModal] = useState<boolean>(false);
+  const [isProcessingRegExcelImport, setIsProcessingRegExcelImport] = useState<boolean>(false);
+  const [regExcelParsedRows, setRegExcelParsedRows] = useState<any[] | null>(null);
+  const [regExcelFileName, setRegExcelFileName] = useState<string>('');
+  const [regExcelDefaultClassId, setRegExcelDefaultClassId] = useState<string>('auto');
+  const [regExcelUpdateExisting, setRegExcelUpdateExisting] = useState<boolean>(true);
+  const regExcelFileInputRef = useRef<HTMLInputElement | null>(null);
+
   const sampleRegistryStudents: Student[] = [];
 
   const allRegistryStudents = [...students.filter(s => !s.id.startsWith('demo-'))].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
@@ -1798,6 +1807,496 @@ ${directivesFormatted}
       if (link.parentNode) link.parentNode.removeChild(link);
       URL.revokeObjectURL(url);
     }, 300);
+  };
+
+  const exportRegistryExcelTemplate = () => {
+    try {
+      const headers = [
+        "الرقم التسلسلي",
+        "الرقم الموحد",
+        "الرقم الشخصي / الوطني",
+        "اسم الطالب الكامل",
+        "الجنس",
+        "تاريخ الولادة",
+        "مكان الولادة",
+        "الحالة الصحية / زمرة الدم",
+        "اسم الأب",
+        "مهنة الأب",
+        "اسم الجد",
+        "اسم الأم",
+        "مهنة الأم",
+        "نسبة الأم",
+        "المنطقة والمدينة",
+        "العنوان التفصيلي",
+        "الصف الحالي",
+        "الفوج / الدوام",
+        "المدرسة السابقة",
+        "خدمة المواصلات",
+        "استلام الكتب المدرسية",
+        "استلام اللباس المدرسي",
+        "اسم ولي الأمر",
+        "صلة القرابة",
+        "الرقم الوطني لولي الأمر",
+        "رقم هاتف ولي الأمر (واتساب)",
+        "رقم هاتف إضافي / طوارئ"
+      ];
+
+      const sampleRow1 = [
+        "1",
+        "75",
+        "0123456789",
+        "مثال: أحمد محمد العلي",
+        "ذكر",
+        "2016-04-12",
+        "دمشق",
+        "سليم (O+)",
+        "محمد",
+        "مهندس",
+        "عبد الله",
+        "مريم",
+        "معلمة",
+        "النجار",
+        "دمشق - المزة",
+        "شارع الجلاء بناء 4",
+        classes[0]?.name || "الصف الأول",
+        "الفوج الصباحي",
+        "روضة براعم المستقبل",
+        "حافلة المدرسة",
+        "تم التسليم",
+        "تم التسليم",
+        "محمد العلي",
+        "أب",
+        "0123456789",
+        "0944123456",
+        "0112345678"
+      ];
+
+      const sampleRow2 = [
+        "2",
+        "76",
+        "0987654321",
+        "مثال: سارة خالد المنصور",
+        "أنثى",
+        "2017-08-25",
+        "حلب",
+        "سليمة (A+)",
+        "خالد",
+        "طبيب",
+        "محمود",
+        "هدى",
+        "صيدلانية",
+        "الخطيب",
+        "حلب - الشهباء",
+        "شارع النيل عمارة 12",
+        classes[1]?.name || classes[0]?.name || "الصف الثاني",
+        "الفوج الصباحي",
+        "مدرسة النور الخاصة",
+        "خاصة / بدون باص",
+        "تم التسليم",
+        "تم التسليم",
+        "خالد المنصور",
+        "أب",
+        "0987654321",
+        "0933987654",
+        "0219876543"
+      ];
+
+      // Empty formatted rows ready for user data entry
+      const emptyRows = Array.from({ length: 25 }, (_, i) => [
+        String(i + 3),
+        String(77 + i),
+        "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+        classes[0]?.name || "الصف الأول",
+        "الفوج الصباحي",
+        "", "حافلة المدرسة", "تم التسليم", "تم التسليم", "", "أب", "", "", ""
+      ]);
+
+      const wsData = [headers, sampleRow1, sampleRow2, ...emptyRows];
+      const ws = XLSX.utils.aoa_to_sheet(wsData);
+
+      ws['!cols'] = [
+        { wch: 14 },
+        { wch: 14 },
+        { wch: 20 },
+        { wch: 28 },
+        { wch: 10 },
+        { wch: 14 },
+        { wch: 14 },
+        { wch: 20 },
+        { wch: 16 },
+        { wch: 16 },
+        { wch: 16 },
+        { wch: 16 },
+        { wch: 16 },
+        { wch: 16 },
+        { wch: 20 },
+        { wch: 30 },
+        { wch: 18 },
+        { wch: 16 },
+        { wch: 22 },
+        { wch: 18 },
+        { wch: 18 },
+        { wch: 18 },
+        { wch: 24 },
+        { wch: 14 },
+        { wch: 20 },
+        { wch: 22 },
+        { wch: 22 }
+      ];
+
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "نموذج تسجيل بيانات الطلاب");
+
+      const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+      const blob = new Blob([wbout], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `قالب_تعبئة_بيانات_الطلاب.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      setTimeout(() => {
+        if (link.parentNode) link.parentNode.removeChild(link);
+        URL.revokeObjectURL(url);
+      }, 300);
+
+      setPrintToastMsg("📥 تم تصدير وتحميل قالب إكسل لتعبئة بيانات الطلاب بنجاح!");
+      setTimeout(() => setPrintToastMsg(null), 5000);
+    } catch (err) {
+      console.error("Failed to export Excel template:", err);
+      alert("حدث خطأ أثناء تحميل قالب الإكسل.");
+    }
+  };
+
+  const getCellVal = (row: any, keys: string[]): string => {
+    if (!row || typeof row !== 'object') return '';
+    for (const [k, v] of Object.entries(row)) {
+      if (v === undefined || v === null) continue;
+      const cleanKey = k.trim().replace(/[\s_\-\/\\()]/g, '').toLowerCase();
+      for (const target of keys) {
+        const cleanTarget = target.trim().replace(/[\s_\-\/\\()]/g, '').toLowerCase();
+        if (cleanKey === cleanTarget || cleanKey.includes(cleanTarget) || cleanTarget.includes(cleanKey)) {
+          return String(v).trim();
+        }
+      }
+    }
+    return '';
+  };
+
+  const formatExcelDate = (val: string): string => {
+    if (!val) return '';
+    const num = Number(val);
+    if (!isNaN(num) && num > 20000 && num < 60000) {
+      const d = new Date((num - 25569) * 86400 * 1000);
+      return d.toISOString().slice(0, 10);
+    }
+    return val;
+  };
+
+  const parseRawExcelRows = (rawJson: any[]) => {
+    const parsed: any[] = [];
+    let startUnified = 75;
+    for (const s of students) {
+      const u = parseInt(s.unifiedNo || s.rollNo || '0', 10);
+      if (u >= startUnified) startUnified = u + 1;
+    }
+
+    rawJson.forEach((row, idx) => {
+      const name = getCellVal(row, ['اسم الطالب الكامل', 'اسم الطالب', 'الاسم الكامل', 'اسم التلميذ', 'اسم', 'fullname', 'name', 'student']);
+      // Skip header echo or example rows or empty names
+      if (!name || name.includes('مثال:') || name.includes('اسم الطالب')) return;
+
+      const serialNo = getCellVal(row, ['الرقم التسلسلي', 'تسلسلي', 'تسلسل', 'الرقم', 'م', 'ت', 'serial', 'no', 'seq']) || String(idx + 1);
+      const unifiedNo = getCellVal(row, ['الرقم الموحد', 'الموحد', 'رقم موحد', 'unified', 'rollno', 'roll']) || String(startUnified + parsed.length);
+      const nationalId = getCellVal(row, ['الرقم الشخصي', 'الرقم الوطني', 'الوطني', 'شخصي', 'الهوية', 'رقم الهوية', 'national id', 'nid', 'id']);
+      const genderRaw = getCellVal(row, ['الجنس', 'النوع', 'gender', 'sex']).toLowerCase();
+      const gender: 'male' | 'female' = (genderRaw.includes('أنثى') || genderRaw.includes('انثى') || genderRaw.includes('بنت') || genderRaw.includes('female')) ? 'female' : 'male';
+      const dob = formatExcelDate(getCellVal(row, ['تاريخ الولادة', 'تاريخ الميلاد', 'الميلاد', 'الولادة', 'dob', 'birth date', 'birthdate']));
+      const birthPlace = getCellVal(row, ['مكان الولادة', 'محل الولادة', 'مكان الميلاد', 'birthplace', 'birth place']);
+      const healthStatus = getCellVal(row, ['الحالة الصحية', 'زمرة الدم', 'الصحة', 'فصيلة الدم', 'health', 'blood type', 'blood']) || 'سليم';
+      const fatherName = getCellVal(row, ['اسم الأب', 'الأب', 'والد', 'father name', 'father']);
+      const fatherJob = getCellVal(row, ['مهنة الأب', 'عمل الأب', 'وظيفة الأب', 'father job', 'father occupation']);
+      const grandfatherName = getCellVal(row, ['اسم الجد', 'الجد', 'grandfather']);
+      const motherName = getCellVal(row, ['اسم الأم', 'الأم', 'والدة', 'mother name', 'mother']);
+      const motherJob = getCellVal(row, ['مهنة الأم', 'عمل الأم', 'وظيفة الأم', 'mother job']);
+      const motherMaidenName = getCellVal(row, ['نسبة الأم', 'كنية الأم', 'عائلة الأم', 'mother maiden']);
+      const residencePlace = getCellVal(row, ['المنطقة والمدينة', 'مكان السكن', 'المنطقة', 'المدينة', 'residence', 'city', 'area']);
+      const address = getCellVal(row, ['العنوان التفصيلي', 'العنوان', 'السكن', 'address']);
+      const classNameRaw = getCellVal(row, ['الصف الحالي', 'الصف الدراسي', 'الصف', 'الشعبة', 'المرحلة', 'class', 'grade']);
+      const shiftRaw = getCellVal(row, ['الفوج', 'الدوام', 'الفترة', 'shift', 'period']).toLowerCase();
+      const shift: 'morning' | 'evening' = (shiftRaw.includes('مساء') || shiftRaw.includes('مسائي') || shiftRaw.includes('evening')) ? 'evening' : 'morning';
+      const previousSchool = getCellVal(row, ['المدرسة السابقة', 'مدرسة سابقة', 'previous school']);
+      const transportation = getCellVal(row, ['خدمة المواصلات', 'المواصلات', 'النقل', 'الباص', 'transportation', 'bus']) || 'حافلة المدرسة';
+      const booksStatus = getCellVal(row, ['استلام الكتب المدرسية', 'استلام الكتب', 'الكتب', 'books']) || 'تم التسليم';
+      const uniformStatus = getCellVal(row, ['استلام اللباس المدرسي', 'استلام اللباس', 'اللباس', 'الزي', 'uniform']) || 'تم التسليم';
+      const parentName = getCellVal(row, ['اسم ولي الأمر', 'ولي الأمر', 'الولي', 'guardian name', 'guardian', 'parent']) || (fatherName ? `${fatherName} ${grandfatherName || ''}`.trim() : `ولي أمر ${name}`);
+      const guardianRelation = getCellVal(row, ['صلة القرابة', 'القرابة', 'relation']) || 'أب';
+      const guardianNationalId = getCellVal(row, ['الرقم الوطني لولي الأمر', 'رقم ولي الأمر الوطني', 'هوية الولي', 'guardian id']);
+      const parentPhone = getCellVal(row, ['رقم هاتف ولي الأمر (واتساب)', 'رقم هاتف ولي الأمر', 'هاتف ولي الأمر', 'واتساب ولي الأمر', 'واتساب', 'رقم الواتساب', 'هاتف', 'جوال', 'phone', 'whatsapp', 'mobile']);
+      const parentBackupPhone = getCellVal(row, ['رقم هاتف إضافي / طوارئ', 'رقم هاتف إضافي', 'هاتف إضافي', 'طوارئ', 'هاتف الطوارئ', 'emergency phone', 'emergency', 'backup phone']);
+
+      // Flexible Class Matching
+      let matchedClass = classes.find(c => 
+        classNameRaw && (
+          c.name.trim().toLowerCase() === classNameRaw.toLowerCase() ||
+          c.name.includes(classNameRaw) ||
+          classNameRaw.includes(c.name) ||
+          c.grade === classNameRaw ||
+          c.id === classNameRaw
+        )
+      );
+
+      parsed.push({
+        serialNo,
+        unifiedNo,
+        nationalId: nationalId || unifiedNo,
+        name,
+        gender,
+        dob: dob || '2016-01-01',
+        birthPlace,
+        healthStatus,
+        fatherName,
+        fatherJob,
+        grandfatherName,
+        motherName,
+        motherJob,
+        motherMaidenName,
+        residencePlace,
+        address,
+        classNameRaw,
+        matchedClassId: matchedClass?.id || '',
+        matchedClassName: matchedClass?.name || classNameRaw || '',
+        shift,
+        previousSchool,
+        transportation,
+        booksStatus,
+        uniformStatus,
+        parentName,
+        guardianRelation,
+        guardianNationalId,
+        parentPhone,
+        parentBackupPhone
+      });
+    });
+
+    return parsed;
+  };
+
+  const handleSelectRegExcelFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setRegExcelFileName(file.name);
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const data = new Uint8Array(evt.target?.result as ArrayBuffer);
+        const wb = XLSX.read(data, { type: 'array' });
+        const firstSheetName = wb.SheetNames[0];
+        const sheet = wb.Sheets[firstSheetName];
+        const rawJson = XLSX.utils.sheet_to_json<any>(sheet, { defval: '' });
+
+        if (!rawJson || rawJson.length === 0) {
+          alert("الملف المختار فارغ أو لا يحتوي على صفوف صالحة.");
+          return;
+        }
+
+        const parsedRows = parseRawExcelRows(rawJson);
+        if (parsedRows.length === 0) {
+          alert("لم يتم العثور على أي أسماء طلاب صالحة بالملف. يرجى التأكد من احتواء الملف على عمود 'اسم الطالب' على الأقل.");
+          return;
+        }
+
+        setRegExcelParsedRows(parsedRows);
+        setShowRegExcelImportModal(true);
+      } catch (err) {
+        console.error("Failed to read Excel:", err);
+        alert("حدث خطأ أثناء قراءة ملف الإكسل. يرجى التأكد من سلامة صيغة الملف (.xlsx أو .xls أو .csv).");
+      }
+    };
+    reader.readAsArrayBuffer(file);
+    e.target.value = '';
+  };
+
+  const handleConfirmRegistryImport = () => {
+    if (!regExcelParsedRows || regExcelParsedRows.length === 0) {
+      alert("لا توجد بيانات للاستيراد.");
+      return;
+    }
+
+    setIsProcessingRegExcelImport(true);
+
+    try {
+      let importedCount = 0;
+      let updatedCount = 0;
+      let updatedPhoneCount = 0;
+      const updatedStudents = [...students];
+      const updatedParents = [...parents];
+
+      regExcelParsedRows.forEach((row) => {
+        const studentName = String(row.name || '').trim();
+        if (!studentName) return;
+
+        let finalClassId = row.matchedClassId;
+        if (!finalClassId || finalClassId === 'auto') {
+          if (regExcelDefaultClassId && regExcelDefaultClassId !== 'auto') {
+            finalClassId = regExcelDefaultClassId;
+          } else {
+            finalClassId = classes[0]?.id || 'class-default';
+          }
+        }
+
+        const parentName = row.parentName || `ولي أمر ${studentName}`;
+        const parentPhone = row.parentPhone ? String(row.parentPhone).trim() : '';
+
+        // Match existing student
+        const existingStudentIndex = updatedStudents.findIndex(s => {
+          if (row.nationalId && s.nationalId && s.nationalId === row.nationalId) return true;
+          if (row.unifiedNo && s.unifiedNo && s.unifiedNo === row.unifiedNo) return true;
+          if (row.unifiedNo && s.rollNo && s.rollNo === row.unifiedNo) return true;
+          if (s.name.trim() === studentName && (!row.fatherName || s.fatherName === row.fatherName)) return true;
+          return false;
+        });
+
+        if (existingStudentIndex !== -1) {
+          if (regExcelUpdateExisting) {
+            const current = updatedStudents[existingStudentIndex];
+            updatedStudents[existingStudentIndex] = {
+              ...current,
+              serialNo: row.serialNo || current.serialNo,
+              unifiedNo: row.unifiedNo || current.unifiedNo,
+              nationalId: row.nationalId || current.nationalId,
+              name: studentName,
+              gender: row.gender || current.gender,
+              dob: row.dob || current.dob,
+              birthPlace: row.birthPlace || current.birthPlace,
+              healthStatus: row.healthStatus || current.healthStatus,
+              bloodTypeOrHealth: row.healthStatus || current.bloodTypeOrHealth,
+              fatherName: row.fatherName || current.fatherName,
+              fatherJob: row.fatherJob || current.fatherJob,
+              grandfatherName: row.grandfatherName || current.grandfatherName,
+              motherName: row.motherName || current.motherName,
+              motherJob: row.motherJob || current.motherJob,
+              motherMaidenName: row.motherMaidenName || current.motherMaidenName,
+              residencePlace: row.residencePlace || current.residencePlace,
+              address: row.address || current.address,
+              classId: finalClassId,
+              shift: row.shift || current.shift,
+              previousSchool: row.previousSchool || current.previousSchool,
+              transportation: row.transportation || current.transportation,
+              booksStatus: row.booksStatus || current.booksStatus,
+              uniformStatus: row.uniformStatus || current.uniformStatus,
+              parentName: parentName,
+              guardianRelation: row.guardianRelation || current.guardianRelation,
+              guardianNationalId: row.guardianNationalId || current.guardianNationalId,
+              parentPhone: parentPhone || current.parentPhone,
+              parentBackupPhone: row.parentBackupPhone || current.parentBackupPhone
+            };
+
+            if (parentPhone) {
+              const existingParent = updatedParents.find(p => p.id === current.parentId || p.childrenIds.includes(current.id) || p.name === parentName);
+              if (existingParent) {
+                existingParent.phone = parentPhone;
+                if (row.parentName) existingParent.name = row.parentName;
+                updatedPhoneCount++;
+              }
+            }
+            updatedCount++;
+          }
+          return;
+        }
+
+        // New student
+        const studentId = 's_reg_xl_' + Date.now() + Math.random().toString(36).substring(2, 7);
+        const parentId = 'p_reg_xl_' + Date.now() + Math.random().toString(36).substring(2, 7);
+        const parentEmail = `${parentName.replace(/\s+/g, '') || 'parent'}@school.edu`;
+
+        let finalParentId = parentId;
+        const existingParent = updatedParents.find(p => 
+          (parentPhone && p.phone === parentPhone) || (p.name && p.name === parentName)
+        );
+
+        if (existingParent) {
+          finalParentId = existingParent.id;
+          if (parentPhone && !existingParent.phone) {
+            existingParent.phone = parentPhone;
+          }
+          if (!existingParent.childrenIds.includes(studentId)) {
+            existingParent.childrenIds.push(studentId);
+          }
+        } else {
+          updatedParents.push({
+            id: parentId,
+            name: parentName,
+            phone: parentPhone || ('05' + String(row.unifiedNo || '75').padEnd(8, '0').slice(0, 8)),
+            email: parentEmail,
+            childrenIds: [studentId]
+          });
+        }
+
+        updatedStudents.push({
+          id: studentId,
+          serialNo: row.serialNo,
+          unifiedNo: row.unifiedNo,
+          rollNo: row.unifiedNo || row.nationalId,
+          nationalId: row.nationalId,
+          name: studentName,
+          classId: finalClassId,
+          parentId: finalParentId,
+          gender: row.gender,
+          dob: row.dob,
+          birthPlace: row.birthPlace,
+          healthStatus: row.healthStatus,
+          bloodTypeOrHealth: row.healthStatus,
+          fatherName: row.fatherName,
+          fatherJob: row.fatherJob,
+          grandfatherName: row.grandfatherName,
+          motherName: row.motherName,
+          motherJob: row.motherJob,
+          motherMaidenName: row.motherMaidenName,
+          residencePlace: row.residencePlace,
+          address: row.address,
+          shift: row.shift,
+          previousSchool: row.previousSchool,
+          transportation: row.transportation,
+          booksStatus: row.booksStatus,
+          uniformStatus: row.uniformStatus,
+          parentName: parentName,
+          guardianRelation: row.guardianRelation,
+          guardianNationalId: row.guardianNationalId,
+          parentPhone: parentPhone,
+          parentBackupPhone: row.parentBackupPhone
+        });
+
+        importedCount++;
+      });
+
+      // Maintain Arabic alphabetical sort
+      updatedStudents.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
+
+      setStudents(updatedStudents);
+      setParents(updatedParents);
+      localStorage.setItem('school_students', JSON.stringify(updatedStudents));
+      localStorage.setItem('school_parents', JSON.stringify(updatedParents));
+
+      setShowRegExcelImportModal(false);
+      setRegExcelParsedRows(null);
+      setRegSubViewMode('registry');
+
+      let successMsg = `🎉 تم استيراد عدد ${importedCount} طالب بنجاح من ملف Excel!`;
+      if (updatedCount > 0) {
+        successMsg += `\n🔄 وتم تحديث بيانات ${updatedCount} طالب مسجلين مسبقاً.`;
+      }
+      if (updatedPhoneCount > 0) {
+        successMsg += `\n📲 وتم تحديث أرقام أولياء الأمور لـ ${updatedPhoneCount} طالب.`;
+      }
+      alert(successMsg);
+    } catch (error) {
+      console.error("Error importing Excel rows:", error);
+      alert("حدث خطأ أثناء استيراد البيانات.");
+    } finally {
+      setIsProcessingRegExcelImport(false);
+    }
   };
 
   const getNextUnifiedNo = (currentStudents: Student[] = students): string => {
@@ -5524,12 +6023,43 @@ ${directivesFormatted}
 
                       <button
                         type="button"
+                        onClick={exportRegistryExcelTemplate}
+                        className="bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-500/60 text-emerald-300 text-xs font-bold px-3.5 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-sm"
+                        title="تحميل نموذج Excel فارغ مع أمثلة لتعبئة بيانات الطلاب"
+                      >
+                        <Download className="w-4 h-4 text-emerald-400" />
+                        <span>قالب إكسل للتعبئة 📥</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (regExcelFileInputRef.current) {
+                            regExcelFileInputRef.current.click();
+                          }
+                        }}
+                        className="bg-sky-950/80 hover:bg-sky-900 border border-sky-500/60 text-sky-300 text-xs font-bold px-3.5 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-sm"
+                        title="استيراد كشف طلاب من ملف Excel لتسجيلهم تلقائياً"
+                      >
+                        <Upload className="w-4 h-4 text-sky-400" />
+                        <span>استيراد ملف إكسل 📤</span>
+                      </button>
+
+                      <button
+                        type="button"
                         onClick={() => setShowPythonCodeModal(true)}
                         className="bg-indigo-950/70 hover:bg-indigo-900 border border-indigo-700/60 text-indigo-300 text-xs font-bold px-3.5 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5"
                       >
                         <FileCode className="w-4 h-4 text-indigo-400" />
                         <span>كود بايثون</span>
                       </button>
+                      <input
+                        type="file"
+                        ref={regExcelFileInputRef}
+                        onChange={handleSelectRegExcelFile}
+                        accept=".xlsx,.xls,.csv"
+                        className="hidden"
+                      />
                     </div>
                   </div>
                 </div>
@@ -5582,7 +6112,31 @@ ${directivesFormatted}
                   </button>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={exportRegistryExcelTemplate}
+                    className="text-xs font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 px-3 py-1.5 rounded-xl transition flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                    title="تحميل نموذج إكسل فارغ لتعبئة بيانات الطلاب"
+                  >
+                    <Download className="w-3.5 h-3.5 text-emerald-700" />
+                    <span>قالب Excel للتعبئة 📥</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (regExcelFileInputRef.current) {
+                        regExcelFileInputRef.current.click();
+                      }
+                    }}
+                    className="text-xs font-bold text-sky-800 bg-sky-50 hover:bg-sky-100 border border-sky-300 px-3 py-1.5 rounded-xl transition flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                    title="استيراد كشف طلاب من ملف إكسل"
+                  >
+                    <Upload className="w-3.5 h-3.5 text-sky-700" />
+                    <span>استيراد ملف Excel 📤</span>
+                  </button>
+
                   <span className="text-[11px] font-bold text-slate-500 bg-slate-100 px-2.5 py-1 rounded-lg">
                     إجمالي المسجلين: <strong className="text-emerald-700 font-extrabold">{allRegistryStudents.length} طالب</strong>
                   </span>
@@ -5609,6 +6163,30 @@ ${directivesFormatted}
                     </div>
 
                     <div className="flex items-center gap-2 flex-wrap self-start md:self-auto">
+                      <button
+                        type="button"
+                        onClick={exportRegistryExcelTemplate}
+                        className="bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-300 text-xs font-extrabold px-3.5 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-2xs"
+                        title="تحميل نموذج Excel فارغ مع أمثلة لتعبئة بيانات الطلاب"
+                      >
+                        <Download className="w-4 h-4 text-emerald-700" />
+                        <span>قالب Excel للتعبئة 📥</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (regExcelFileInputRef.current) {
+                            regExcelFileInputRef.current.click();
+                          }
+                        }}
+                        className="bg-sky-50 hover:bg-sky-100 text-sky-900 border border-sky-300 text-xs font-extrabold px-3.5 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-2xs"
+                        title="استيراد كشف طلاب من ملف Excel لتسجيلهم تلقائياً"
+                      >
+                        <Upload className="w-4 h-4 text-sky-700" />
+                        <span>استيراد ملف Excel 📤</span>
+                      </button>
+
                       <button
                         type="button"
                         onClick={() => {
@@ -6249,6 +6827,30 @@ ${directivesFormatted}
                     >
                       <UserPlus className="w-4 h-4" />
                       <span>تسجيل طالب جديد 📝</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={exportRegistryExcelTemplate}
+                      className="bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-300 text-xs font-extrabold px-3.5 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-2xs"
+                      title="تحميل نموذج إكسل فارغ مع أمثلة جاهزة لتعبئة بيانات الطلاب"
+                    >
+                      <Download className="w-4 h-4 text-emerald-700" />
+                      <span>قالب Excel للتعبئة 📥</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (regExcelFileInputRef.current) {
+                          regExcelFileInputRef.current.click();
+                        }
+                      }}
+                      className="bg-sky-50 hover:bg-sky-100 text-sky-900 border border-sky-300 text-xs font-extrabold px-3.5 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-2xs"
+                      title="استيراد كشف طلاب من ملف إكسل إلى السجل مباشرة"
+                    >
+                      <Upload className="w-4 h-4 text-sky-700" />
+                      <span>استيراد ملف Excel 📤</span>
                     </button>
 
                     <button
@@ -12138,6 +12740,307 @@ ${sampleEval}
                       </button>
                     )}
                   </div>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* Student Registration Excel Import & Preview Modal */}
+        <AnimatePresence>
+          {showRegExcelImportModal && (
+            <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-[10015]">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95, y: 15 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 15 }}
+                className="bg-white rounded-3xl max-w-5xl w-full shadow-2xl border border-slate-200 overflow-hidden text-right max-h-[92vh] flex flex-col"
+              >
+                {/* Modal Header Banner */}
+                <div className="bg-gradient-to-r from-emerald-800 via-teal-900 to-slate-900 text-white p-5 flex items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-emerald-500/20 border border-emerald-400/30 flex items-center justify-center text-emerald-300">
+                      <FileSpreadsheet className="w-6 h-6" />
+                    </div>
+                    <div>
+                      <h2 className="text-base md:text-lg font-black text-white flex items-center gap-2">
+                        <span>استيراد وتأكيد بيانات الطلاب من ملف Excel</span>
+                        <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-400/40 text-[11px] font-bold px-2 py-0.5 rounded-md">
+                          استيراد كشف Excel
+                        </span>
+                      </h2>
+                      <p className="text-emerald-200 text-xs mt-0.5">
+                        {regExcelFileName ? `الملف المختار: ${regExcelFileName}` : 'مطابقة واستيراد سجل الطلاب المكتمل'}
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowRegExcelImportModal(false);
+                      setRegExcelParsedRows(null);
+                    }}
+                    className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                {/* Modal Body */}
+                <div className="p-6 overflow-y-auto space-y-5 flex-1">
+                  {(!regExcelParsedRows || regExcelParsedRows.length === 0) ? (
+                    <div className="space-y-6 py-6">
+                      <div 
+                        onClick={() => {
+                          if (regExcelFileInputRef.current) regExcelFileInputRef.current.click();
+                        }}
+                        onDragOver={(e) => e.preventDefault()}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          const file = e.dataTransfer.files?.[0];
+                          if (file) {
+                            const dummyEvent = {
+                              target: { files: [file], value: '' }
+                            } as unknown as React.ChangeEvent<HTMLInputElement>;
+                            handleSelectRegExcelFile(dummyEvent);
+                          }
+                        }}
+                        className="border-2 border-dashed border-emerald-400 bg-emerald-50/40 hover:bg-emerald-50/80 rounded-3xl p-8 md:p-12 text-center cursor-pointer transition flex flex-col items-center justify-center gap-3"
+                      >
+                        <div className="w-16 h-16 rounded-2xl bg-emerald-100 text-emerald-700 flex items-center justify-center shadow-inner">
+                          <Upload className="w-8 h-8" />
+                        </div>
+                        <h3 className="text-base font-bold text-slate-800">
+                          اضغط لاختيار ملف Excel (.xlsx أو .xls أو .csv) أو اسحب وأفلت الملف هنا
+                        </h3>
+                        <p className="text-xs text-slate-500 max-w-md leading-relaxed">
+                          يقوم النظام بالتعرف التلقائي على كافة الأعمدة (الاسم، الصف، الأرقام الموحدة والوطنية، بيانات الوالدين، هواتف الواتساب، واللوجستيات)
+                        </p>
+                        <button
+                          type="button"
+                          className="mt-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black px-6 py-2.5 rounded-xl transition shadow-md shadow-emerald-600/20 flex items-center gap-2"
+                        >
+                          <Upload className="w-4 h-4" />
+                          <span>اختيار ملف من الحاسوب 📂</span>
+                        </button>
+                      </div>
+
+                      {/* Download Template Guidance Box */}
+                      <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4">
+                        <div className="flex items-center gap-3">
+                          <div className="w-9 h-9 rounded-xl bg-indigo-50 border border-indigo-200 flex items-center justify-center text-indigo-700 shrink-0">
+                            <Download className="w-5 h-5" />
+                          </div>
+                          <div>
+                            <h4 className="text-xs font-black text-slate-900">
+                              هل تحتاج إلى نموذج Excel فارغ جاهز للتعبئة؟
+                            </h4>
+                            <p className="text-[11px] text-slate-600">
+                              يمكنك تحميل القالب المعتمد المنسق مع أمثلة توضيحية لسهولة التعبئة وإعادة رفعه مباشرة.
+                            </p>
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={exportRegistryExcelTemplate}
+                          className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-4 py-2 rounded-xl transition flex items-center gap-2 shrink-0 cursor-pointer shadow-xs"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          <span>تحميل قالب Excel للتعبئة 📥</span>
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      {/* Summary & Toolbar */}
+                      <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center shadow-xs">
+                            <CheckCircle2 className="w-6 h-6" />
+                          </div>
+                          <div>
+                            <h3 className="text-sm font-black text-emerald-950">
+                              تمت قراءة الملف بنجاح: تم التعرف على {regExcelParsedRows.length} طالب
+                            </h3>
+                            <p className="text-[11px] text-emerald-700 font-medium">
+                              راجع البيانات أدناه ثم اضغط على زر التأكيد والاستيراد لحفظهم في قاعدة البيانات.
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (regExcelFileInputRef.current) regExcelFileInputRef.current.click();
+                            }}
+                            className="bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 text-xs font-bold px-3 py-1.5 rounded-xl transition flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                          >
+                            <RefreshCw className="w-3.5 h-3.5 text-slate-500" />
+                            <span>اختيار ملف آخر 🔄</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={exportRegistryExcelTemplate}
+                            className="bg-white hover:bg-slate-50 text-emerald-700 border border-emerald-300 text-xs font-bold px-3 py-1.5 rounded-xl transition flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                            <span>تحميل القالب النموذجي 📥</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Options Configuration Bar */}
+                      <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3.5 grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                        <div>
+                          <label className="block text-[11px] font-extrabold text-slate-700 mb-1">
+                            الصف الافتراضي (في حال لم يُحدد الصف للسطر داخل الملف):
+                          </label>
+                          <select
+                            value={regExcelDefaultClassId}
+                            onChange={(e) => setRegExcelDefaultClassId(e.target.value)}
+                            className="w-full bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs font-bold text-slate-800 focus:ring-2 focus:ring-emerald-500"
+                          >
+                            <option value="auto">التعرف التلقائي من اسم الصف بالملف (أو أول صف متاح)</option>
+                            {classes.map(c => (
+                              <option key={c.id} value={c.id}>
+                                {c.name} {c.grade ? `(${c.grade})` : ''}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div className="flex items-center gap-2 pt-2 md:pt-4">
+                          <label className="flex items-center gap-2 cursor-pointer select-none">
+                            <input
+                              type="checkbox"
+                              checked={regExcelUpdateExisting}
+                              onChange={(e) => setRegExcelUpdateExisting(e.target.checked)}
+                              className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500"
+                            />
+                            <span className="text-xs font-bold text-slate-800">
+                              تحديث بيانات الطلاب الموجودين مسبقاً (عند تطابق الرقم الوطني أو الموحد أو الاسم والوالد)
+                            </span>
+                          </label>
+                        </div>
+                      </div>
+
+                      {/* Preview Table */}
+                      <div className="border border-slate-200 rounded-2xl overflow-hidden shadow-2xs">
+                        <div className="bg-slate-100 px-4 py-2.5 border-b border-slate-200 flex items-center justify-between">
+                          <span className="text-xs font-extrabold text-slate-800">
+                            معاينة أولية للطلاب المستخرجين (يظهر {Math.min(regExcelParsedRows.length, 30)} من أصل {regExcelParsedRows.length})
+                          </span>
+                          <span className="text-[11px] text-slate-500 font-bold">
+                            مرتبين وسيدرجون تلقائياً بالترتيب الأبجدي أ-ي
+                          </span>
+                        </div>
+
+                        <div className="max-h-72 overflow-y-auto">
+                          <table className="w-full text-right text-xs border-collapse">
+                            <thead className="bg-slate-50 text-slate-700 text-[11px] font-black border-b border-slate-200 sticky top-0">
+                              <tr>
+                                <th className="p-2.5 text-center w-10">#</th>
+                                <th className="p-2.5">الرقم الموحد</th>
+                                <th className="p-2.5">الرقم الوطني</th>
+                                <th className="p-2.5">اسم الطالب الكامل</th>
+                                <th className="p-2.5">الجنس</th>
+                                <th className="p-2.5">الصف</th>
+                                <th className="p-2.5">الفوج</th>
+                                <th className="p-2.5">ولي الأمر</th>
+                                <th className="p-2.5">هاتف الواتساب</th>
+                                <th className="p-2.5 text-center">الحالة المقترحة</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                              {regExcelParsedRows.slice(0, 30).map((row, idx) => {
+                                const isExisting = students.some(s => 
+                                  (row.nationalId && s.nationalId && s.nationalId === row.nationalId) ||
+                                  (row.unifiedNo && s.unifiedNo && s.unifiedNo === row.unifiedNo) ||
+                                  (s.name.trim() === row.name.trim() && (!row.fatherName || s.fatherName === row.fatherName))
+                                );
+
+                                return (
+                                  <tr key={idx} className="hover:bg-emerald-50/40 transition">
+                                    <td className="p-2.5 text-center font-bold text-slate-500">{idx + 1}</td>
+                                    <td className="p-2.5 font-bold text-slate-700">{row.unifiedNo || '-'}</td>
+                                    <td className="p-2.5 font-mono text-[11px] text-slate-600">{row.nationalId || '-'}</td>
+                                    <td className="p-2.5 font-extrabold text-slate-900">{row.name}</td>
+                                    <td className="p-2.5">
+                                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${
+                                        row.gender === 'female' ? 'bg-pink-100 text-pink-700' : 'bg-blue-100 text-blue-700'
+                                      }`}>
+                                        {row.gender === 'female' ? 'أنثى' : 'ذكر'}
+                                      </span>
+                                    </td>
+                                    <td className="p-2.5 font-bold text-slate-700">{row.matchedClassName || row.classNameRaw || 'تلقائي'}</td>
+                                    <td className="p-2.5 text-slate-600">{row.shift === 'evening' ? 'مسائي' : 'صباحي'}</td>
+                                    <td className="p-2.5 text-slate-800 font-bold">{row.parentName || '-'}</td>
+                                    <td className="p-2.5 font-mono text-emerald-700 font-bold dir-ltr text-right">{row.parentPhone || '-'}</td>
+                                    <td className="p-2.5 text-center">
+                                      {isExisting ? (
+                                        <span className="text-[10px] font-bold bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full">
+                                          تحديث سجل 🔄
+                                        </span>
+                                      ) : (
+                                        <span className="text-[10px] font-bold bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full">
+                                          طالب جديد ✨
+                                        </span>
+                                      )}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+
+                        {regExcelParsedRows.length > 30 && (
+                          <div className="bg-slate-50 p-2.5 text-center text-xs font-bold text-slate-600 border-t border-slate-200">
+                            ... وهناك {regExcelParsedRows.length - 30} طالب إضافي سيتم استيرادهم بالكامل.
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Modal Footer Actions */}
+                <div className="bg-slate-50 p-4 border-t border-slate-200 flex items-center justify-between gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowRegExcelImportModal(false);
+                      setRegExcelParsedRows(null);
+                    }}
+                    className="bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 text-xs font-extrabold px-4 py-2.5 rounded-xl transition cursor-pointer shadow-2xs"
+                  >
+                    إلغاء ❌
+                  </button>
+
+                  {regExcelParsedRows && regExcelParsedRows.length > 0 && (
+                    <button
+                      type="button"
+                      disabled={isProcessingRegExcelImport}
+                      onClick={handleConfirmRegistryImport}
+                      className="bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-black px-6 py-2.5 rounded-xl transition cursor-pointer shadow-md shadow-emerald-600/20 flex items-center gap-2"
+                    >
+                      {isProcessingRegExcelImport ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          <span>جاري استيراد البيانات...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Check className="w-4 h-4" />
+                          <span>تأكيد واستيراد الطلاب المسجلين ({regExcelParsedRows.length} طالب) 📥</span>
+                        </>
+                      )}
+                    </button>
+                  )}
                 </div>
               </motion.div>
             </div>
