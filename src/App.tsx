@@ -80,7 +80,8 @@ export default function App() {
 
   const [students, setStudents] = useState<Student[]>(() => {
     const saved = localStorage.getItem('school_students');
-    return saved ? JSON.parse(saved) : INITIAL_STUDENTS;
+    const raw: Student[] = saved ? JSON.parse(saved) : INITIAL_STUDENTS;
+    return [...raw].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
   });
 
   const [attendance, setAttendance] = useState<Attendance[]>(() => {
@@ -164,7 +165,7 @@ export default function App() {
             setParents(parsed);
             break;
           case 'school_students':
-            setStudents(parsed);
+            setStudents(Array.isArray(parsed) ? [...parsed].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar')) : parsed);
             break;
           case 'school_attendance':
             setAttendance(parsed);
@@ -207,7 +208,13 @@ export default function App() {
         'school_teachers': setTeachers,
         'school_classes': setClasses,
         'school_parents': setParents,
-        'school_students': setStudents,
+        'school_students': (val: any) => {
+          if (Array.isArray(val)) {
+            setStudents([...val].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar')));
+          } else {
+            setStudents(val);
+          }
+        },
         'school_attendance': setAttendance,
         'school_grades': setGrades,
         'school_announcements': setAnnouncements,
@@ -666,7 +673,10 @@ export default function App() {
       parentId
     };
 
-    setStudents(prev => [...prev, newStudent]);
+    setStudents(prev => {
+      const updated = [...prev, newStudent].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
+      return updated;
+    });
     logEvent(`تم تسجيل الطالب: ${newStudent.name} وربطه بولي الأمر: ${parentData.name}`, 'success');
   };
 

@@ -1581,7 +1581,7 @@ ${directivesFormatted}
 
   const sampleRegistryStudents: Student[] = [];
 
-  const allRegistryStudents = students.filter(s => !s.id.startsWith('demo-'));
+  const allRegistryStudents = [...students.filter(s => !s.id.startsWith('demo-'))].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
 
   const filteredRegistryStudents = allRegistryStudents.filter(s => {
     if (regClassFilter !== 'all') {
@@ -1600,7 +1600,7 @@ ${directivesFormatted}
       if (!matchName && !matchFather && !matchRoll && !matchParent) return false;
     }
     return true;
-  });
+  }).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
 
   const exportRegistryExcel = () => {
     try {
@@ -2135,7 +2135,9 @@ ${directivesFormatted}
     ];
 
     // Filter students based on selectedClassForStudentAffairs
-    const classStudents = students.filter(s => selectedClassForStudentAffairs === 'all' || s.classId === selectedClassForStudentAffairs);
+    const classStudents = students
+      .filter(s => selectedClassForStudentAffairs === 'all' || s.classId === selectedClassForStudentAffairs)
+      .sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
 
     let dataToExport: any[] = [];
     if (classStudents.length > 0) {
@@ -2291,6 +2293,7 @@ ${directivesFormatted}
     });
 
     if (importedCount > 0 || updatedPhoneCount > 0) {
+      updatedStudents.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
       setStudents(updatedStudents);
       setParents(updatedParents);
       localStorage.setItem('school_students', JSON.stringify(updatedStudents));
@@ -2430,6 +2433,7 @@ ${directivesFormatted}
         });
         
         if (importedCount > 0 || updatedPhoneCount > 0) {
+          updatedStudents.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
           setStudents(updatedStudents);
           setParents(updatedParents);
           localStorage.setItem('school_students', JSON.stringify(updatedStudents));
@@ -3783,7 +3787,7 @@ ${directivesFormatted}
     const matchesClass = selectedClassForStudentAffairs === 'all' || s.classId === selectedClassForStudentAffairs;
 
     return matchesSearch && matchesClass && matchesCohort(s);
-  });
+  }).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
 
   if (!isLoggedIn) {
     return (
@@ -10692,9 +10696,9 @@ ${sampleEval}
                     }
                     const currentList = students.length > 0 ? students : sampleRegistryStudents;
                     const exists = currentList.some(s => s.id === editingStudent.id);
-                    const updatedStudents = exists
+                    const updatedStudents = (exists
                       ? currentList.map(s => s.id === editingStudent.id ? editingStudent : s)
-                      : [...currentList, editingStudent];
+                      : [...currentList, editingStudent]).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
 
                     setStudents(updatedStudents);
                     localStorage.setItem('school_students', JSON.stringify(updatedStudents));

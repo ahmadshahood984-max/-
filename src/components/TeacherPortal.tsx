@@ -378,7 +378,7 @@ export default function TeacherPortal({
   }, [selectedTeacherId]);
 
   // Students in selected class
-  const classStudents = students.filter(s => s.classId === selectedClassId);
+  const classStudents = [...students.filter(s => s.classId === selectedClassId)].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
 
   // Attendance state
   const [attendanceDate, setAttendanceDate] = useState<string>(new Date().toISOString().split('T')[0]);
