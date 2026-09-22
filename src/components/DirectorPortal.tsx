@@ -1639,9 +1639,38 @@ ${directivesFormatted}
     });
   };
 
-  const getClassUnifiedRange = (classIdentifier: string, allClasses: Class[]) => {
+  const getClassUnifiedRange = (
+    classIdentifier: string,
+    allClasses: Class[],
+    preferredShift?: 'morning' | 'evening'
+  ) => {
     const sorted = getSortedClassesForUnifiedNumbers(allClasses);
-    let idx = sorted.findIndex(c => c.id === classIdentifier || c.name === classIdentifier || c.grade === classIdentifier);
+    let idx = -1;
+
+    // 1. Direct ID match first
+    idx = sorted.findIndex(c => c.id === classIdentifier);
+
+    // 2. If not found by ID, match by grade/name respecting preferredShift
+    if (idx === -1) {
+      if (preferredShift) {
+        idx = sorted.findIndex(c => 
+          (c.shift === preferredShift || (!c.shift && preferredShift === 'morning')) &&
+          (c.name.trim().toLowerCase() === classIdentifier.trim().toLowerCase() ||
+           c.name.includes(classIdentifier) ||
+           classIdentifier.includes(c.name) ||
+           c.grade === classIdentifier)
+        );
+      }
+      if (idx === -1) {
+        idx = sorted.findIndex(c => 
+          c.name.trim().toLowerCase() === classIdentifier.trim().toLowerCase() ||
+          c.name.includes(classIdentifier) ||
+          classIdentifier.includes(c.name) ||
+          c.grade === classIdentifier
+        );
+      }
+    }
+
     if (idx === -1) {
       idx = 0;
     }
@@ -1661,6 +1690,82 @@ ${directivesFormatted}
       label,
       allowedNumbers
     };
+  };
+
+  // Find the exact pre-allocated class for any given unified number (e.g., 211 -> Index 7 -> الصف الثاني مسائي [211-240])
+  const findClassByAllocatedUnifiedNo = (
+    unifiedNo: string | number | undefined,
+    allClasses: Class[]
+  ): Class | null => {
+    if (!unifiedNo) return null;
+    const num = parseInt(String(unifiedNo).replace(/\D/g, ''), 10);
+    if (isNaN(num) || num <= 0) return null;
+    const sorted = getSortedClassesForUnifiedNumbers(allClasses);
+    const targetIdx = Math.floor((num - 1) / 30);
+    if (targetIdx >= 0 && targetIdx < sorted.length) {
+      return sorted[targetIdx];
+    }
+    return null;
+  };
+
+  // Ensures classes exist up to the required unified number range (e.g. up to index 7 for numbers 211-240)
+  const ensureClassesForUnifiedNumbers = (
+    allClasses: Class[],
+    targetNumbers: (number | string)[]
+  ): { updatedClasses: Class[]; didChange: boolean } => {
+    let currentList = [...allClasses];
+    let didChange = false;
+
+    const validNums = targetNumbers
+      .map(n => parseInt(String(n).replace(/\D/g, ''), 10))
+      .filter(n => !isNaN(n) && n > 0);
+
+    const maxNum = validNums.length > 0 ? Math.max(...validNums) : 0;
+    const maxIdx = maxNum > 0 ? Math.floor((maxNum - 1) / 30) : -1;
+
+    if (maxIdx >= 0) {
+      // If maxIdx >= 6, ensure morning classes 0..5 exist first
+      if (maxIdx >= 6) {
+        const morningGrades = ['الأول', 'الثاني', 'الثالث', 'الرابع', 'الخامس', 'السادس'];
+        for (let i = 0; i < 6; i++) {
+          const s = getSortedClassesForUnifiedNumbers(currentList);
+          const morningCount = s.filter(c => c.shift !== 'evening').length;
+          if (morningCount <= i) {
+            const g = morningGrades[i] || `الصف ${i + 1}`;
+            currentList.push({
+              id: `class-auto-m-${i + 1}`,
+              name: `الصف ${g}`,
+              grade: g,
+              room: `شعبة أ`,
+              teacherId: '',
+              shift: 'morning'
+            });
+            didChange = true;
+          }
+        }
+      }
+
+      // Now ensure evening classes exist up to maxIdx
+      const eveningGrades = ['الأول', 'الثاني', 'الثالث', 'الرابع', 'الخامس', 'السادس', 'السابع', 'الثامن', 'التاسع'];
+      for (let i = 6; i <= maxIdx; i++) {
+        const s = getSortedClassesForUnifiedNumbers(currentList);
+        if (s.length <= i) {
+          const gradeIdx = (i - 6) % eveningGrades.length;
+          const g = eveningGrades[gradeIdx] || `الصف ${gradeIdx + 1}`;
+          currentList.push({
+            id: `class-auto-e-${i - 5}`,
+            name: `الصف ${g} (الفوج المسائي)`,
+            grade: g,
+            room: `شعبة أ (مسائي)`,
+            teacherId: '',
+            shift: 'evening'
+          });
+          didChange = true;
+        }
+      }
+    }
+
+    return { updatedClasses: currentList, didChange };
   };
 
   const getNextUnifiedNoForClass = (
@@ -1705,9 +1810,10 @@ ${directivesFormatted}
     classIdentifier: string,
     allClasses: Class[],
     currentStudents: Student[] = [],
-    excludeStudentId?: string
+    excludeStudentId?: string,
+    preferredShift?: 'morning' | 'evening'
   ): { isValid: boolean; start: number; end: number; message?: string; className: string } => {
-    const range = getClassUnifiedRange(classIdentifier, allClasses);
+    const range = getClassUnifiedRange(classIdentifier, allClasses, preferredShift);
     const className = range.classObj ? range.classObj.name : 'الصف المحدد';
 
     if (!unifiedNo || String(unifiedNo).trim() === '') {
@@ -1732,12 +1838,17 @@ ${directivesFormatted}
     }
 
     if (num < range.start || num > range.end) {
+      // Check if this unified number belongs to another class (e.g. evening class)
+      const allocatedClass = findClassByAllocatedUnifiedNo(num, allClasses);
+      const allocatedNote = allocatedClass
+        ? ` (ملاحظة: هذا الرقم مخصص لـ "${allocatedClass.name}" [الفوج: ${allocatedClass.shift === 'evening' ? 'المسائي' : 'الصباحي'}])`
+        : '';
       return {
         isValid: false,
         start: range.start,
         end: range.end,
         className,
-        message: `الرقم الموحد (${num}) غير مخصص لهذا الصف! الأرقام المخصصة لـ (${className}) هي من ${range.start} إلى ${range.end} فقط (30 رقماً ابتداءً من الصف الأول صباحي).`
+        message: `الرقم الموحد (${num}) غير مخصص لهذا الصف! الأرقام المخصصة لـ (${className}) هي من ${range.start} إلى ${range.end} فقط (30 رقماً).${allocatedNote}`
       };
     }
 
@@ -2114,13 +2225,16 @@ ${directivesFormatted}
       if (!selectedClassId || selectedClassId === 'auto') {
         if (regClassFilter !== 'all') {
           selectedClassId = regClassFilter;
+        } else if (activeCohort === 'evening') {
+          const eveningCls = sortedClasses.find(c => c.shift === 'evening');
+          selectedClassId = eveningCls ? eveningCls.id : sortedClasses[0].id;
         } else {
           selectedClassId = sortedClasses[0].id;
         }
       }
 
-      const targetCls = sortedClasses.find(c => c.id === selectedClassId || c.name === selectedClassId) || sortedClasses[0];
-      const range = getClassUnifiedRange(targetCls.id, classes);
+      const targetCls = sortedClasses.find(c => c.id === selectedClassId || c.name === selectedClassId) || (activeCohort === 'evening' ? (sortedClasses.find(c => c.shift === 'evening') || sortedClasses[0]) : sortedClasses[0]);
+      const range = getClassUnifiedRange(targetCls.id, classes, targetCls.shift);
 
       const headers = [
         "الرقم التسلسلي",
@@ -2300,27 +2414,83 @@ ${directivesFormatted}
       const address = getCellVal(row, ['العنوان التفصيلي', 'العنوان', 'السكن', 'address']);
       const classNameRaw = getCellVal(row, ['الصف الحالي', 'الصف الدراسي', 'الصف', 'الشعبة', 'المرحلة', 'class', 'grade']);
       const shiftRaw = getCellVal(row, ['الفوج', 'الدوام', 'الفترة', 'shift', 'period']).toLowerCase();
-      const shift: 'morning' | 'evening' = (shiftRaw.includes('مساء') || shiftRaw.includes('مسائي') || shiftRaw.includes('evening')) ? 'evening' : 'morning';
-      const previousSchool = getCellVal(row, ['المدرسة السابقة', 'مدرسة سابقة', 'previous school']);
-      const transportation = getCellVal(row, ['خدمة المواصلات', 'المواصلات', 'النقل', 'الباص', 'transportation', 'bus']) || 'حافلة المدرسة';
-      const booksStatus = getCellVal(row, ['استلام الكتب المدرسية', 'استلام الكتب', 'الكتب', 'books']) || 'تم التسليم';
-      const uniformStatus = getCellVal(row, ['استلام اللباس المدرسي', 'استلام اللباس', 'اللباس', 'الزي', 'uniform']) || 'تم التسليم';
-      const parentName = getCellVal(row, ['اسم ولي الأمر', 'ولي الأمر', 'الولي', 'guardian name', 'guardian', 'parent']) || (fatherName ? `${fatherName} ${grandfatherName || ''}`.trim() : `ولي أمر ${name}`);
-      const guardianRelation = getCellVal(row, ['صلة القرابة', 'القرابة', 'relation']) || 'أب';
-      const guardianNationalId = getCellVal(row, ['الرقم الوطني لولي الأمر', 'رقم ولي الأمر الوطني', 'هوية الولي', 'guardian id']);
-      const parentPhone = getCellVal(row, ['رقم هاتف ولي الأمر (واتساب)', 'رقم هاتف ولي الأمر', 'هاتف ولي الأمر', 'واتساب ولي الأمر', 'واتساب', 'رقم الواتساب', 'هاتف', 'جوال', 'phone', 'whatsapp', 'mobile']);
-      const parentBackupPhone = getCellVal(row, ['رقم هاتف إضافي / طوارئ', 'رقم هاتف إضافي', 'هاتف إضافي', 'طوارئ', 'هاتف الطوارئ', 'emergency phone', 'emergency', 'backup phone']);
+      let shift: 'morning' | 'evening' = 'morning';
+      if (shiftRaw.includes('مساء') || shiftRaw.includes('مسائي') || shiftRaw.includes('evening')) {
+        shift = 'evening';
+      } else if (unifiedNo) {
+        const uNum = parseInt(String(unifiedNo).replace(/\D/g, ''), 10);
+        if (!isNaN(uNum) && uNum > 180) {
+          shift = 'evening'; // Unified numbers > 180 belong to the evening shift by default
+        } else if (activeCohort === 'evening') {
+          shift = 'evening';
+        }
+      } else if (activeCohort === 'evening') {
+        shift = 'evening';
+      } else if (regExcelDefaultClassId && regExcelDefaultClassId !== 'auto') {
+        const defCls = classes.find(c => c.id === regExcelDefaultClassId);
+        if (defCls?.shift === 'evening') {
+          shift = 'evening';
+        }
+      }
 
-      // Flexible Class Matching
-      let matchedClass = classes.find(c => 
-        classNameRaw && (
-          c.name.trim().toLowerCase() === classNameRaw.toLowerCase() ||
-          c.name.includes(classNameRaw) ||
-          classNameRaw.includes(c.name) ||
-          c.grade === classNameRaw ||
-          c.id === classNameRaw
-        )
-      );
+      const previousSchool = getCellVal(row, ['المدرسة السابقة', 'مدرسة سابقة', 'previous school', 'previous_school']) || '';
+      const transportation = getCellVal(row, ['خدمة النقل المدرسي', 'المواصلات', 'النقل', 'الباص', 'transportation']) || 'حافلة المدرسة';
+      const booksStatus = getCellVal(row, ['استلام الكتب المدرسية', 'الكتب', 'books']) || 'تم التسليم';
+      const uniformStatus = getCellVal(row, ['الزي المدرسي الموحد', 'الزي المدرسي', 'الزي', 'uniform']) || 'تم التسليم';
+      const parentName = getCellVal(row, ['اسم ولي الأمر الرباعي', 'اسم ولي الأمر', 'ولي الأمر', 'الولي', 'guardian', 'parent']) || (fatherName ? `${fatherName} ${grandfatherName || ''}`.trim() : '');
+      const guardianRelation = getCellVal(row, ['صلة القرابة', 'الصلة', 'relation']) || 'أب';
+      const guardianNationalId = getCellVal(row, ['الرقم الوطني لولي الأمر', 'هوية ولي الأمر', 'رقم هوية الولي', 'guardian nid']) || '';
+      const parentPhone = getCellVal(row, ['رقم هاتف ولي الأمر (واتساب)', 'رقم هاتف ولي الأمر', 'هاتف ولي الأمر', 'جوال ولي الأمر', 'هاتف', 'جوال', 'phone', 'mobile', 'whatsapp']);
+      const parentBackupPhone = getCellVal(row, ['هاتف احتياطي إضافي', 'هاتف احتياطي', 'جوال احتياطي', 'backup phone']) || '';
+
+      // 1. Check if unified number directly maps to an allocated class in the school
+      let matchedClass: Class | null = null;
+      if (unifiedNo) {
+        matchedClass = findClassByAllocatedUnifiedNo(unifiedNo, classes);
+      }
+
+      // 2. Flexible Class Matching respecting shift and class name
+      if (!matchedClass && classNameRaw) {
+        // Try within the matching shift first
+        matchedClass = classes.find(c => 
+          (c.shift === shift || (!c.shift && shift === 'morning')) &&
+          (c.name.trim().toLowerCase() === classNameRaw.toLowerCase() ||
+           c.name.includes(classNameRaw) ||
+           classNameRaw.includes(c.name) ||
+           c.grade === classNameRaw ||
+           c.id === classNameRaw)
+        ) || null;
+
+        // If not found in this shift and shift is evening, try any evening class with similar grade
+        if (!matchedClass && shift === 'evening') {
+          matchedClass = classes.find(c =>
+            c.shift === 'evening' && (
+              c.name.includes(classNameRaw) ||
+              classNameRaw.includes(c.name) ||
+              c.grade === classNameRaw
+            )
+          ) || null;
+        }
+
+        // Fallback: any class matching classNameRaw
+        if (!matchedClass) {
+          matchedClass = classes.find(c => 
+            c.name.trim().toLowerCase() === classNameRaw.toLowerCase() ||
+            c.name.includes(classNameRaw) ||
+            classNameRaw.includes(c.name) ||
+            c.grade === classNameRaw ||
+            c.id === classNameRaw
+          ) || null;
+        }
+      }
+
+      if (!matchedClass && regExcelDefaultClassId && regExcelDefaultClassId !== 'auto') {
+        matchedClass = classes.find(c => c.id === regExcelDefaultClassId) || null;
+      }
+
+      if (matchedClass?.shift) {
+        shift = matchedClass.shift;
+      }
 
       parsed.push({
         serialNo,
@@ -2341,7 +2511,7 @@ ${directivesFormatted}
         address,
         classNameRaw,
         matchedClassId: matchedClass?.id || '',
-        matchedClassName: matchedClass?.name || classNameRaw || '',
+        matchedClassName: matchedClass ? `${matchedClass.name} (${matchedClass.shift === 'evening' ? 'مسائي' : 'صباحي'})` : (classNameRaw || ''),
         shift,
         previousSchool,
         transportation,
@@ -2410,22 +2580,59 @@ ${directivesFormatted}
       const updatedStudents = [...students];
       const updatedParents = [...parents];
 
+      let currentClassesList = [...classes];
+      const allParsedUnifiedNos = regExcelParsedRows.map(r => r.unifiedNo).filter(Boolean);
+      const classesEnsured = ensureClassesForUnifiedNumbers(currentClassesList, allParsedUnifiedNos);
+      if (classesEnsured.didChange) {
+        currentClassesList = classesEnsured.updatedClasses;
+        setClasses(currentClassesList);
+        localStorage.setItem('school_classes', JSON.stringify(currentClassesList));
+        window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_classes', value: JSON.stringify(currentClassesList) } }));
+      }
+
       regExcelParsedRows.forEach((row) => {
         const studentName = String(row.name || '').trim();
         if (!studentName) return;
 
         let finalClassId = row.matchedClassId;
+        let targetUnifiedNo = row.unifiedNo ? String(row.unifiedNo).trim() : '';
+
+        // If row has unified number, match it directly to the pre-allocated class
+        if (targetUnifiedNo) {
+          const uNum = parseInt(targetUnifiedNo.replace(/\D/g, ''), 10);
+          if (!isNaN(uNum) && uNum > 0) {
+            const allocatedClass = findClassByAllocatedUnifiedNo(uNum, currentClassesList);
+            if (allocatedClass) {
+              finalClassId = allocatedClass.id;
+              row.shift = allocatedClass.shift || (uNum > 180 ? 'evening' : 'morning');
+            }
+          }
+        }
+
         if (!finalClassId || finalClassId === 'auto') {
           if (regExcelDefaultClassId && regExcelDefaultClassId !== 'auto') {
             finalClassId = regExcelDefaultClassId;
           } else {
-            finalClassId = classes[0]?.id || 'class-default';
+            const shiftTarget = row.shift === 'evening' ? 'evening' : 'morning';
+            const clsForShift = currentClassesList.find(c => c.shift === shiftTarget);
+            finalClassId = clsForShift?.id || currentClassesList[0]?.id || 'class-default';
           }
         }
 
-        const currentClass = classes.find(c => c.id === finalClassId);
+        // Ensure evening shift students map to an evening class
+        if (row.shift === 'evening') {
+          const curr = currentClassesList.find(c => c.id === finalClassId);
+          if (curr && curr.shift !== 'evening') {
+            const eveningMatch = currentClassesList.find(c => c.shift === 'evening' && (c.grade === curr.grade || c.name.includes(curr.grade || '')));
+            if (eveningMatch) {
+              finalClassId = eveningMatch.id;
+            }
+          }
+        }
+
+        const currentClass = currentClassesList.find(c => c.id === finalClassId);
         const classNameText = currentClass ? currentClass.name : 'الصف المختار';
-        const classRange = getClassUnifiedRange(finalClassId, classes);
+        const classRange = getClassUnifiedRange(finalClassId, currentClassesList, row.shift);
 
         const parentName = row.parentName || `ولي أمر ${studentName}`;
         const parentPhone = row.parentPhone ? String(row.parentPhone).trim() : '';
@@ -2440,26 +2647,26 @@ ${directivesFormatted}
         });
 
         // Strictly validate or allocate Unified Number within the 30-number range of finalClassId
-        let targetUnifiedNo = row.unifiedNo ? String(row.unifiedNo).trim() : '';
         if (targetUnifiedNo) {
           const valRes = isUnifiedNoValidForClass(
             targetUnifiedNo,
             finalClassId,
-            classes,
+            currentClassesList,
             updatedStudents,
-            existingStudentIndex !== -1 ? updatedStudents[existingStudentIndex].id : undefined
+            existingStudentIndex !== -1 ? updatedStudents[existingStudentIndex].id : undefined,
+            row.shift
           );
           if (!valRes.isValid) {
             rejectedRows.push({
               name: studentName,
               class: classNameText,
               unifiedNo: targetUnifiedNo,
-              reason: valRes.message
+              reason: valRes.message || 'خارج النطاق المخصص'
             });
             return; // Reject student outside class allocation
           }
         } else {
-          const nextForCls = getNextUnifiedNoForClass(finalClassId, classes, updatedStudents);
+          const nextForCls = getNextUnifiedNoForClass(finalClassId, currentClassesList, updatedStudents);
           if (!nextForCls.nextNo) {
             rejectedRows.push({
               name: studentName,
@@ -2495,7 +2702,7 @@ ${directivesFormatted}
               residencePlace: row.residencePlace || current.residencePlace,
               address: row.address || current.address,
               classId: finalClassId,
-              shift: row.shift || current.shift,
+              shift: row.shift || currentClass?.shift || current.shift,
               previousSchool: row.previousSchool || current.previousSchool,
               transportation: row.transportation || current.transportation,
               booksStatus: row.booksStatus || current.booksStatus,
@@ -2570,7 +2777,7 @@ ${directivesFormatted}
           motherMaidenName: row.motherMaidenName,
           residencePlace: row.residencePlace,
           address: row.address,
-          shift: row.shift,
+          shift: row.shift || currentClass?.shift || (activeCohort === 'evening' ? 'evening' : 'morning'),
           previousSchool: row.previousSchool,
           transportation: row.transportation,
           booksStatus: row.booksStatus,
@@ -2625,7 +2832,13 @@ ${directivesFormatted}
   };
 
   const handleAutoFillDemoStudent = () => {
-    const targetClass = classes.length > 0 ? classes[0] : null;
+    let targetClass = classes.length > 0 ? classes[0] : null;
+    if (activeCohort === 'evening' || regStudent.shift === 'evening') {
+      const eveningCls = classes.find(c => c.shift === 'evening');
+      if (eveningCls) {
+        targetClass = eveningCls;
+      }
+    }
     const targetClassId = targetClass ? targetClass.id : '';
     setRegStudent({
       serialNo: String(students.length + 11),
@@ -2664,7 +2877,15 @@ ${directivesFormatted}
   };
 
   const handleClearRegForm = (classIdOverride?: string) => {
-    const targetClassId = classIdOverride || (classes.length > 0 ? classes[0].id : '');
+    let targetClassId = classIdOverride;
+    if (!targetClassId) {
+      if (activeCohort === 'evening') {
+        const eveningCls = classes.find(c => c.shift === 'evening');
+        targetClassId = eveningCls ? eveningCls.id : (classes.length > 0 ? classes[0].id : '');
+      } else {
+        targetClassId = classes.length > 0 ? classes[0].id : '';
+      }
+    }
     const foundCls = classes.find(c => c.id === targetClassId);
     setRegStudent({
       serialNo: String(students.length + 1),
@@ -2864,13 +3085,57 @@ ${directivesFormatted}
 
     const chosenShift = regStudent.shift || (activeCohort === 'evening' ? 'evening' : 'morning');
 
+    let currentClasses = [...classes];
+
+    // If unifiedNo is provided, check if it matches a pre-allocated class
+    if (regStudent.unifiedNo) {
+      const uNum = parseInt(regStudent.unifiedNo.replace(/\D/g, ''), 10);
+      if (!isNaN(uNum) && uNum > 0) {
+        const ensured = ensureClassesForUnifiedNumbers(currentClasses, [uNum]);
+        if (ensured.didChange) {
+          currentClasses = ensured.updatedClasses;
+          setClasses(currentClasses);
+          localStorage.setItem('school_classes', JSON.stringify(currentClasses));
+        }
+        const allocated = findClassByAllocatedUnifiedNo(uNum, currentClasses);
+        if (allocated) {
+          finalClassId = allocated.id;
+          finalClassName = allocated.name;
+        }
+      }
+    }
+
+    // If chosenShift is evening, ensure finalClassId belongs to an evening class!
+    if (chosenShift === 'evening') {
+      const curr = currentClasses.find(c => c.id === finalClassId);
+      if (curr && curr.shift !== 'evening') {
+        let eveningCls = currentClasses.find(c => c.shift === 'evening' && (c.grade === curr.grade || c.name.includes(curr.grade || '')));
+        if (!eveningCls) {
+          const ensured = ensureClassesForUnifiedNumbers(currentClasses, [181, 211, 241]);
+          if (ensured.didChange) {
+            currentClasses = ensured.updatedClasses;
+            setClasses(currentClasses);
+            localStorage.setItem('school_classes', JSON.stringify(currentClasses));
+          }
+          eveningCls = currentClasses.find(c => c.shift === 'evening' && (c.grade === curr.grade || c.name.includes(curr.grade || ''))) ||
+                       currentClasses.find(c => c.shift === 'evening');
+        }
+        if (eveningCls) {
+          finalClassId = eveningCls.id;
+          finalClassName = eveningCls.name;
+        }
+      }
+    }
+
     // Strict validation: Unified Number must be within the 30-number range allocated for this class
     const unifiedToValidate = regStudent.unifiedNo ? regStudent.unifiedNo.trim() : getNextUnifiedNo(finalClassId, students);
     const unifiedValidation = isUnifiedNoValidForClass(
       unifiedToValidate,
       finalClassId,
-      classes,
-      students
+      currentClasses,
+      students,
+      undefined,
+      chosenShift
     );
 
     if (!unifiedValidation.isValid) {
@@ -6571,9 +6836,30 @@ ${directivesFormatted}
 
                       {/* 2. الرقم الموحد */}
                       {(() => {
-                        const targetClsId = regStudent.classId || (classes.length > 0 ? classes[0].id : '');
-                        const classRange = getClassUnifiedRange(targetClsId, classes);
-                        const validation = isUnifiedNoValidForClass(regStudent.unifiedNo, targetClsId, classes, students);
+                        let targetClsId = regStudent.classId;
+                        if (!targetClsId) {
+                          if (regStudent.shift === 'evening' || activeCohort === 'evening') {
+                            const eveningCls = classes.find(c => c.shift === 'evening');
+                            targetClsId = eveningCls ? eveningCls.id : '';
+                          }
+                          if (!targetClsId && classes.length > 0) {
+                            targetClsId = classes[0].id;
+                          }
+                        }
+
+                        // Check if unifiedNo directly resolves to an allocated class
+                        if (regStudent.unifiedNo) {
+                          const uNum = parseInt(regStudent.unifiedNo.replace(/\D/g, ''), 10);
+                          if (!isNaN(uNum) && uNum > 0) {
+                            const allocated = findClassByAllocatedUnifiedNo(uNum, classes);
+                            if (allocated && (allocated.shift === regStudent.shift || !targetClsId)) {
+                              targetClsId = allocated.id;
+                            }
+                          }
+                        }
+
+                        const classRange = getClassUnifiedRange(targetClsId, classes, regStudent.shift);
+                        const validation = isUnifiedNoValidForClass(regStudent.unifiedNo, targetClsId, classes, students, undefined, regStudent.shift);
                         return (
                           <div>
                             <label className="block text-xs font-bold text-emerald-900 mb-1.5 flex items-center justify-between">
@@ -6601,7 +6887,7 @@ ${directivesFormatted}
                               validation.isValid ? 'text-emerald-700' : 'text-rose-600'
                             }`}>
                               {validation.isValid
-                                ? `✅ مخصص للصف المحدد (${classRange.start} إلى ${classRange.end})`
+                                ? `✅ مخصص لـ (${classRange.label}): من ${classRange.start} إلى ${classRange.end}`
                                 : `⚠️ ${validation.message}`}
                             </p>
                           </div>
@@ -6888,18 +7174,28 @@ ${directivesFormatted}
                           className="w-full text-xs font-bold border border-slate-300 px-3.5 py-2.5 rounded-xl bg-white focus:border-emerald-500 focus:outline-none cursor-pointer text-slate-800 shadow-2xs"
                         >
                           <option value="">-- اختر الصف الحالي --</option>
-                          {classes.length > 0 ? (
-                            classes.map(c => {
-                              const r = getClassUnifiedRange(c.id, classes);
+                          {classes.some(c => c.shift === 'evening') && (
+                            <optgroup label="🌙 صفوف الفوج المسائي (الأرقام المخصصة 181 فما فوق)">
+                              {classes.filter(c => c.shift === 'evening').map(c => {
+                                const r = getClassUnifiedRange(c.id, classes, 'evening');
+                                return (
+                                  <option key={c.id} value={c.id}>
+                                    {c.name} [الأرقام: {r.start} إلى {r.end}]
+                                  </option>
+                                );
+                              })}
+                            </optgroup>
+                          )}
+                          <optgroup label="☀️ صفوف الفوج الصباحي (الأرقام المخصصة 1 إلى 180)">
+                            {classes.filter(c => c.shift !== 'evening').map(c => {
+                              const r = getClassUnifiedRange(c.id, classes, 'morning');
                               return (
                                 <option key={c.id} value={c.id}>
-                                  {c.name} {c.shift === 'evening' ? '(مسائي)' : '(صباحي)'} - الأرقام [{r.start} إلى {r.end}]
+                                  {c.name} [الأرقام: {r.start} إلى {r.end}]
                                 </option>
                               );
-                            })
-                          ) : (
-                            <option value="class-1">الصف الأول الابتدائي (افتراضي)</option>
-                          )}
+                            })}
+                          </optgroup>
                         </select>
                       </div>
 
@@ -6911,7 +7207,25 @@ ${directivesFormatted}
                         <div className="grid grid-cols-2 gap-2">
                           <button
                             type="button"
-                            onClick={() => setRegStudent(prev => ({ ...prev, shift: 'morning' }))}
+                            onClick={() => {
+                              const currentCls = classes.find(c => c.id === regStudent.classId);
+                              let morningCls: Class | undefined;
+                              if (currentCls) {
+                                morningCls = classes.find(c => c.shift !== 'evening' && (c.grade === currentCls.grade || c.name.includes(currentCls.grade || '')));
+                              }
+                              if (!morningCls) {
+                                morningCls = classes.find(c => c.shift !== 'evening');
+                              }
+                              const finalId = morningCls ? morningCls.id : regStudent.classId;
+                              const nextUni = morningCls ? getNextUnifiedNo(morningCls.id, students) : regStudent.unifiedNo;
+                              setRegStudent(prev => ({
+                                ...prev,
+                                shift: 'morning',
+                                classId: finalId,
+                                customClassName: morningCls ? morningCls.name : prev.customClassName,
+                                unifiedNo: nextUni
+                              }));
+                            }}
                             className={`py-2 px-3 rounded-xl text-xs font-black transition cursor-pointer border flex items-center justify-center gap-1.5 ${
                               regStudent.shift === 'morning'
                                 ? 'bg-amber-400 text-slate-950 border-amber-500 ring-2 ring-amber-300'
@@ -6923,7 +7237,36 @@ ${directivesFormatted}
                           </button>
                           <button
                             type="button"
-                            onClick={() => setRegStudent(prev => ({ ...prev, shift: 'evening' }))}
+                            onClick={() => {
+                              let workingClasses = [...classes];
+                              const currentCls = workingClasses.find(c => c.id === regStudent.classId);
+                              let eveningCls: Class | undefined;
+                              if (currentCls) {
+                                eveningCls = workingClasses.find(c => c.shift === 'evening' && (c.grade === currentCls.grade || c.name.includes(currentCls.grade || '')));
+                              }
+                              if (!eveningCls) {
+                                eveningCls = workingClasses.find(c => c.shift === 'evening');
+                              }
+                              if (!eveningCls) {
+                                const ensured = ensureClassesForUnifiedNumbers(workingClasses, [181, 211, 241]);
+                                if (ensured.didChange) {
+                                  workingClasses = ensured.updatedClasses;
+                                  setClasses(workingClasses);
+                                  localStorage.setItem('school_classes', JSON.stringify(workingClasses));
+                                  window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_classes', value: JSON.stringify(workingClasses) } }));
+                                }
+                                eveningCls = workingClasses.find(c => c.shift === 'evening');
+                              }
+                              const finalId = eveningCls ? eveningCls.id : regStudent.classId;
+                              const nextUni = eveningCls ? getNextUnifiedNo(eveningCls.id, students) : regStudent.unifiedNo;
+                              setRegStudent(prev => ({
+                                ...prev,
+                                shift: 'evening',
+                                classId: finalId,
+                                customClassName: eveningCls ? eveningCls.name : prev.customClassName,
+                                unifiedNo: nextUni
+                              }));
+                            }}
                             className={`py-2 px-3 rounded-xl text-xs font-black transition cursor-pointer border flex items-center justify-center gap-1.5 ${
                               regStudent.shift === 'evening'
                                 ? 'bg-purple-700 text-white border-purple-800 ring-2 ring-purple-400'
