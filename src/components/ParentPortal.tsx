@@ -33,7 +33,9 @@ import {
   Download,
   ExternalLink,
   Sparkles,
-  Building2
+  Building2,
+  ArrowLeftRight,
+  Hash
 } from 'lucide-react';
 import { Parent, Student, Attendance, Grade, Announcement, Message, AbsenceExcuse, Teacher, Class } from '../types';
 import { getStoredWelcomeMessages, WelcomeMessagesConfig } from '../lib/welcomeMessages';
@@ -55,6 +57,52 @@ interface ParentPortalProps {
   setMessages?: React.Dispatch<React.SetStateAction<Message[]>>;
 }
 
+// Helper to normalize arabic and latin digits and extract numbers
+export const normalizeNumberDigits = (str: string): string => {
+  return str
+    .replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d).toString())
+    .replace(/[^\d]/g, '')
+    .trim();
+};
+
+// Helper to find student strictly by Unified Number (or rollNo/ID)
+export const findStudentByUnifiedInput = (input: string, list: Student[]): Student | undefined => {
+  const rawClean = input.trim();
+  if (!rawClean) return undefined;
+
+  const normalizedDigits = normalizeNumberDigits(rawClean);
+  const numValue = normalizedDigits ? parseInt(normalizedDigits, 10) : NaN;
+
+  // 1. Try unifiedNo exact string or numeric match
+  let match = list.find(s => {
+    if (!s.unifiedNo) return false;
+    const sClean = s.unifiedNo.trim();
+    if (sClean === rawClean || (normalizedDigits && sClean === normalizedDigits)) return true;
+    const sNum = parseInt(normalizeNumberDigits(sClean), 10);
+    if (!isNaN(numValue) && !isNaN(sNum) && sNum === numValue) return true;
+    return false;
+  });
+  if (match) return match;
+
+  // 2. Try rollNo exact or numeric match
+  match = list.find(s => {
+    if (!s.rollNo) return false;
+    const sClean = s.rollNo.trim();
+    if (sClean === rawClean || (normalizedDigits && sClean === normalizedDigits)) return true;
+    const sNum = parseInt(normalizeNumberDigits(sClean), 10);
+    if (!isNaN(numValue) && !isNaN(sNum) && sNum === numValue) return true;
+    return false;
+  });
+  if (match) return match;
+
+  // 3. Fallback: match by student ID or nationalId
+  match = list.find(s => 
+    s.id.toLowerCase() === rawClean.toLowerCase() ||
+    (s.nationalId && s.nationalId.trim() === rawClean)
+  );
+  return match;
+};
+
 export default function ParentPortal({
   parents,
   students,
@@ -69,22 +117,28 @@ export default function ParentPortal({
   sendMessageFromParent,
   setMessages
 }: ParentPortalProps) {
-  // Unified Student ID Login System
+  // Unified Student Login System: Strictly single student by Unified Number
   const [loggedInStudentId, setLoggedInStudentId] = useState<string>(() => {
     return localStorage.getItem('parent_portal_student_id') || '';
   });
   const [studentRollInput, setStudentRollInput] = useState('');
   const [loginError, setLoginError] = useState('');
 
-  const activeStudentObj = students.find(s => s.id === loggedInStudentId || s.rollNo === loggedInStudentId);
+  // Active student strictly matching the logged in student ID or unified number
+  const activeStudentObj = students.find(s => 
+    s.id === loggedInStudentId || 
+    (s.unifiedNo && s.unifiedNo.trim() === loggedInStudentId.trim()) ||
+    (s.rollNo && s.rollNo.trim() === loggedInStudentId.trim())
+  );
   const selectedParentId = activeStudentObj ? activeStudentObj.parentId : '';
   const activeParent = parents.find(p => p.id === selectedParentId);
 
-  // Active child (from parent's children)
-  const children = students.filter(s => s.parentId === selectedParentId);
-  const [selectedChildId, setSelectedChildId] = useState<string>(() => {
-    return localStorage.getItem('parent_portal_student_id') || '';
-  });
+  // Single active student (strictly one child matching the unified number)
+  const activeChild = activeStudentObj;
+  const selectedChildId = activeStudentObj ? activeStudentObj.id : '';
+  const setSelectedChildId = (_id: string) => {
+    // Child switching is disabled - strictly single student by unified number
+  };
 
   const [schoolAppIcon, setSchoolAppIcon] = useState<string>(() => {
     return localStorage.getItem('school_app_icon') || '';
@@ -161,19 +215,6 @@ export default function ParentPortal({
     }
   }, [selectedParentId, selectedChildId]);
 
-  // Keep selected child in sync when loggedInStudentId changes
-  React.useEffect(() => {
-    if (loggedInStudentId) {
-      const found = students.find(s => s.id === loggedInStudentId);
-      if (found) {
-        setSelectedChildId(found.id);
-      }
-    } else {
-      setSelectedChildId('');
-    }
-  }, [loggedInStudentId]);
-
-  const activeChild = students.find(s => s.id === selectedChildId);
   const activeChildClass = classes.find(c => c.id === activeChild?.classId);
   const activeChildTeacher = 
     teachers.find(t => t.id === activeChildClass?.teacherId) ||
@@ -216,9 +257,9 @@ export default function ParentPortal({
       finalContent += `\n[مرفق_صورة: ${parentMsgImage}]`;
     }
 
-    const senderNameStr = activeParent?.name
-      ? `${activeParent.name} (ولي أمر ${activeChild?.name || 'الطالب'})`
-      : `ولي أمر الطالب ${activeChild?.name || ''}`;
+    const senderNameStr = activeChild?.name
+      ? `ولي أمر الطالب: ${activeChild.name} (الرقم الموحد: #${activeChild.unifiedNo || activeChild.rollNo || ''})`
+      : (activeParent?.name ? `ولي أمر (${activeParent.name})` : 'ولي أمر');
 
     // 1. Send to Director
     if (parentMsgTarget === 'director' || parentMsgTarget === 'both') {
@@ -260,12 +301,17 @@ export default function ParentPortal({
     if (students.length === 0) return;
 
     // Verify if currently loggedInStudentId actually exists in students list
-    const isCurrentValid = students.some(s => s.id === loggedInStudentId || s.rollNo === loggedInStudentId);
+    const isCurrentValid = students.some(s => 
+      s.id === loggedInStudentId || 
+      (s.unifiedNo && s.unifiedNo.trim() === loggedInStudentId.trim()) ||
+      (s.rollNo && s.rollNo.trim() === loggedInStudentId.trim())
+    );
 
     if (loggedInStudentId && !isCurrentValid) {
       // If logged in student ID is no longer valid, reset
       setLoggedInStudentId('');
-      setSelectedChildId('');
+      localStorage.removeItem('parent_portal_student_id');
+      localStorage.removeItem('parent_portal_unified_no');
       return;
     }
 
@@ -275,41 +321,33 @@ export default function ParentPortal({
       if (autoLogin === 'false') return;
 
       const savedStudentId = localStorage.getItem('parent_portal_student_id');
+      const savedUnifiedNo = localStorage.getItem('parent_portal_unified_no');
       const savedInput = localStorage.getItem('parent_portal_saved_login_input');
 
-      // 1. Try saved student ID directly
-      let targetStudent = students.find(s => s.id === savedStudentId || s.rollNo === savedStudentId);
+      let targetStudent: Student | undefined;
 
-      // 2. Try saved input (roll number or phone)
-      if (!targetStudent && savedInput) {
-        const cleanInput = savedInput.trim();
-        targetStudent = students.find(
-          s => s.rollNo === cleanInput || s.id.toLowerCase() === cleanInput.toLowerCase()
-        );
-        if (!targetStudent) {
-          const targetPhone = cleanInput.replace(/\s+/g, '');
-          const foundParent = parents.find(p => {
-            const pPhone = p.phone ? p.phone.replace(/\s+/g, '') : '';
-            return pPhone === targetPhone || (pPhone && targetPhone && (pPhone.endsWith(targetPhone) || targetPhone.endsWith(pPhone)));
-          });
-          if (foundParent) {
-            targetStudent = students.find(s => s.parentId === foundParent.id);
-          }
-        }
+      // 1. Try saved student ID directly
+      if (savedStudentId) {
+        targetStudent = students.find(s => s.id === savedStudentId);
       }
 
-      // 3. Direct access default: Auto-select first student only if auto_login is not explicitly set to false
-      if (!targetStudent && autoLogin !== 'false' && students[0]) {
-        targetStudent = students[0];
+      // 2. Try saved unified number
+      if (!targetStudent && savedUnifiedNo) {
+        targetStudent = findStudentByUnifiedInput(savedUnifiedNo, students);
+      }
+
+      // 3. Try saved input
+      if (!targetStudent && savedInput) {
+        targetStudent = findStudentByUnifiedInput(savedInput, students);
       }
 
       if (targetStudent) {
         setLoggedInStudentId(targetStudent.id);
-        setSelectedChildId(targetStudent.id);
         localStorage.setItem('parent_portal_student_id', targetStudent.id);
+        localStorage.setItem('parent_portal_unified_no', targetStudent.unifiedNo || targetStudent.rollNo || '');
       }
     }
-  }, [students, parents, loggedInStudentId]);
+  }, [students, loggedInStudentId]);
 
   // --- Web Audio Synthesized Chime (Professional Smartphone Ringtone) ---
   const playCustomNotificationSound = () => {
@@ -759,45 +797,32 @@ export default function ParentPortal({
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
     const cleanInput = studentRollInput.trim();
-    if (!cleanInput) return;
-
-    // 1. Try to find by student roll number or ID
-    let foundStudent = students.find(
-      s => s.rollNo === cleanInput || s.id.toLowerCase() === cleanInput.toLowerCase()
-    );
-
-    // 2. If not found, try to find by parent's phone number
-    if (!foundStudent) {
-      const targetPhone = cleanInput.replace(/\s+/g, '');
-      const foundParent = parents.find(p => {
-        const pPhone = p.phone ? p.phone.replace(/\s+/g, '') : '';
-        return pPhone === targetPhone || (pPhone && targetPhone && (pPhone.endsWith(targetPhone) || targetPhone.endsWith(pPhone)));
-      });
-
-      if (foundParent) {
-        // Find the first student belonging to this parent
-        foundStudent = students.find(s => s.parentId === foundParent.id);
-      }
+    if (!cleanInput) {
+      setLoginError('يرجى إدخال الرقم الموحد المخصص للطالب أولاً');
+      return;
     }
+
+    // Find student strictly by Unified Number
+    const foundStudent = findStudentByUnifiedInput(cleanInput, students);
 
     if (foundStudent) {
       setLoggedInStudentId(foundStudent.id);
       localStorage.setItem('parent_portal_student_id', foundStudent.id);
+      localStorage.setItem('parent_portal_unified_no', foundStudent.unifiedNo || foundStudent.rollNo || '');
       localStorage.setItem('parent_portal_saved_login_input', cleanInput);
       localStorage.setItem('parent_portal_auto_login', rememberMe ? 'true' : 'false');
-      setSelectedChildId(foundStudent.id);
       setLoginError('');
     } else {
-      setLoginError('رقم الدخول غير مسجل. يرجى إدخال رقم الطالب الموحد (مثال: 101) أو رقم هاتف ولي الأمر المسجل بدقة.');
+      setLoginError(`لم يتم العثور على طالب مسجل بالرقم الموحد (${cleanInput}). يرجى التحقق من الرقم الموحد الخاص بالطالب في المدرسة.`);
     }
   };
 
   const handleLogout = () => {
     setLoggedInStudentId('');
     localStorage.removeItem('parent_portal_student_id');
+    localStorage.removeItem('parent_portal_unified_no');
     localStorage.removeItem('parent_portal_saved_login_input');
-    localStorage.setItem('parent_portal_auto_login', 'false'); // Disable automatic login loop on manual logout
-    setSelectedChildId('');
+    localStorage.setItem('parent_portal_auto_login', 'false'); // Disable automatic login on manual logout
     setStudentRollInput('');
     setLoginError('');
   };
@@ -899,8 +924,9 @@ export default function ParentPortal({
   };
 
   const childBehaviorMessages = messages.filter(m => {
-    const isForParent = m.receiverId === selectedParentId || m.receiverRole === 'parent' || m.receiverId === 'parent';
-    const isForChild = !m.studentId || m.studentId === selectedChildId;
+    // Strictly scoped to this student: if studentId exists, must match selectedChildId
+    const isForChild = m.studentId ? m.studentId === selectedChildId : true;
+    const isForParent = m.receiverId === selectedParentId || m.receiverRole === 'parent' || m.receiverId === 'parent' || m.receiverId === selectedChildId;
     const isFromStaff = m.senderRole === 'teacher' || m.senderRole === 'director';
     const isBehavior = m.content.includes('سلوك') || 
                        m.content.includes('تنبيه سلوكي') || 
@@ -913,8 +939,7 @@ export default function ParentPortal({
   const unreadBehaviorCount = childBehaviorMessages.filter(m => !m.read).length;
 
   const unreadMessagesCount = messages.filter(m => 
-    (!m.studentId || m.studentId === selectedChildId) && 
-    (m.receiverId === selectedParentId || m.receiverId === 'parent' || m.receiverRole === 'parent') && 
+    (m.studentId ? m.studentId === selectedChildId : (m.receiverId === selectedChildId || m.receiverId === selectedParentId || m.receiverRole === 'parent')) && 
     !m.read &&
     isTeacherGradeMessage(m)
   ).length;
@@ -1886,34 +1911,43 @@ export default function ParentPortal({
     );
   };
 
-  if (!loggedInStudentId) {
+  if (!loggedInStudentId || !activeStudentObj) {
     return (
-      <div id="parent-login-screen" className="bg-slate-50 min-h-screen flex flex-col items-center justify-center p-4 space-y-4">
-        <div className="w-full max-w-md bg-white rounded-3xl border border-slate-200 shadow-xl p-6 space-y-6">
+      <div id="parent-login-screen" className="bg-slate-50 min-h-screen flex flex-col items-center justify-center p-4 space-y-4 text-right" style={{ direction: 'rtl' }}>
+        <div className="w-full max-w-md bg-white rounded-3xl border border-slate-200 shadow-xl p-6 sm:p-7 space-y-6">
           <div className="text-center space-y-2">
-            <div className="w-16 h-16 bg-indigo-600 rounded-2xl text-white shadow-md flex items-center justify-center mx-auto mb-4 overflow-hidden">
+            <div className="w-16 h-16 bg-gradient-to-tr from-indigo-600 to-indigo-700 rounded-2xl text-white shadow-md flex items-center justify-center mx-auto mb-3 overflow-hidden">
               {schoolAppIcon ? (
                 <img src={schoolAppIcon} alt="الشعار" className="w-full h-full object-cover" />
               ) : (
                 <User className="w-8 h-8" />
               )}
             </div>
-            <h2 className="text-xl font-bold text-slate-800">بوابة ولي الأمر الإلكترونية</h2>
-            <p className="text-slate-500 text-xs leading-relaxed">
-              الدخول المباشر إلى بوابة ولي الأمر لمتابعة الدرجات والغياب والرسائل المدرسية.
+            <span className="inline-block bg-indigo-50 text-indigo-700 text-[10px] font-bold px-3 py-1 rounded-full border border-indigo-100 mb-1">
+              🎓 بوابة ولي الأمر الرسمية
+            </span>
+            <h2 className="text-xl font-black text-slate-800">الدخول بالرقم الموحد للطالب</h2>
+            <p className="text-slate-500 text-xs leading-relaxed max-w-xs mx-auto">
+              أدخل الرقم الموحد المخصص للطالب لفتح ملفه الأكاديمي والمالي بمفرده دون أي تداخل مع طلاب آخرين.
             </p>
           </div>
 
           <form onSubmit={handleLogin} className="space-y-4">
             <div>
-              <label className="block text-xs font-bold text-slate-700 mb-2">أدخل رقم الطالب الموحد / رقم الهاتف</label>
-              <input
-                type="text"
-                value={studentRollInput}
-                onChange={e => setStudentRollInput(e.target.value)}
-                placeholder="أدخل الرقم التعريفي للطفل أو رقم الهاتف..."
-                className="w-full text-xs border border-slate-200 px-4 py-3 rounded-xl focus:outline-none focus:border-indigo-500 font-mono text-center font-bold bg-slate-50"
-              />
+              <label className="block text-xs font-bold text-slate-700 mb-2 flex items-center justify-between">
+                <span>الرقم الموحد المخصص للطالب:</span>
+                <span className="text-[10px] font-normal text-indigo-600">مثال: 181 أو 15</span>
+              </label>
+              <div className="relative">
+                <input
+                  type="text"
+                  value={studentRollInput}
+                  onChange={e => setStudentRollInput(e.target.value)}
+                  placeholder="أدخل الرقم الموحد للطالب هنا..."
+                  className="w-full text-sm border-2 border-indigo-100 focus:border-indigo-600 px-4 py-3 rounded-xl focus:outline-none font-mono text-center font-black bg-slate-50/80 transition"
+                  autoFocus
+                />
+              </div>
             </div>
 
             {/* Remember Me Checkbox */}
@@ -1926,27 +1960,27 @@ export default function ParentPortal({
                 className="w-4.5 h-4.5 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500 cursor-pointer"
               />
               <label htmlFor="remember-me-checkbox" className="text-xs font-bold text-slate-600 cursor-pointer select-none text-right">
-                حفظ الرقم وتفعيل الدخول التلقائي لاحقاً 🔐
+                حفظ الرقم الموحد للدخول التلقائي لهذا الطالب لاحقاً 🔐
               </label>
             </div>
 
             {loginError && (
-              <p className="text-rose-500 text-[11px] font-bold text-center bg-rose-50 p-2.5 rounded-lg border border-rose-100">
+              <p className="text-rose-600 text-xs font-bold text-center bg-rose-50 p-3 rounded-xl border border-rose-200 leading-relaxed">
                 ⚠️ {loginError}
               </p>
             )}
 
             <button
               type="submit"
-              className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-xl transition cursor-pointer text-xs shadow-sm flex items-center justify-center gap-2"
+              className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold py-3.5 rounded-xl transition cursor-pointer text-xs shadow-md shadow-indigo-100 flex items-center justify-center gap-2"
             >
-              <span>دخول النظام</span>
+              <span>فتح ملف الطالب بالرقم الموحد</span>
               <UserCheck className="w-4 h-4" />
             </button>
           </form>
 
-          <div className="border-t border-slate-100 pt-4 text-center">
-            <p className="text-[10px] text-slate-400">نظام المدرسة الدولية - مارع</p>
+          <div className="border-t border-slate-100 pt-3 text-center">
+            <p className="text-[10px] text-slate-400">المدرسة الدولية الخاصة - مدينة مارع</p>
           </div>
         </div>
       </div>
@@ -1970,7 +2004,7 @@ export default function ParentPortal({
               </div>
               <div className="text-right">
                 <div className="flex items-center gap-1.5">
-                  <h3 className="font-bold text-sm text-slate-100">{activeParent?.name}</h3>
+                  <h3 className="font-black text-sm text-slate-100">{activeChild?.name || 'ملف الطالب'}</h3>
                   <button
                     type="button"
                     onClick={() => setShowWelcomeModal(true)}
@@ -1980,7 +2014,9 @@ export default function ParentPortal({
                     <Sparkles className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
                   </button>
                 </div>
-                <span className="text-[10px] text-indigo-400 font-bold block">تطبيق ولي الأمر للهاتف</span>
+                <span className="text-[10px] text-indigo-400 font-extrabold block">
+                  الرقم الموحد: #{activeChild?.unifiedNo || activeChild?.rollNo || '---'}
+                </span>
               </div>
             </div>
 
@@ -1997,62 +2033,35 @@ export default function ParentPortal({
 
           {/* Collapsible Content Area on Mobile */}
           <div className={`${isMobileMenuOpen ? 'block' : 'hidden md:block'} space-y-4`}>
-            {/* Active Parent Info and Logout button */}
-            <div className="bg-slate-900/60 p-4 rounded-xl border border-slate-800/40 space-y-3">
-              <div className="text-right">
-                <label className="block text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-1">بيانات الحساب</label>
-                <div className="text-xs font-bold text-white">{activeParent?.name}</div>
-                <div className="text-[10px] text-slate-400 mt-0.5">{activeParent?.phone}</div>
+            {/* Single Student Card with Unified Number and Switch Student Button */}
+            <div className="bg-slate-900/80 p-4 rounded-2xl border border-slate-800 space-y-3 text-right">
+              <div>
+                <span className="inline-flex items-center gap-1 text-[9px] font-black px-2 py-0.5 rounded-md bg-indigo-500/20 text-indigo-300 border border-indigo-400/30 mb-1.5">
+                  <Hash className="w-3 h-3 text-indigo-400" />
+                  <span>الرقم الموحد: #{activeChild?.unifiedNo || activeChild?.rollNo || '---'}</span>
+                </span>
+                <h4 className="text-sm font-black text-white">{activeChild?.name || 'الطالب'}</h4>
+                <div className="text-[11px] text-slate-300 font-medium mt-1 flex flex-wrap items-center gap-1.5 justify-start">
+                  <span className="text-indigo-400 font-bold">{activeChildClass?.name || 'الصف'}</span>
+                  <span>•</span>
+                  <span className={activeChild?.shift === 'evening' ? 'text-purple-300 font-bold' : 'text-amber-300 font-bold'}>
+                    {activeChild?.shift === 'evening' ? 'فوج مسائي 🌙' : 'فوج صباحي ☀️'}
+                  </span>
+                </div>
+                {activeChild?.parentName && (
+                  <p className="text-[10px] text-slate-400 mt-1">ولي الأمر: {activeChild.parentName}</p>
+                )}
               </div>
 
               <button
                 type="button"
                 onClick={handleLogout}
-                className="w-full bg-rose-600 hover:bg-rose-700 text-white font-bold text-[10px] py-1.5 px-3 rounded-lg transition cursor-pointer flex items-center justify-center gap-1.5 shadow-xs"
+                className="w-full bg-slate-800 hover:bg-rose-900/80 hover:border-rose-700/80 border border-slate-700 text-slate-200 hover:text-white font-bold text-[10px] py-2 px-3 rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5 shadow-xs"
+                title="الخروج وإدخال رقم موحد لطالب آخر"
               >
-                <XCircle className="w-3.5 h-3.5" />
-                <span>تسجيل الخروج</span>
+                <ArrowLeftRight className="w-3.5 h-3.5 text-indigo-400" />
+                <span>تغيير الطالب (رقم موحد آخر)</span>
               </button>
-            </div>
-
-            {/* Children Selector Dropdown */}
-            <div className="space-y-2 bg-slate-900/60 p-3.5 rounded-2xl border border-slate-800/40">
-              <label htmlFor="child-selector" className="block text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-1 text-right flex items-center gap-1.5 justify-end">
-                <span>اختر الابن/الابنة للتصفح</span>
-                <UserCheck className="w-3.5 h-3.5 text-indigo-400" />
-              </label>
-              
-              <div className="relative">
-                <select
-                  id="child-selector"
-                  value={selectedChildId}
-                  onChange={(e) => {
-                    setSelectedChildId(e.target.value);
-                    setIsMobileMenuOpen(false);
-                  }}
-                  className="w-full bg-slate-950 text-white border border-slate-800 rounded-xl px-3 py-2.5 text-xs font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer text-right appearance-none block pr-3 pl-8"
-                  style={{ direction: 'rtl' }}
-                >
-                  {children.map(child => {
-                    const childClass = classes.find(c => c.id === child.classId);
-                    return (
-                      <option key={child.id} value={child.id} className="bg-slate-950 text-white font-bold text-xs py-2">
-                        {child.name} ({childClass?.name || 'بدون صف'}) - #{child.rollNo}
-                      </option>
-                    );
-                  })}
-                </select>
-                {/* Custom arrow for styling consistency */}
-                <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-slate-400">
-                  <svg className="fill-current h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">
-                    <path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z"/>
-                  </svg>
-                </div>
-              </div>
-              
-              <span className="block text-[9px] text-indigo-400 text-right font-semibold">
-                * مرتبطة بحساب ولي الأمر وحقوقه فقط
-              </span>
             </div>
 
             <nav className="space-y-1">
@@ -2191,62 +2200,74 @@ export default function ParentPortal({
 
       {/* Main content body */}
       <div className="flex-1 p-4 md:p-6 lg:p-8 overflow-y-auto min-h-screen w-full">
-        {/* Active Child Summary Header */}
+        {/* Active Child Summary Header - Dedicated to Single Student with Unified Number */}
         {activeChild ? (
           <div className="mb-6 bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col xl:flex-row items-stretch xl:items-center gap-4 justify-between">
             <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
-              <div className="w-12 h-12 rounded-xl bg-indigo-50 text-indigo-700 flex items-center justify-center font-black text-lg shrink-0">
+              <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-indigo-600 to-indigo-800 text-white flex items-center justify-center font-black text-xl shadow-sm shrink-0">
                 {activeChild?.name?.charAt(0) || 'ط'}
               </div>
-              <div>
-                <span className="text-[10px] text-slate-400 block font-medium">بيانات الطالب المحدد</span>
-                <h2 className="font-bold text-slate-800 text-base">{activeChild?.name || 'الطالب'}</h2>
-                <div className="flex gap-2 text-[11px] text-slate-500 mt-0.5">
-                  <span>الفصل: <strong className="text-indigo-600">{activeChildClass?.name || 'عام'}</strong></span>
-                  <span>•</span>
-                  <span>رقم القيد: <strong className="font-mono">#{activeChild?.rollNo || '---'}</strong></span>
+              <div className="text-right">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h2 className="font-extrabold text-slate-900 text-lg">{activeChild?.name || 'الطالب'}</h2>
+                  <span className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full border ${
+                    activeChild?.shift === 'evening'
+                      ? 'bg-purple-50 text-purple-700 border-purple-200'
+                      : 'bg-amber-50 text-amber-700 border-amber-200'
+                  }`}>
+                    {activeChild?.shift === 'evening' ? 'الفوج المسائي 🌙' : 'الفوج الصباحي ☀️'}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600 mt-1">
+                  <span>الصف: <strong className="text-indigo-700 font-bold">{activeChildClass?.name || 'عام'}</strong></span>
+                  <span className="text-slate-300">•</span>
+                  <span>رقم القيد: <strong className="font-mono text-slate-800">#{activeChild?.rollNo || '---'}</strong></span>
+                  {activeChild?.parentName && (
+                    <>
+                      <span className="text-slate-300">•</span>
+                      <span>ولي الأمر: <strong className="text-slate-800 font-medium">{activeChild.parentName}</strong></span>
+                    </>
+                  )}
                 </div>
               </div>
             </div>
 
-            {/* Dropdown Navigation for Children (linked strictly to this parent's kids) */}
-            <div className="flex flex-col sm:flex-row sm:items-center gap-3 bg-slate-50 border border-slate-200/60 p-3 rounded-2xl self-stretch xl:self-auto">
-              <span className="text-xs font-bold text-slate-700 text-right">👨‍👩‍👦 تصفح الأبناء:</span>
-              <div className="relative grow sm:grow-0">
-                <select
-                  value={selectedChildId}
-                  onChange={(e) => setSelectedChildId(e.target.value)}
-                  className="w-full sm:w-64 bg-white border border-slate-200 rounded-xl px-4 py-2 text-slate-800 text-xs font-black focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer text-right appearance-none pl-8 pr-3"
-                  style={{ direction: 'rtl' }}
-                >
-                  {children.map(child => {
-                    const childClass = classes.find(c => c.id === child.classId);
-                    return (
-                      <option key={child.id} value={child.id}>
-                        {child.name} ({childClass?.name || 'بدون صف'})
-                      </option>
-                    );
-                  })}
-                </select>
-                <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-slate-500">
-                  <svg className="fill-current h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">
-                    <path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z"/>
-                  </svg>
+            {/* Dedicated Unified Number Badge & Switch Button */}
+            <div className="flex flex-col sm:flex-row sm:items-center gap-3 self-stretch xl:self-auto">
+              <div className="bg-gradient-to-br from-indigo-50 to-slate-50 border-2 border-indigo-500/30 p-3 rounded-2xl flex items-center justify-between sm:justify-start gap-4 shadow-2xs">
+                <div className="text-right">
+                  <span className="text-[10px] text-indigo-600 font-extrabold block">الرقم الموحد المخصص:</span>
+                  <span className="text-base font-black text-indigo-950 font-mono tracking-wider">
+                    #{activeChild?.unifiedNo || activeChild?.rollNo || '---'}
+                  </span>
+                </div>
+                <div className="w-8 h-8 rounded-xl bg-indigo-600 text-white flex items-center justify-center font-mono font-bold text-xs shadow-2xs shrink-0">
+                  #{activeChild?.unifiedNo || activeChild?.rollNo}
                 </div>
               </div>
-            </div>
 
-            {activeChildTeacher && (
-              <div className="p-3 bg-indigo-50/40 rounded-xl border border-indigo-100 text-xs shrink-0">
-                <span className="text-indigo-500 block text-[10px] font-bold">المعلم المشرف ورائد الصف</span>
-                <span className="font-bold text-slate-700">{activeChildTeacher.name}</span>
-                <span className="text-[10px] text-slate-400 block mt-0.5">{activeChildTeacher.phone}</span>
-              </div>
-            )}
+              {activeChildTeacher && (
+                <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200/80 text-xs shrink-0 text-right">
+                  <span className="text-indigo-600 block text-[10px] font-bold">المعلم المشرف:</span>
+                  <span className="font-bold text-slate-800">{activeChildTeacher.name}</span>
+                  <span className="text-[10px] text-slate-500 block mt-0.5 font-mono">{activeChildTeacher.phone}</span>
+                </div>
+              )}
+
+              <button
+                type="button"
+                onClick={handleLogout}
+                className="bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 px-4 py-2.5 rounded-2xl text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer shadow-2xs shrink-0"
+                title="فتح ملف طالب آخر برقم موحد مختلف"
+              >
+                <ArrowLeftRight className="w-4 h-4 text-indigo-600" />
+                <span>تغيير الرقم الموحد</span>
+              </button>
+            </div>
           </div>
         ) : (
-          <div className="bg-amber-50 p-6 rounded-xl border border-amber-200 text-amber-800 text-sm text-center">
-            تنبيه: لا يوجد طلاب مسجلين لولي الأمر هذا حالياً. يرجى تسجيل الطلاب من بوابة المدير العام أولاً!
+          <div className="bg-amber-50 p-6 rounded-2xl border border-amber-200 text-amber-800 text-sm text-center">
+            يرجى إدخال الرقم الموحد للطالب للاطلاع على بياناته.
           </div>
         )}
 
@@ -3293,10 +3314,14 @@ export default function ParentPortal({
                   </div>
                   <div>
                     <span className="inline-block bg-amber-400/20 border border-amber-300/30 text-amber-300 text-[10px] font-bold px-2.5 py-0.5 rounded-full mb-1">
-                      بوابة ولي الأمر 👨‍👩‍👧‍👦
+                      بوابة ولي الأمر - متابعة الطالب 🎓
                     </span>
                     <h3 className="font-extrabold text-lg text-white">{welcomeMsgs.parentTitle}</h3>
-                    <p className="text-xs text-indigo-200 mt-0.5">{activeParent?.name || 'ولي الأمر الفاضل'}</p>
+                    <p className="text-xs text-indigo-200 mt-0.5">
+                      {activeChild?.name 
+                        ? `الطالب: ${activeChild.name} • الرقم الموحد: #${activeChild.unifiedNo || activeChild.rollNo}` 
+                        : (activeParent?.name || 'ولي الأمر الفاضل')}
+                    </p>
                   </div>
                 </div>
               </div>
@@ -3322,7 +3347,7 @@ export default function ParentPortal({
                     }}
                     className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl transition cursor-pointer shadow-md shadow-indigo-100 flex items-center justify-center gap-2"
                   >
-                    <span>متابعة بيانات الأبناء 🎓</span>
+                    <span>متابعة بيانات الطالب 🎓</span>
                   </button>
                 </div>
               </div>
