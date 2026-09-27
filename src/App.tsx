@@ -29,6 +29,7 @@ import {
 import DirectorPortal from './components/DirectorPortal';
 import TeacherPortal from './components/TeacherPortal';
 import ParentPortal from './components/ParentPortal';
+import PortalDesignerBadge from './components/PortalDesignerBadge';
 import { 
   Building, 
   Users, 
@@ -1189,18 +1190,21 @@ export default function App() {
       </main>
 
       {/* Unified Platform Footer */}
-      <footer className="bg-white border-t border-slate-200 py-5 px-6 md:px-12 flex flex-col md:flex-row justify-between items-center gap-4 text-xs text-slate-400 mt-12">
-        <div className="flex gap-6 items-center">
-          <div className="flex items-center gap-1">
+      <footer className="bg-white border-t border-slate-200 py-5 px-6 md:px-12 flex flex-col md:flex-row justify-between items-center gap-4 text-xs text-slate-400 mt-12" style={{ direction: 'rtl' }}>
+        <div className="flex flex-wrap gap-4 sm:gap-6 items-center">
+          <p className="text-slate-500 font-medium">المدرسة الدولية - حلب مدينة مارع &copy; {new Date().getFullYear()}</p>
+          <div className="hidden sm:flex items-center gap-1">
             <span className="text-slate-400 font-medium">تحديث البيانات:</span>
             <span className="text-slate-600 font-mono font-semibold">Real-time</span>
           </div>
-          <div className="flex items-center gap-1">
+          <div className="hidden sm:flex items-center gap-1">
             <span className="text-slate-400 font-medium">قاعدة البيانات:</span>
             <span className="text-slate-600 font-mono font-semibold">Cloud-Sync-v4</span>
           </div>
         </div>
-        <p className="text-slate-400 font-medium">المدرسة الدولية - حلب مدينة مارع &copy; {new Date().getFullYear()}</p>
+        <div className="w-full md:w-auto flex justify-start" style={{ direction: 'ltr' }}>
+          <PortalDesignerBadge variant="subtle" align="left" />
+        </div>
       </footer>
 
       {/* WhatsApp style floating toast notification */}

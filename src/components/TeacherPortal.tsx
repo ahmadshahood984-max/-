@@ -39,6 +39,7 @@ import {
 } from 'lucide-react';
 import { buildWhatsAppUrl, openWhatsAppDirectly, getWhatsAppSentRecords, recordWhatsAppSent, WhatsAppSentRecord } from '../lib/whatsapp';
 import { WhatsAppMessageCustomizerModal } from './WhatsAppMessageCustomizerModal';
+import { PortalDesignerBadge } from './PortalDesignerBadge';
 import { Teacher, Student, Class, Attendance, Grade, Parent, Message, Announcement } from '../types';
 import { getStoredWelcomeMessages, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { motion, AnimatePresence } from 'motion/react';
@@ -869,6 +870,8 @@ export default function TeacherPortal({
               (إذا لم تكن تملك رقم هاتف مسجل، يمكنك استخدام المعرف الافتراضي للمعلم الأول لتسجيل الدخول السريع: <strong className="font-mono bg-indigo-50 px-1 py-0.5 rounded text-indigo-950 font-bold">t1</strong> أو استخدام رقمه المسجل)
             </p>
           </div>
+
+          <PortalDesignerBadge variant="subtle" className="mt-4" />
         </form>
       </div>
     );
@@ -1015,8 +1018,9 @@ export default function TeacherPortal({
         </div>
 
         {/* Portal Info - Collapsible on Mobile */}
-        <div className={`${isMobileMenuOpen ? 'block mt-6' : 'hidden md:block'} mt-8 border-t border-indigo-100/80 pt-4 text-[10px] text-slate-700 font-bold text-right`}>
+        <div className={`${isMobileMenuOpen ? 'block mt-6' : 'hidden md:block'} mt-8 border-t border-indigo-100/80 pt-4 text-[10px] text-slate-700 font-bold text-right space-y-2`}>
           <p>تطبيق المعلم المعتمد - الكادر التدريسي</p>
+          <PortalDesignerBadge variant="subtle" />
         </div>
       </div>
 
@@ -2179,6 +2183,17 @@ export default function TeacherPortal({
             </motion.div>
           )}
         </AnimatePresence>
+
+        {/* Portal Bottom Designer Signature - Aligned completely to the left */}
+        <div className="mt-8 pt-4 border-t border-slate-200/60 no-print flex flex-col sm:flex-row items-center justify-between gap-3">
+          <div className="text-[11px] text-slate-400 font-medium flex items-center gap-1.5" style={{ direction: 'rtl' }}>
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+            <span>بوابة المعلم • نظام المتابعة الأكاديمية &copy; {new Date().getFullYear()}</span>
+          </div>
+          <div className="w-full sm:w-auto flex justify-start" style={{ direction: 'ltr' }}>
+            <PortalDesignerBadge variant="light" align="left" />
+          </div>
+        </div>
       </div>
 
       {/* Student Behavior Modal with Camera & Attachment */}

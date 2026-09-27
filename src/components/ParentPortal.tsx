@@ -38,6 +38,7 @@ import {
   Hash
 } from 'lucide-react';
 import { Parent, Student, Attendance, Grade, Announcement, Message, AbsenceExcuse, Teacher, Class } from '../types';
+import { PortalDesignerBadge } from './PortalDesignerBadge';
 import { getStoredWelcomeMessages, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { motion, AnimatePresence } from 'motion/react';
 import { trackActivityOperation } from '../lib/firestoreTracker';
@@ -1979,8 +1980,9 @@ export default function ParentPortal({
             </button>
           </form>
 
-          <div className="border-t border-slate-100 pt-3 text-center">
+          <div className="border-t border-slate-100 pt-3 text-center space-y-2">
             <p className="text-[10px] text-slate-400">المدرسة الدولية الخاصة - مدينة مارع</p>
+            <PortalDesignerBadge variant="subtle" />
           </div>
         </div>
       </div>
@@ -2193,8 +2195,9 @@ export default function ParentPortal({
         </div>
 
         {/* Portal Info - Collapsible on Mobile */}
-        <div className={`${isMobileMenuOpen ? 'block mt-6' : 'hidden md:block'} mt-8 border-t border-slate-800 pt-4 text-[10px] text-slate-400 text-right space-y-1`}>
+        <div className={`${isMobileMenuOpen ? 'block mt-6' : 'hidden md:block'} mt-8 border-t border-slate-800 pt-4 text-[10px] text-slate-400 text-right space-y-2`}>
           <p>تطبيق ولي الأمر المعتمد - نظام المدرسة الدولية</p>
+          <PortalDesignerBadge variant="dark" />
         </div>
       </div>
 
@@ -3134,6 +3137,17 @@ export default function ParentPortal({
             </>
           )}
         </AnimatePresence>
+
+        {/* Portal Bottom Designer Signature - Aligned completely to the left */}
+        <div className="mt-8 pt-4 border-t border-slate-200/60 no-print flex flex-col sm:flex-row items-center justify-between gap-3">
+          <div className="text-[11px] text-slate-400 font-medium flex items-center gap-1.5" style={{ direction: 'rtl' }}>
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+            <span>بوابة ولي الأمر • نظام المتابعة الشاملة &copy; {new Date().getFullYear()}</span>
+          </div>
+          <div className="w-full sm:w-auto flex justify-start" style={{ direction: 'ltr' }}>
+            <PortalDesignerBadge variant="light" align="left" />
+          </div>
+        </div>
       </div>
 
       {/* PWA Install Guide Modal */}

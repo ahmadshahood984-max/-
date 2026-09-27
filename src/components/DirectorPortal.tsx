@@ -68,6 +68,7 @@ import { printElementById, downloadElementAsImage, exportElementAsPdf } from '..
 import { buildWhatsAppUrl, openWhatsAppDirectly, getWhatsAppSentRecords, recordWhatsAppSent, WhatsAppSentRecord } from '../lib/whatsapp';
 import { generateEvaluationCardImage, shareOrDownloadEvaluationImage } from '../lib/generateCardImage';
 import { WhatsAppMessageCustomizerModal } from './WhatsAppMessageCustomizerModal';
+import { PortalDesignerBadge } from './PortalDesignerBadge';
 import { Teacher, Student, Parent, Class, AbsenceExcuse, Announcement, Grade, Attendance, Message } from '../types';
 import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
@@ -4932,6 +4933,8 @@ ${directivesFormatted}
             تسجيل الدخول للمنصة 🔐
           </button>
         </form>
+
+        <PortalDesignerBadge variant="subtle" className="mt-4" />
       </div>
     );
   }
@@ -5073,6 +5076,8 @@ ${directivesFormatted}
               <span>تسجيل الخروج</span>
             </button>
           </div>
+
+          <PortalDesignerBadge variant="subtle" className="mt-2" />
         </motion.div>
       </div>
     );
@@ -5465,6 +5470,8 @@ ${directivesFormatted}
             <LogOut className="w-3 h-3" />
             <span>قفل البوابة (خروج)</span>
           </button>
+
+          <PortalDesignerBadge variant="dark" />
         </div>
       </div>
 
@@ -14064,6 +14071,17 @@ ${sampleEval}
             </div>
           )}
         </AnimatePresence>
+
+        {/* Portal Bottom Designer Signature - Aligned completely to the left */}
+        <div className="mt-8 pt-4 border-t border-slate-200/60 no-print flex flex-col sm:flex-row items-center justify-between gap-3">
+          <div className="text-[11px] text-slate-400 font-medium flex items-center gap-1.5" style={{ direction: 'rtl' }}>
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+            <span>بوابة الإدارة المدرسية المتقدمة &copy; {new Date().getFullYear()}</span>
+          </div>
+          <div className="w-full sm:w-auto flex justify-start" style={{ direction: 'ltr' }}>
+            <PortalDesignerBadge variant="light" align="left" />
+          </div>
+        </div>
       </div>
     </div>
   );
