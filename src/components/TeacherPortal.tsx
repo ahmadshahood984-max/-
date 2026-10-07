@@ -41,6 +41,7 @@ import { buildWhatsAppUrl, openWhatsAppDirectly, getWhatsAppSentRecords, recordW
 import { WhatsAppMessageCustomizerModal } from './WhatsAppMessageCustomizerModal';
 import { PortalDesignerBadge } from './PortalDesignerBadge';
 import { Teacher, Student, Class, Attendance, Grade, Parent, Message, Announcement } from '../types';
+import { sanitizeAndDeduplicateStudents, getSafeStudentKey } from '../lib/studentDeduplicator';
 import { getStoredWelcomeMessages, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -379,7 +380,7 @@ export default function TeacherPortal({
   }, [selectedTeacherId]);
 
   // Students in selected class
-  const classStudents = [...students.filter(s => s.classId === selectedClassId)].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
+  const classStudents = sanitizeAndDeduplicateStudents([...students.filter(s => s.classId === selectedClassId)]).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
 
   // Attendance state
   const [attendanceDate, setAttendanceDate] = useState<string>(new Date().toISOString().split('T')[0]);
@@ -1241,7 +1242,7 @@ export default function TeacherPortal({
                 </div>
 
                 <div className="divide-y divide-slate-100">
-                  {classStudents.map(student => {
+                  {classStudents.map((student, idx) => {
                     const existingGrades = grades.filter(g => 
                       g.studentId === student.id && 
                       g.subject === gradeSubject && 
@@ -1250,7 +1251,7 @@ export default function TeacherPortal({
                       g.examType !== 'monthly'
                     );
                     return (
-                      <div key={student.id} className="p-4 flex items-center justify-between hover:bg-slate-50/50 transition gap-4">
+                      <div key={getSafeStudentKey(student, idx, 't_att')} className="p-4 flex items-center justify-between hover:bg-slate-50/50 transition gap-4">
                         <div>
                           <span className="font-bold text-slate-800 text-xs block">{student.name}</span>
                           {existingGrades.length > 0 && (
@@ -1399,8 +1400,8 @@ export default function TeacherPortal({
                       className="text-xs font-bold border border-slate-200 px-4 py-2.5 rounded-xl bg-slate-50 focus:outline-none focus:ring-1 focus:ring-emerald-500 text-slate-700 min-w-[200px]"
                     >
                       <option value="">-- اختر طالباً من الصف --</option>
-                      {classStudents.map(student => (
-                        <option key={student.id} value={student.id}>{student.name}</option>
+                      {classStudents.map((student, idx) => (
+                        <option key={getSafeStudentKey(student, idx, 't_opt')} value={student.id}>{student.name}</option>
                       ))}
                     </select>
                   </div>
@@ -1635,10 +1636,10 @@ export default function TeacherPortal({
                 </div>
 
                 <div className="divide-y divide-slate-100">
-                  {classStudents.map(student => {
+                  {classStudents.map((student, idx) => {
                     const studentParent = parents.find(p => p.childrenIds.includes(student.id));
                     return (
-                      <div key={student.id} className="p-4 grid grid-cols-12 gap-2 items-center hover:bg-slate-50/50 transition text-right">
+                      <div key={getSafeStudentKey(student, idx, 't_eval')} className="p-4 grid grid-cols-12 gap-2 items-center hover:bg-slate-50/50 transition text-right">
                         {/* Name & ID */}
                         <div className="col-span-5 sm:col-span-4 flex items-center gap-3">
                           <div className="w-9 h-9 rounded-xl bg-slate-100 text-slate-600 font-bold flex items-center justify-center border border-slate-200">
@@ -1761,7 +1762,7 @@ export default function TeacherPortal({
                     <div className="bg-slate-50/60 p-4 rounded-xl border border-slate-100 space-y-2.5">
                       <label className="block text-xs font-bold text-slate-700 text-right">الطلاب في هذا الصف (اضغط على بطاقة الطالب لعرض رسائله فوراً 📥):</label>
                       <div className="flex flex-wrap gap-2 justify-start">
-                        {classStudents.map(s => {
+                        {classStudents.map((s, idx) => {
                           const isSelected = chatStudentId === s.id;
                           const studentUnreadCount = messages.filter(
                             m => m.receiverId === selectedTeacherId && m.studentId === s.id && !m.read
@@ -1769,7 +1770,7 @@ export default function TeacherPortal({
 
                           return (
                             <button
-                              key={s.id}
+                              key={getSafeStudentKey(s, idx, 't_chat_btn')}
                               type="button"
                               onClick={() => {
                                 setChatStudentId(s.id);
@@ -1819,10 +1820,10 @@ export default function TeacherPortal({
                           required
                         >
                           <option value="">اختر طالباً...</option>
-                          {classStudents.map(s => {
+                          {classStudents.map((s, idx) => {
                             const unreadCount = messages.filter(m => m.receiverId === selectedTeacherId && m.studentId === s.id && !m.read).length;
                             return (
-                              <option key={s.id} value={s.id}>
+                              <option key={getSafeStudentKey(s, idx, 't_chat_opt')} value={s.id}>
                                 {s.name} (والده: {s.parentName}){unreadCount > 0 ? ` 🔴 [${unreadCount} غير مقروء]` : ''}
                               </option>
                             );

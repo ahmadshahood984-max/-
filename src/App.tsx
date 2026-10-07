@@ -30,6 +30,7 @@ import DirectorPortal from './components/DirectorPortal';
 import TeacherPortal from './components/TeacherPortal';
 import ParentPortal from './components/ParentPortal';
 import PortalDesignerBadge from './components/PortalDesignerBadge';
+import { sanitizeAndDeduplicateStudents } from './lib/studentDeduplicator';
 import { 
   Building, 
   Users, 
@@ -82,8 +83,27 @@ export default function App() {
   const [students, setStudents] = useState<Student[]>(() => {
     const saved = localStorage.getItem('school_students');
     const raw: Student[] = saved ? JSON.parse(saved) : INITIAL_STUDENTS;
-    return [...raw].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
+    const cleaned = sanitizeAndDeduplicateStudents(raw);
+    if (saved && JSON.stringify(cleaned) !== saved) {
+      localStorage.setItem('school_students', JSON.stringify(cleaned));
+    }
+    return cleaned.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
   });
+
+  // Safe wrapper that enforces deduplication and unique keys across all portals
+  const safeSetStudents: React.Dispatch<React.SetStateAction<Student[]>> = (action) => {
+    setStudents(prev => {
+      const nextRaw = typeof action === 'function' ? action(prev) : action;
+      const cleanList = sanitizeAndDeduplicateStudents(Array.isArray(nextRaw) ? nextRaw : []);
+      const sorted = cleanList.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
+      try {
+        localStorage.setItem('school_students', JSON.stringify(sorted));
+      } catch (err) {
+        console.warn('Failed to persist students to localStorage', err);
+      }
+      return sorted;
+    });
+  };
 
   const [attendance, setAttendance] = useState<Attendance[]>(() => {
     const saved = localStorage.getItem('school_attendance');
@@ -165,9 +185,11 @@ export default function App() {
           case 'school_parents':
             setParents(parsed);
             break;
-          case 'school_students':
-            setStudents(Array.isArray(parsed) ? [...parsed].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar')) : parsed);
+          case 'school_students': {
+            const cleanList = sanitizeAndDeduplicateStudents(Array.isArray(parsed) ? parsed : []);
+            setStudents(cleanList.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar')));
             break;
+          }
           case 'school_attendance':
             setAttendance(parsed);
             break;
@@ -210,11 +232,8 @@ export default function App() {
         'school_classes': setClasses,
         'school_parents': setParents,
         'school_students': (val: any) => {
-          if (Array.isArray(val)) {
-            setStudents([...val].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar')));
-          } else {
-            setStudents(val);
-          }
+          const cleanList = sanitizeAndDeduplicateStudents(Array.isArray(val) ? val : []);
+          setStudents(cleanList.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar')));
         },
         'school_attendance': setAttendance,
         'school_grades': setGrades,
@@ -644,7 +663,13 @@ export default function App() {
 
   // 2. Director registers a Student and links/creates a Parent
   const addStudent = (studentData: Omit<Student, 'id'>, parentData: Omit<Parent, 'id' | 'childrenIds'>) => {
-    const studentId = 's' + (students.length + 1);
+    // Generate guaranteed unique student ID that never collides with any existing ID
+    let candidateNum = students.length + 1;
+    let studentId = 's' + candidateNum;
+    while (students.some(s => s.id === studentId)) {
+      candidateNum++;
+      studentId = 's' + candidateNum;
+    }
     
     // Check if parent already exists (by phone)
     let parentId = '';
@@ -654,10 +679,16 @@ export default function App() {
       parentId = existingParent.id;
       // update parent's children
       setParents(prev => prev.map(p => 
-        p.id === parentId ? { ...p, childrenIds: [...p.childrenIds, studentId] } : p
+        p.id === parentId ? { ...p, childrenIds: [...p.childrenIds.filter(id => id !== studentId), studentId] } : p
       ));
     } else {
-      parentId = 'p' + (parents.length + 1);
+      let pNum = parents.length + 1;
+      let pId = 'p' + pNum;
+      while (parents.some(p => p.id === pId)) {
+        pNum++;
+        pId = 'p' + pNum;
+      }
+      parentId = pId;
       const newParent: Parent = {
         id: parentId,
         name: parentData.name,
@@ -675,8 +706,8 @@ export default function App() {
     };
 
     setStudents(prev => {
-      const updated = [...prev, newStudent].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
-      return updated;
+      const sanitized = sanitizeAndDeduplicateStudents([...prev, newStudent]);
+      return sanitized.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
     });
     logEvent(`تم تسجيل الطالب: ${newStudent.name} وربطه بولي الأمر: ${parentData.name}`, 'success');
   };
@@ -1131,7 +1162,7 @@ export default function App() {
                 parents={parents}
                 attendance={attendance}
                 messages={messages}
-                setStudents={setStudents}
+                setStudents={safeSetStudents}
                 setTeachers={setTeachers}
                 setParents={setParents}
                 setGrades={setGrades}

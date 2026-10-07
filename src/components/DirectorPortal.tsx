@@ -70,6 +70,7 @@ import { generateEvaluationCardImage, shareOrDownloadEvaluationImage } from '../
 import { WhatsAppMessageCustomizerModal } from './WhatsAppMessageCustomizerModal';
 import { PortalDesignerBadge } from './PortalDesignerBadge';
 import { Teacher, Student, Parent, Class, AbsenceExcuse, Announcement, Grade, Attendance, Message } from '../types';
+import { sanitizeAndDeduplicateStudents, getSafeStudentKey } from '../lib/studentDeduplicator';
 import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
 import { db } from '../lib/firebase';
@@ -280,7 +281,7 @@ export default function DirectorPortal({
       }
       const savedStudents = localStorage.getItem('school_students');
       if (savedStudents) {
-        try { setStudents(JSON.parse(savedStudents)); } catch (e) {}
+        try { setStudents(sanitizeAndDeduplicateStudents(JSON.parse(savedStudents))); } catch (e) {}
       }
       const savedParents = localStorage.getItem('school_parents');
       if (savedParents) {
@@ -1879,7 +1880,7 @@ ${directivesFormatted}
 
   const sampleRegistryStudents: Student[] = [];
 
-  const allRegistryStudents = [...students.filter(s => !s.id.startsWith('demo-'))].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
+  const allRegistryStudents = sanitizeAndDeduplicateStudents([...students.filter(s => !s.id.startsWith('demo-'))]).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
 
   const filteredRegistryStudents = allRegistryStudents.filter(s => {
     if (regClassFilter !== 'all') {
@@ -3571,11 +3572,11 @@ ${directivesFormatted}
       ? customSubjects 
       : ['الرياضيات', 'العلوم', 'اللغة العربية', 'التربية الإسلامية', 'اللغة الإنجليزية', 'الاجتماعيات'];
 
-    const headers = ['رقم الطالب', 'اسم الطالب', 'الصف', ...uniqueSubjects, 'المعدل', 'التقدير', 'توجيهات المعلم', 'توجيهات الإدارة'];
+    const headers = ['الرقم الموحد', 'اسم الطالب', 'الصف', ...uniqueSubjects, 'المعدل', 'التقدير', 'توجيهات المعلم', 'توجيهات الإدارة'];
 
     const data = classStudents.map(s => {
       const row: any = {
-        'رقم الطالب': s.rollNo,
+        'الرقم الموحد': s.unifiedNo || s.rollNo || '',
         'اسم الطالب': s.name,
         'الصف': cls.name
       };
@@ -3619,7 +3620,7 @@ ${directivesFormatted}
       // Determine columns mapping
       const rollNoIdx = headers.findIndex(h => {
         const clean = h.trim();
-        return clean.includes('رقم الطالب') || clean.includes('رقم القيد') || clean.includes('الرقم الموحد') || clean.includes('الرقم') || clean === 'rollNo';
+        return clean.includes('الرقم الموحد') || clean.includes('رقم الطالب') || clean.includes('رقم القيد') || clean.includes('الرقم') || clean.includes('الموحد') || clean === 'rollNo' || clean === 'unifiedNo';
       });
 
       let teacherColIdx = -1;
@@ -3636,7 +3637,7 @@ ${directivesFormatted}
       });
       
       if (rollNoIdx === -1) {
-        alert('لم يتم التعرف على عمود "رقم الطالب" في السطر الأول. يرجى إدراجه في السطر الأول كـ ترويسة.');
+        alert('لم يتم التعرف على عمود "الرقم الموحد" في السطر الأول. يرجى إدراجه في السطر الأول كـ ترويسة.');
         return;
       }
 
@@ -3650,7 +3651,11 @@ ${directivesFormatted}
         const rollNo = cols[rollNoIdx];
         if (!rollNo) return;
         
-        const student = students.find(s => s.rollNo === rollNo || s.id === rollNo);
+        const student = students.find(s => 
+          (s.unifiedNo && String(s.unifiedNo).trim() === rollNo) ||
+          (s.rollNo && String(s.rollNo).trim() === rollNo) ||
+          s.id === rollNo
+        );
         if (!student) return;
 
         const teacherVal = teacherColIdx !== -1 ? cols[teacherColIdx] : undefined;
@@ -3754,11 +3759,11 @@ ${directivesFormatted}
         jsonRows.forEach(row => {
           const rowKeys = Object.keys(row);
           
-          // Find student roll no trim-safely
+          // Find student roll no / unified no trim-safely
           let rollNo = '';
           const rollNoKey = rowKeys.find(k => {
             const clean = k.trim();
-            return clean === 'رقم الطالب' || clean === 'رقم القيد' || clean === 'الرقم الموحد' || clean === 'الرقم' || clean === 'rollNo';
+            return clean === 'الرقم الموحد' || clean === 'رقم الطالب' || clean === 'رقم القيد' || clean === 'الرقم' || clean === 'الموحد' || clean === 'rollNo' || clean === 'unifiedNo';
           });
           
           if (rollNoKey) {
@@ -3767,7 +3772,11 @@ ${directivesFormatted}
           
           if (!rollNo) return;
           
-          const student = students.find(s => s.rollNo === rollNo || s.id === rollNo);
+          const student = students.find(s => 
+            (s.unifiedNo && String(s.unifiedNo).trim() === rollNo) ||
+            (s.rollNo && String(s.rollNo).trim() === rollNo) ||
+            s.id === rollNo
+          );
           if (!student) return;
           
           // Check for student teacher & director directives columns
@@ -3906,7 +3915,7 @@ ${directivesFormatted}
       ? customSubjects 
       : ['الرياضيات', 'العلوم', 'اللغة العربية', 'التربية الإسلامية', 'اللغة الإنجليزية', 'الاجتماعيات'];
 
-    const headers = ['رقم الطالب', 'اسم الطالب', 'الصف', ...uniqueSubjects, 'المعدل', 'التقدير', 'توجيهات المعلم', 'توجيهات الإدارة'];
+    const headers = ['الرقم الموحد', 'اسم الطالب', 'الصف', ...uniqueSubjects, 'المعدل', 'التقدير', 'توجيهات المعلم', 'توجيهات الإدارة'];
     
     const data = classStudents.map(s => {
       const studentGrades = grades.filter(g => g.studentId === s.id && g.examName === currentEvaluationMonth);
@@ -3914,7 +3923,7 @@ ${directivesFormatted}
         (monthlyEvaluations[s.id]?.month === currentEvaluationMonth ? monthlyEvaluations[s.id] : null);
 
       const row: any = {
-        'رقم الطالب': s.rollNo,
+        'الرقم الموحد': s.unifiedNo || s.rollNo || '',
         'اسم الطالب': s.name,
         'الصف': cls.name
       };
@@ -4871,7 +4880,7 @@ ${directivesFormatted}
     )
   );
 
-  const filteredStudents = students.filter(s => {
+  const filteredStudents = sanitizeAndDeduplicateStudents(students.filter(s => {
     const matchesSearch = s.name.toLowerCase().includes(studentSearch.toLowerCase()) ||
       s.rollNo.includes(studentSearch) ||
       s.parentName.toLowerCase().includes(studentSearch.toLowerCase());
@@ -4879,7 +4888,7 @@ ${directivesFormatted}
     const matchesClass = selectedClassForStudentAffairs === 'all' || s.classId === selectedClassForStudentAffairs;
 
     return matchesSearch && matchesClass && matchesCohort(s);
-  }).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
+  })).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
 
   if (!isLoggedIn) {
     return (
@@ -7625,10 +7634,10 @@ ${directivesFormatted}
                         className="w-full text-xs border border-emerald-300 bg-white px-3 py-2 rounded-xl focus:border-emerald-600 focus:outline-none font-semibold text-slate-800 shadow-2xs"
                       >
                         <option value="">-- اختر طالباً للمعاينة ({filteredRegistryStudents.length}) --</option>
-                        {filteredRegistryStudents.map(s => {
+                        {filteredRegistryStudents.map((s, idx) => {
                           const cls = classes.find(c => c.id === s.classId);
                           return (
-                            <option key={s.id} value={s.id}>
+                            <option key={getSafeStudentKey(s, idx, 'reg_opt')} value={s.id}>
                               {s.name} - {cls ? cls.name : 'الصف الدراسي'}
                             </option>
                           );
@@ -7721,7 +7730,7 @@ ${directivesFormatted}
                           const parentPhone = st.parentPhone || '0501234567';
 
                           return (
-                            <tr key={st.id} className="hover:bg-emerald-50/30 transition font-medium text-slate-700">
+                            <tr key={getSafeStudentKey(st, idx, 'reg_tr')} className="hover:bg-emerald-50/30 transition font-medium text-slate-700">
                               <td className="p-2 border-l border-slate-150 text-center text-slate-400 bg-slate-50 font-mono font-bold text-[11px]">
                                 {st.serialNo || idx + 1}
                               </td>
@@ -8174,7 +8183,7 @@ if __name__ == "__main__":
                       </span>
                       <input
                         type="text"
-                        placeholder="ابحث باسم الطالب أو رقم القيد أو ولي الأمر..."
+                        placeholder="ابحث باسم الطالب أو الرقم الموحد أو ولي الأمر..."
                         value={studentSearch}
                         onChange={e => setStudentSearch(e.target.value)}
                         className="w-full text-[11px] border border-slate-200 pr-9 pl-3 py-1.5 rounded-lg bg-white focus:border-sky-500 focus:outline-none"
@@ -8201,7 +8210,7 @@ if __name__ == "__main__":
                             const parentPhone = parentObj?.phone || '';
 
                             return (
-                              <tr key={student.id} className="hover:bg-slate-50/40 font-medium text-slate-600">
+                              <tr key={getSafeStudentKey(student, idx, 'affair_tr')} className="hover:bg-slate-50/40 font-medium text-slate-600">
                                 <td className="p-2 border-l border-slate-150 text-center text-slate-400 bg-slate-50 font-mono">{idx + 1}</td>
                                 <td className="p-3 border-l border-slate-150 font-mono text-sky-700 font-semibold">{student.unifiedNo || student.rollNo || student.nationalId || '-'}</td>
                                 <td className="p-3 border-l border-slate-150 font-bold text-slate-800">{student.name}</td>
@@ -9039,7 +9048,7 @@ ${sampleEval}
                         <table className="w-full text-right border-collapse">
                           <thead>
                             <tr className="bg-slate-50 text-slate-600 text-xs font-semibold border-b border-slate-100">
-                              <th className="p-4">رقم القيد</th>
+                              <th className="p-4">الرقم الموحد</th>
                               <th className="p-4">اسم الطالب</th>
                               {uniqueSubjects.map(sub => (
                                 <th key={sub} className="p-4 text-center">{sub}</th>
@@ -9055,7 +9064,15 @@ ${sampleEval}
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-slate-100 text-slate-700 text-xs">
-                            {students.filter(s => s.classId === selectedClassForGrades).map(student => {
+                            {sanitizeAndDeduplicateStudents(students
+                              .filter(s => s.classId === selectedClassForGrades))
+                              .sort((a, b) => {
+                                const numA = parseInt(String(a.unifiedNo || a.rollNo || '9999').replace(/\D/g, ''), 10) || 0;
+                                const numB = parseInt(String(b.unifiedNo || b.rollNo || '9999').replace(/\D/g, ''), 10) || 0;
+                                if (numA !== numB) return numA - numB;
+                                return (a.name || '').localeCompare(b.name || '', 'ar');
+                              })
+                              .map((student, idx) => {
                               const studentGrades = grades.filter(g => g.studentId === student.id && (g.examName === currentEvaluationMonth || !g.examName));
                               
                               let totalScore = 0;
@@ -9066,8 +9083,12 @@ ${sampleEval}
                                 monthlyEvaluations[student.id];
 
                           return (
-                            <tr key={student.id} className="hover:bg-slate-50/40 transition">
-                              <td className="p-4 font-mono text-slate-500 font-medium">#{student.rollNo}</td>
+                            <tr key={getSafeStudentKey(student, idx, 'grade_tr')} className="hover:bg-slate-50/40 transition">
+                              <td className="p-4 font-mono font-bold text-indigo-700">
+                                <span className="inline-flex items-center px-2.5 py-1 rounded-lg bg-indigo-50 border border-indigo-100 text-indigo-700 font-mono font-bold text-xs shadow-2xs">
+                                  #{student.unifiedNo || student.rollNo}
+                                </span>
+                              </td>
                               <td className="p-4 font-bold text-slate-800">{student.name}</td>
                               {uniqueSubjects.map(sub => {
                                 const subGrade = studentGrades.find(g => g.subject === sub);
@@ -9542,7 +9563,7 @@ ${sampleEval}
                         <table className="w-full border-collapse text-right">
                           <thead>
                             <tr className="bg-slate-50/30 text-slate-500 text-xs font-bold border-b border-slate-100">
-                              <th className="p-4 w-20 text-right">رقم القيد</th>
+                              <th className="p-4 w-28 text-right">الرقم الموحد</th>
                               <th className="p-4 text-right">اسم الطالب</th>
                               <th className="p-4 hidden sm:table-cell text-right">ولي الأمر والتواصل</th>
                               <th className="p-4 text-center w-72">حالة الحضور والغياب</th>
@@ -9551,15 +9572,17 @@ ${sampleEval}
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-slate-100 text-xs text-slate-700">
-                            {classStudents.map(student => {
+                            {classStudents.map((student, idx) => {
                               const record = localAttendanceForDir[student.id] || { status: 'present', notes: '' };
                               const parent = parents.find(p => p.childrenIds.includes(student.id));
 
                               return (
-                                <tr key={student.id} className="hover:bg-slate-50/30 transition-colors">
-                                  {/* Roll No */}
-                                  <td className="p-4 font-mono font-medium text-slate-500 text-right">
-                                    {student.rollNo}
+                                <tr key={getSafeStudentKey(student, idx, 'att_tr')} className="hover:bg-slate-50/30 transition-colors">
+                                  {/* Unified No */}
+                                  <td className="p-4 font-mono font-bold text-indigo-700 text-right">
+                                    <span className="inline-flex items-center px-2 py-0.5 rounded-lg bg-indigo-50 border border-indigo-100 text-indigo-700 font-mono font-bold text-xs shadow-2xs">
+                                      #{student.unifiedNo || student.rollNo}
+                                    </span>
                                   </td>
 
                                   {/* Name */}
@@ -9883,9 +9906,9 @@ ${sampleEval}
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-50">
-                        {students
-                          .filter(s => s.classId === selectedClassForTuition)
-                          .map(student => {
+                        {sanitizeAndDeduplicateStudents(students
+                          .filter(s => s.classId === selectedClassForTuition))
+                          .map((student, idx) => {
                             const tuitionInfo = tuitions[student.id] || {
                               studentId: student.id,
                               totalAmount: 0,
@@ -9898,7 +9921,7 @@ ${sampleEval}
 
                             return (
                               <tr 
-                                key={student.id} 
+                                key={getSafeStudentKey(student, idx, 'tui_tr')} 
                                 onClick={() => {
                                   setEditingStudentTuition(student);
                                   const t = tuitions[student.id];
@@ -12071,11 +12094,12 @@ ${sampleEval}
                     const exists = currentList.some(s => s.id === editingStudent.id);
                     const updatedStudents = (exists
                       ? currentList.map(s => s.id === editingStudent.id ? editingStudent : s)
-                      : [...currentList, editingStudent]).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
+                      : [...currentList, editingStudent]);
+                    const cleanList = sanitizeAndDeduplicateStudents(updatedStudents).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
 
-                    setStudents(updatedStudents);
-                    localStorage.setItem('school_students', JSON.stringify(updatedStudents));
-                    window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_students', value: JSON.stringify(updatedStudents) } }));
+                    setStudents(cleanList);
+                    localStorage.setItem('school_students', JSON.stringify(cleanList));
+                    window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_students', value: JSON.stringify(cleanList) } }));
 
                     // Update parent
                     const parentPhoneVal = editingStudentPhone || editingStudent.parentPhone || '';
@@ -13507,7 +13531,7 @@ ${sampleEval}
                             {manifestStudents.map((st, idx) => {
                               const cls = classes.find(c => c.id === st.classId);
                               return (
-                                <tr key={st.id} className="hover:bg-slate-50">
+                                <tr key={getSafeStudentKey(st, idx, 'manifest_tr')} className="hover:bg-slate-50">
                                   <td className="p-2 border-l border-slate-200 text-center font-mono font-bold text-slate-400">{st.serialNo || idx + 1}</td>
                                   <td className="p-2 border-l border-slate-200 text-center font-mono font-bold text-emerald-800">{st.unifiedNo || (parseInt(st.rollNo || '', 10) >= 75 ? st.rollNo : '75')}</td>
                                   <td className="p-2 border-l border-slate-200 text-center font-mono font-bold text-indigo-700">{st.nationalId || st.rollNo || '-'}</td>

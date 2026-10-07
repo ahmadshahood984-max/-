@@ -2224,7 +2224,7 @@ export default function ParentPortal({
                 <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600 mt-1">
                   <span>الصف: <strong className="text-indigo-700 font-bold">{activeChildClass?.name || 'عام'}</strong></span>
                   <span className="text-slate-300">•</span>
-                  <span>رقم القيد: <strong className="font-mono text-slate-800">#{activeChild?.rollNo || '---'}</strong></span>
+                  <span>الرقم الموحد: <strong className="font-mono text-indigo-700 font-bold">#{activeChild?.unifiedNo || activeChild?.rollNo || '---'}</strong></span>
                   {activeChild?.parentName && (
                     <>
                       <span className="text-slate-300">•</span>

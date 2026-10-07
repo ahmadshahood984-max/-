@@ -6,6 +6,7 @@
 import { db } from './firebase';
 import { doc, onSnapshot, setDoc, getDoc } from 'firebase/firestore';
 import { trackFirestoreRead, trackFirestoreWrite } from './firestoreTracker';
+import { sanitizeAndDeduplicateStudents } from './studentDeduplicator';
 
 const SYNC_KEYS = [
   'school_teachers',
@@ -51,9 +52,13 @@ export async function forceRefreshDataFromFirestore(): Promise<boolean> {
       if (snap.exists()) {
         const docData = snap.data();
         if (docData && docData.data !== undefined) {
-          const valueString = typeof docData.data === 'object' 
-            ? JSON.stringify(docData.data) 
-            : String(docData.data);
+          let payload = docData.data;
+          if (key === 'school_students' && Array.isArray(payload)) {
+            payload = sanitizeAndDeduplicateStudents(payload);
+          }
+          const valueString = typeof payload === 'object' 
+            ? JSON.stringify(payload) 
+            : String(payload);
           
           isRemoteSyncing = true;
           originalSetItem(key, valueString);
@@ -124,9 +129,13 @@ export function setupFirebaseSync() {
       if (snapshot.exists()) {
         const docData = snapshot.data();
         if (docData && docData.data !== undefined) {
-          const valueString = typeof docData.data === 'object' 
-            ? JSON.stringify(docData.data) 
-            : String(docData.data);
+          let payload = docData.data;
+          if (key === 'school_students' && Array.isArray(payload)) {
+            payload = sanitizeAndDeduplicateStudents(payload);
+          }
+          const valueString = typeof payload === 'object' 
+            ? JSON.stringify(payload) 
+            : String(payload);
           
           const localVal = localStorage.getItem(key);
           if (localVal !== valueString) {
