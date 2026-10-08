@@ -58,6 +58,7 @@ import {
   FileText,
   CheckCircle,
   Loader2,
+  Award,
   Share2,
   LayoutGrid,
   ClipboardList,
@@ -71,6 +72,8 @@ import { WhatsAppMessageCustomizerModal } from './WhatsAppMessageCustomizerModal
 import { PortalDesignerBadge } from './PortalDesignerBadge';
 import { Teacher, Student, Parent, Class, AbsenceExcuse, Announcement, Grade, Attendance, Message } from '../types';
 import { sanitizeAndDeduplicateStudents, getSafeStudentKey } from '../lib/studentDeduplicator';
+import { GradeSheetSignatures } from './GradeSheetSignatures';
+import { SealAndSignaturesModal } from './SealAndSignaturesModal';
 import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
 import { db } from '../lib/firebase';
@@ -524,6 +527,41 @@ export default function DirectorPortal({
   // Excel and Grade states
   const [selectedClassForGrades, setSelectedClassForGrades] = useState<string>('');
   const gradeImportInputRef = React.useRef<HTMLInputElement>(null);
+  
+  // Grade Max Score & Passing Score configuration ('100' | 'unspecified' | '50' | '20' | 'custom')
+  const [directorMaxGradeType, setDirectorMaxGradeType] = useState<string>(() => {
+    return localStorage.getItem('school_max_grade_setting') || '100';
+  });
+  const [directorCustomMaxGrade, setDirectorCustomMaxGrade] = useState<string>(() => {
+    return localStorage.getItem('school_custom_max_grade') || '100';
+  });
+  const [directorPassGradeType, setDirectorPassGradeType] = useState<string>(() => {
+    return localStorage.getItem('school_pass_grade_setting') || '50';
+  });
+  const [directorCustomPassGrade, setDirectorCustomPassGrade] = useState<string>(() => {
+    return localStorage.getItem('school_custom_pass_grade') || '50';
+  });
+
+  const effectiveMaxGrade = directorMaxGradeType === 'unspecified' 
+    ? 'غير محدد' 
+    : directorMaxGradeType === 'custom' 
+      ? (directorCustomMaxGrade || 'غير محدد')
+      : directorMaxGradeType;
+
+  const effectivePassGrade = directorPassGradeType === 'unspecified' 
+    ? 'غير محدد' 
+    : directorPassGradeType === 'custom' 
+      ? (directorCustomPassGrade || 'غير محدد')
+      : directorPassGradeType;
+
+  const numericMaxGrade = directorMaxGradeType === 'unspecified' 
+    ? null 
+    : parseFloat(effectiveMaxGrade) || null;
+
+  const numericPassGrade = directorPassGradeType === 'unspecified' 
+    ? null 
+    : parseFloat(effectivePassGrade) || null;
+
   const [currentEvaluationMonth, setCurrentEvaluationMonth] = useState<string>(() => {
     return localStorage.getItem('school_evaluation_current_month') || 'تشرين الأول';
   });
@@ -752,6 +790,9 @@ export default function DirectorPortal({
     waKey: string;
     studentId: string;
   } | null>(null);
+
+  // Seal & Signatures Customizer Modal State
+  const [isSealModalOpen, setIsSealModalOpen] = useState(false);
 
   const handleSendMonthlyWhatsApp = (
     student: Student,
@@ -3554,17 +3595,30 @@ ${directivesFormatted}
     reader.readAsArrayBuffer(file);
   };
 
-  const handleDownloadEmptyTemplate = () => {
-    if (!selectedClassForGrades) {
-      alert('الرجاء اختيار الصف لتنزيل النموذج الخاص به.');
-      return;
+  const handleDownloadEmptyTemplate = (cohortMode: boolean = false) => {
+    let targetStudents: Student[] = [];
+    let fileSuffix = '';
+
+    if (cohortMode) {
+      const cohortClasses = classes.filter(matchesCohort);
+      targetStudents = students.filter(s => cohortClasses.some(c => c.id === s.classId));
+      if (targetStudents.length === 0) {
+        targetStudents = students.filter(matchesCohort);
+      }
+      fileSuffix = `كامل_الفوج_${activeCohort === 'evening' ? 'المسائي' : 'الصباحي'}`;
+    } else {
+      if (!selectedClassForGrades) {
+        alert('الرجاء اختيار الصف لتنزيل النموذج الخاص به، أو الضغط على "نموذج رصد فارغ لكامل الفوج".');
+        return;
+      }
+      const cls = classes.find(c => c.id === selectedClassForGrades);
+      if (!cls) return;
+      targetStudents = students.filter(s => s.classId === selectedClassForGrades);
+      fileSuffix = cls.name.replace(/\s+/g, '_');
     }
-    const cls = classes.find(c => c.id === selectedClassForGrades);
-    if (!cls) return;
     
-    const classStudents = students.filter(s => s.classId === selectedClassForGrades);
-    if (classStudents.length === 0) {
-      alert('لا يوجد طلاب مسجلون في هذا الصف لتوليد النموذج.');
+    if (targetStudents.length === 0) {
+      alert('لا يوجد طلاب مسجلون لتوليد النموذج.');
       return;
     }
     
@@ -3572,13 +3626,12 @@ ${directivesFormatted}
       ? customSubjects 
       : ['الرياضيات', 'العلوم', 'اللغة العربية', 'التربية الإسلامية', 'اللغة الإنجليزية', 'الاجتماعيات'];
 
-    const headers = ['الرقم الموحد', 'اسم الطالب', 'الصف', ...uniqueSubjects, 'المعدل', 'التقدير', 'توجيهات المعلم', 'توجيهات الإدارة'];
-
-    const data = classStudents.map(s => {
+    const data = targetStudents.map(s => {
+      const studentClass = classes.find(c => c.id === s.classId)?.name || 'غير محدد';
       const row: any = {
         'الرقم الموحد': s.unifiedNo || s.rollNo || '',
         'اسم الطالب': s.name,
-        'الصف': cls.name
+        'الصف': studentClass
       };
       uniqueSubjects.forEach(sub => {
         row[sub] = '';
@@ -3593,7 +3646,7 @@ ${directivesFormatted}
     const worksheet = XLSX.utils.json_to_sheet(data);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'نموذج رصد الدرجات');
-    XLSX.writeFile(workbook, `نموذج_رصد_درجات_${cls.name.replace(/\s+/g, '_')}.xlsx`);
+    XLSX.writeFile(workbook, `نموذج_رصد_درجات_${fileSuffix}.xlsx`);
   };
 
   const handleImportGradesFromText = (pastedText: string) => {
@@ -3606,6 +3659,7 @@ ${directivesFormatted}
       const lines = pastedText.split('\n').map(l => l.trim()).filter(Boolean);
       let updatedCount = 0;
       let behaviorUpdatedCount = 0;
+      const matchedStudentIds = new Set<string>();
       const newGradesList = [...grades];
       const newMonthlyEvaluations = { ...monthlyEvaluations };
       
@@ -3623,6 +3677,16 @@ ${directivesFormatted}
         return clean.includes('الرقم الموحد') || clean.includes('رقم الطالب') || clean.includes('رقم القيد') || clean.includes('الرقم') || clean.includes('الموحد') || clean === 'rollNo' || clean === 'unifiedNo';
       });
 
+      const classColIdx = headers.findIndex(h => {
+        const clean = h.trim();
+        return clean === 'الصف' || clean === 'اسم الصف' || clean === 'الشعبة' || clean === 'الصف والشعبة' || clean === 'class';
+      });
+
+      const nameColIdx = headers.findIndex(h => {
+        const clean = h.trim();
+        return clean === 'اسم الطالب' || clean === 'الاسم' || clean === 'الطالب' || clean === 'name';
+      });
+
       let teacherColIdx = -1;
       let directorColIdx = -1;
 
@@ -3636,8 +3700,8 @@ ${directivesFormatted}
         }
       });
       
-      if (rollNoIdx === -1) {
-        alert('لم يتم التعرف على عمود "الرقم الموحد" في السطر الأول. يرجى إدراجه في السطر الأول كـ ترويسة.');
+      if (rollNoIdx === -1 && nameColIdx === -1) {
+        alert('لم يتم التعرف على عمود "الرقم الموحد" أو "اسم الطالب" في السطر الأول.');
         return;
       }
 
@@ -3646,17 +3710,50 @@ ${directivesFormatted}
       
       rows.forEach(rowStr => {
         const cols = rowStr.split(/\t|,/).map(c => c.trim());
-        if (cols.length <= rollNoIdx) return;
-        
-        const rollNo = cols[rollNoIdx];
-        if (!rollNo) return;
-        
-        const student = students.find(s => 
-          (s.unifiedNo && String(s.unifiedNo).trim() === rollNo) ||
-          (s.rollNo && String(s.rollNo).trim() === rollNo) ||
-          s.id === rollNo
-        );
+        const rollNo = rollNoIdx !== -1 && cols.length > rollNoIdx ? cols[rollNoIdx] : '';
+        const rowClassStr = classColIdx !== -1 && cols.length > classColIdx ? cols[classColIdx] : '';
+        const rowNameStr = nameColIdx !== -1 && cols.length > nameColIdx ? cols[nameColIdx] : '';
+
+        if (!rollNo && !rowNameStr) return;
+
+        const matchedClass = rowClassStr ? classes.find(c => 
+          c.name.trim() === rowClassStr || 
+          c.id === rowClassStr ||
+          c.name.replace(/\s+/g, '') === rowClassStr.replace(/\s+/g, '') ||
+          rowClassStr.includes(c.name.trim()) || 
+          c.name.trim().includes(rowClassStr)
+        ) : (selectedClassForGrades ? classes.find(c => c.id === selectedClassForGrades) : null);
+
+        let student = students.find(s => {
+          const matchNo = (s.unifiedNo && String(s.unifiedNo).trim() === rollNo) ||
+                          (s.rollNo && String(s.rollNo).trim() === rollNo) ||
+                          s.id === rollNo;
+          if (!matchNo) return false;
+          if (matchedClass) {
+            return s.classId === matchedClass.id;
+          }
+          return true;
+        });
+
+        if (!student && matchedClass && rowNameStr) {
+          student = students.find(s => s.classId === matchedClass.id && (
+            s.name.trim() === rowNameStr ||
+            s.name.replace(/\s+/g, '') === rowNameStr.replace(/\s+/g, '') ||
+            rowNameStr.includes(s.name.trim()) ||
+            s.name.trim().includes(rowNameStr)
+          ));
+        }
+
+        if (!student && rollNo) {
+          student = students.find(s => 
+            (s.unifiedNo && String(s.unifiedNo).trim() === rollNo) ||
+            (s.rollNo && String(s.rollNo).trim() === rollNo) ||
+            s.id === rollNo
+          );
+        }
+
         if (!student) return;
+        matchedStudentIds.add(student.id);
 
         const teacherVal = teacherColIdx !== -1 ? cols[teacherColIdx] : undefined;
         const directorVal = directorColIdx !== -1 ? cols[directorColIdx] : undefined;
@@ -3678,14 +3775,16 @@ ${directivesFormatted}
         }
 
         // Find and update grades for each subject found in the headers
+        const maxScoreVal = numericMaxGrade || 100;
         headers.forEach((h, hIdx) => {
-          if (hIdx === rollNoIdx || hIdx === teacherColIdx || hIdx === directorColIdx) return;
+          if (hIdx === rollNoIdx || hIdx === classColIdx || hIdx === nameColIdx || hIdx === teacherColIdx || hIdx === directorColIdx) return;
           const colValue = cols[hIdx];
           if (colValue === undefined || colValue === '') return;
 
           const matchedSub = uniqueSubjects.find(sub => sub.trim() === h.trim());
           if (matchedSub) {
-            const score = parseFloat(colValue) || 0;
+            const score = parseFloat(colValue);
+            if (isNaN(score)) return;
             const existingIdx = newGradesList.findIndex(g => 
               g.studentId === student.id && 
               g.subject === matchedSub && 
@@ -3696,7 +3795,7 @@ ${directivesFormatted}
               newGradesList[existingIdx] = {
                 ...newGradesList[existingIdx],
                 score: score,
-                maxScore: 100
+                maxScore: maxScoreVal
               };
             } else {
               newGradesList.push({
@@ -3705,7 +3804,7 @@ ${directivesFormatted}
                 subject: matchedSub,
                 examName: currentEvaluationMonth,
                 score: score,
-                maxScore: 100,
+                maxScore: maxScoreVal,
                 date: new Date().toISOString().split('T')[0],
                 teacherId: 'director'
               });
@@ -3718,6 +3817,7 @@ ${directivesFormatted}
       if (updatedCount > 0 || behaviorUpdatedCount > 0) {
         if (updatedCount > 0) {
           setGrades(newGradesList);
+          localStorage.setItem('school_grades', JSON.stringify(newGradesList));
         }
         if (behaviorUpdatedCount > 0) {
           setMonthlyEvaluations(newMonthlyEvaluations);
@@ -3725,7 +3825,7 @@ ${directivesFormatted}
         }
         setPastedGradeData('');
         setShowPastedGradeInput(false);
-        alert(`تم استيراد وتحديث عدد ${updatedCount} درجات وعدد ${behaviorUpdatedCount} تقارير سلوك للطلاب بنجاح! 📊✅`);
+        alert(`تم استيراد وتحديث عدد ${updatedCount} درجات لـ ${matchedStudentIds.size} طالب بنجاح وفق الرقم الموحد والصف! 📊✅`);
       } else {
         alert('لم يتم العثور على درجات أو تقارير سلوك صالحة لتحديثها.');
       }
@@ -3749,6 +3849,8 @@ ${directivesFormatted}
         
         let updatedCount = 0;
         let behaviorUpdatedCount = 0;
+        const matchedStudentIds = new Set<string>();
+        const matchedClassIds = new Set<string>();
         const newGradesList = [...grades];
         const newMonthlyEvaluations = { ...monthlyEvaluations };
         
@@ -3756,6 +3858,8 @@ ${directivesFormatted}
           ? customSubjects 
           : ['الرياضيات', 'العلوم', 'اللغة العربية', 'التربية الإسلامية', 'اللغة الإنجليزية', 'الاجتماعيات'];
         
+        const maxScoreVal = numericMaxGrade || 100;
+
         jsonRows.forEach(row => {
           const rowKeys = Object.keys(row);
           
@@ -3765,20 +3869,71 @@ ${directivesFormatted}
             const clean = k.trim();
             return clean === 'الرقم الموحد' || clean === 'رقم الطالب' || clean === 'رقم القيد' || clean === 'الرقم' || clean === 'الموحد' || clean === 'rollNo' || clean === 'unifiedNo';
           });
-          
           if (rollNoKey) {
             rollNo = String(row[rollNoKey]).trim();
           }
+
+          // Find class from row
+          const classKey = rowKeys.find(k => {
+            const clean = k.trim();
+            return clean === 'الصف' || clean === 'اسم الصف' || clean === 'الشعبة' || clean === 'الصف والشعبة' || clean === 'class';
+          });
+          const rowClassStr = classKey ? String(row[classKey]).trim() : '';
+
+          // Find student name from row
+          const nameKey = rowKeys.find(k => {
+            const clean = k.trim();
+            return clean === 'اسم الطالب' || clean === 'الاسم' || clean === 'الطالب' || clean === 'name';
+          });
+          const rowNameStr = nameKey ? String(row[nameKey]).trim() : '';
           
-          if (!rollNo) return;
+          if (!rollNo && !rowNameStr) return;
           
-          const student = students.find(s => 
-            (s.unifiedNo && String(s.unifiedNo).trim() === rollNo) ||
-            (s.rollNo && String(s.rollNo).trim() === rollNo) ||
-            s.id === rollNo
-          );
+          // Match class accurately
+          const matchedClass = rowClassStr ? classes.find(c => 
+            c.name.trim() === rowClassStr || 
+            c.id === rowClassStr ||
+            c.name.replace(/\s+/g, '') === rowClassStr.replace(/\s+/g, '') ||
+            rowClassStr.includes(c.name.trim()) || 
+            c.name.trim().includes(rowClassStr)
+          ) : (selectedClassForGrades ? classes.find(c => c.id === selectedClassForGrades) : null);
+
+          // Find student matching BOTH unifiedNo/rollNo AND class
+          let student = students.find(s => {
+            const matchNo = (s.unifiedNo && String(s.unifiedNo).trim() === rollNo) ||
+                            (s.rollNo && String(s.rollNo).trim() === rollNo) ||
+                            s.id === rollNo;
+            if (!matchNo) return false;
+            if (matchedClass) {
+              return s.classId === matchedClass.id;
+            }
+            return true;
+          });
+
+          // Secondary fallback: match by student name AND class
+          if (!student && matchedClass && rowNameStr) {
+            student = students.find(s => s.classId === matchedClass.id && (
+              s.name.trim() === rowNameStr ||
+              s.name.replace(/\s+/g, '') === rowNameStr.replace(/\s+/g, '') ||
+              rowNameStr.includes(s.name.trim()) ||
+              s.name.trim().includes(rowNameStr)
+            ));
+          }
+
+          // Global fallback by rollNo
+          if (!student && rollNo) {
+            student = students.find(s => 
+              (s.unifiedNo && String(s.unifiedNo).trim() === rollNo) ||
+              (s.rollNo && String(s.rollNo).trim() === rollNo) ||
+              s.id === rollNo
+            );
+          }
+
           if (!student) return;
           
+          matchedStudentIds.add(student.id);
+          if (student.classId) matchedClassIds.add(student.classId);
+
           // Check for student teacher & director directives columns
           const teacherKey = rowKeys.find(k => {
             const clean = k.trim();
@@ -3811,7 +3966,8 @@ ${directivesFormatted}
           uniqueSubjects.forEach(sub => {
             const matchingKey = rowKeys.find(k => k.trim() === sub.trim());
             if (matchingKey && row[matchingKey] !== undefined && row[matchingKey] !== '') {
-              const score = parseFloat(row[matchingKey]) || 0;
+              const score = parseFloat(row[matchingKey]);
+              if (isNaN(score)) return;
               
               const existingIdx = newGradesList.findIndex(g => 
                 g.studentId === student.id && 
@@ -3823,7 +3979,7 @@ ${directivesFormatted}
                 newGradesList[existingIdx] = {
                   ...newGradesList[existingIdx],
                   score: score,
-                  maxScore: 100
+                  maxScore: maxScoreVal
                 };
               } else {
                 newGradesList.push({
@@ -3832,7 +3988,7 @@ ${directivesFormatted}
                   subject: sub,
                   examName: currentEvaluationMonth,
                   score: score,
-                  maxScore: 100,
+                  maxScore: maxScoreVal,
                   date: new Date().toISOString().split('T')[0],
                   teacherId: 'director'
                 });
@@ -3851,9 +4007,9 @@ ${directivesFormatted}
             setMonthlyEvaluations(newMonthlyEvaluations);
             localStorage.setItem('school_monthly_evaluations', JSON.stringify(newMonthlyEvaluations));
           }
-          alert(`تم استيراد وتحديث عدد ${updatedCount} درجات وعدد ${behaviorUpdatedCount} تقارير سلوك للطلاب بنجاح! 📊✅`);
+          alert(`🎉 تم بنجاح استيراد وتوثيق رصد درجات كامل الفوج!\n\n📊 إجمالي الدرجات: ${updatedCount}\n👨‍🎓 إجمالي الطلاب المعتمدة درجاتهم: ${matchedStudentIds.size} طالب\n🏫 عدد الصفوف والشعب المحدثة: ${matchedClassIds.size} صف/شعبة\n\n✅ تم توزيع العلامات حسب الرقم الموحد والصف بدقة تامة! 🚀`);
         } else {
-          alert('لم يتم العثور على درجات أو تقارير سلوك صالحة لتحديثها.');
+          alert('لم يتم العثور على درجات أو تقارير سلوك صالحة لتحديثها. يرجى التأكد من تطابق أعمدة الرقم الموحد والصف.');
         }
       } catch (err) {
         console.error(err);
@@ -3882,9 +4038,17 @@ ${directivesFormatted}
     setIsAddingNewMonth(false);
   };
 
-  const handleSaveAndSendGradesToParents = () => {
+  const handleSaveAndSendGradesToParents = (cohortMode: boolean = false) => {
+    // Save grades explicitly to local storage
+    localStorage.setItem('school_grades', JSON.stringify(grades));
+
+    if (cohortMode) {
+      alert(`🚀 تم بنجاح حفظ وتوثيق كشف الدرجات لكامل الفوج الدراسي لشهر (${currentEvaluationMonth})!\n\nيمكن لكافة أولياء أمور الفوج الآن الاطلاع على كشف الدرجات والشهادة الأكاديمية الرسمية مباشرة من حساباتهم دون إرسال إشعارات تشويشية. ✅`);
+      return;
+    }
+
     if (!selectedClassForGrades) {
-      alert('الرجاء اختيار الصف الدراسي أولاً.');
+      alert('الرجاء اختيار الصف الدراسي أولاً، أو استخدام حفظ وإرسال لكامل الفوج.');
       return;
     }
     const cls = classes.find(c => c.id === selectedClassForGrades);
@@ -3896,36 +4060,54 @@ ${directivesFormatted}
       return;
     }
 
-    // Save grades explicitly to local storage
-    localStorage.setItem('school_grades', JSON.stringify(grades));
-
-    alert(`🚀 تم حفظ وتوثيق كشف الدرجات لشهر (${currentEvaluationMonth}) بنجاح! يمكن لجميع أولياء الأمور الآن الاطلاع على كشف الدرجات والشهادة الأكاديمية مباشرة من حساباتهم دون إرسال إشعارات تشويشية. ✅`);
+    alert(`🚀 تم حفظ وتوثيق كشف الدرجات لطلاب [${cls.name}] لشهر (${currentEvaluationMonth}) بنجاح! يمكن لأولياء الأمور الاطلاع على كشف الدرجات والشهادة الأكاديمية فورياً. ✅`);
   };
 
-  const handleExportGradesExcel = () => {
-    if (!selectedClassForGrades) {
-      alert('الرجاء اختيار الصف أولاً لتصدير درجاته.');
+  const handleExportGradesExcel = (cohortMode: boolean = false) => {
+    let targetStudents: Student[] = [];
+    let exportTitle = '';
+
+    if (cohortMode) {
+      const cohortClasses = classes.filter(matchesCohort);
+      targetStudents = students.filter(s => cohortClasses.some(c => c.id === s.classId));
+      if (targetStudents.length === 0) {
+        targetStudents = students.filter(matchesCohort);
+      }
+      exportTitle = `كامل_الفوج_${activeCohort === 'evening' ? 'المسائي' : 'الصباحي'}`;
+    } else {
+      if (!selectedClassForGrades) {
+        alert('الرجاء اختيار الصف أولاً لتصدير درجاته، أو اختيار "تصدير كشف درجات كامل الفوج".');
+        return;
+      }
+      const cls = classes.find(c => c.id === selectedClassForGrades);
+      if (!cls) return;
+      targetStudents = students.filter(s => s.classId === selectedClassForGrades);
+      exportTitle = `صف_${cls.name.replace(/\s+/g, '_')}`;
+    }
+
+    if (targetStudents.length === 0) {
+      alert('لا يوجد طلاب مسجلون لتصدير بياناتهم.');
       return;
     }
-    const cls = classes.find(c => c.id === selectedClassForGrades);
-    if (!cls) return;
-    
-    const classStudents = students.filter(s => s.classId === selectedClassForGrades);
+
     const uniqueSubjects = customSubjects && customSubjects.length > 0 
       ? customSubjects 
       : ['الرياضيات', 'العلوم', 'اللغة العربية', 'التربية الإسلامية', 'اللغة الإنجليزية', 'الاجتماعيات'];
 
     const headers = ['الرقم الموحد', 'اسم الطالب', 'الصف', ...uniqueSubjects, 'المعدل', 'التقدير', 'توجيهات المعلم', 'توجيهات الإدارة'];
     
-    const data = classStudents.map(s => {
-      const studentGrades = grades.filter(g => g.studentId === s.id && g.examName === currentEvaluationMonth);
+    const data = targetStudents.map(s => {
+      const studentClass = classes.find(c => c.id === s.classId)?.name || 'غير محدد';
+      const studentGrades = grades.filter(g => g.studentId === s.id && (g.examName === currentEvaluationMonth || !g.examName));
       const evalForMonth = monthlyEvaluations[`${s.id}_${currentEvaluationMonth}`] || 
+        monthlyEvaluations[`${s.unifiedNo}_${currentEvaluationMonth}`] ||
+        monthlyEvaluations[`${s.rollNo}_${currentEvaluationMonth}`] ||
         (monthlyEvaluations[s.id]?.month === currentEvaluationMonth ? monthlyEvaluations[s.id] : null);
 
       const row: any = {
         'الرقم الموحد': s.unifiedNo || s.rollNo || '',
         'اسم الطالب': s.name,
-        'الصف': cls.name
+        'الصف': studentClass
       };
       
       let totalScore = 0;
@@ -3933,7 +4115,7 @@ ${directivesFormatted}
       
       uniqueSubjects.forEach(sub => {
         const subGrade = studentGrades.find(g => g.subject === sub);
-        if (subGrade) {
+        if (subGrade && subGrade.score !== null && subGrade.score !== undefined) {
           row[sub] = subGrade.score;
           totalScore += subGrade.score;
           subjectCount++;
@@ -3967,7 +4149,7 @@ ${directivesFormatted}
       const textToCopy = `${headerStr}\n${rowsStr}`;
       triggerClipboardExport(
         "📋 نسخ تقرير درجات الصف كـ نص",
-        `تم نسخ تقرير الدرجات الشامل لجميع طلاب الصف (${cls.name}) بنجاح. يمكنك لصقها مباشرة في برنامج Excel أو Google Sheets لحفظه أو طباعته أو مشاركته!`,
+        `تم نسخ تقرير الدرجات الشامل لجميع طلاب (${exportTitle}) بنجاح (${data.length} طالب). يمكنك لصقها مباشرة في برنامج Excel أو Google Sheets لحفظه أو طباعته أو مشاركته!`,
         textToCopy
       );
       return;
@@ -3976,7 +4158,36 @@ ${directivesFormatted}
     const worksheet = XLSX.utils.json_to_sheet(data);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'تقرير الدرجات');
-    XLSX.writeFile(workbook, `تقرير_الدرجات_${cls.name.replace(/\s+/g, '_')}.xlsx`);
+    XLSX.writeFile(workbook, `تقرير_الدرجات_${exportTitle}_شهر_${currentEvaluationMonth}.xlsx`);
+  };
+
+  const handleExportCohortRosterExcel = () => {
+    const cohortClasses = classes.filter(matchesCohort);
+    let targetStudents = students.filter(s => cohortClasses.some(c => c.id === s.classId));
+    if (targetStudents.length === 0) targetStudents = students.filter(matchesCohort);
+
+    if (targetStudents.length === 0) {
+      alert('لا يوجد طلاب في الفوج لتصديرهم.');
+      return;
+    }
+
+    const data = targetStudents.map((s, idx) => {
+      const clsName = classes.find(c => c.id === s.classId)?.name || '---';
+      return {
+        'م': idx + 1,
+        'الرقم الموحد': s.unifiedNo || s.rollNo || '',
+        'اسم الطالب': s.name,
+        'الصف والشعبة': clsName,
+        'الفوج / الدوام': s.shift === 'evening' ? 'الفوج المسائي' : 'الفوج الصباحي',
+        'اسم ولي الأمر': s.parentName || 'ولي الأمر',
+        'رقم الهاتف': s.phone || s.parentPhone || ''
+      };
+    });
+
+    const worksheet = XLSX.utils.json_to_sheet(data);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'حصر أسماء كامل الفوج');
+    XLSX.writeFile(workbook, `كشف_حصر_أسماء_كامل_الفوج_${activeCohort === 'evening' ? 'المسائي' : 'الصباحي'}.xlsx`);
   };
 
   const handleDeleteStudents = () => {
@@ -8787,74 +8998,238 @@ if __name__ == "__main__":
                 </div>
               </div>
 
+              {/* Grade Scale & Limits Customizer Panel (الدرجة العظمى ودرجة النجاح) */}
+              <div className="bg-gradient-to-r from-indigo-900 via-slate-900 to-indigo-950 text-white p-5 rounded-2xl border border-indigo-800 shadow-md">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 border-b border-indigo-800/60 pb-3">
+                  <div>
+                    <h3 className="font-bold text-sm flex items-center gap-2 text-white">
+                      <span className="text-amber-400">⚖️</span>
+                      <span>تحديد مقياس الرصد والدرجات (الدرجة العظمى ودرجة النجاح):</span>
+                    </h3>
+                    <p className="text-[11px] text-indigo-200 mt-0.5">
+                      يمكنك تحديد درجة عظمى ودرجة نجاح مقيدة، أو اختيار «غير محدد» لفتح المقياس بمرونة تامة وتعميمه على كشوف أولياء الأمور
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-bold bg-white/10 px-2.5 py-1 rounded-xl border border-white/15 text-indigo-200">
+                      العظمى: <strong className="text-amber-300">{effectiveMaxGrade}</strong> • النجاح: <strong className="text-emerald-300">{effectivePassGrade}</strong>
+                    </span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {/* Max Grade Setting */}
+                  <div className="bg-white/10 p-3.5 rounded-xl border border-white/15 backdrop-blur-md">
+                    <label className="block text-xs font-bold text-indigo-200 mb-2">
+                      1. تحديد الدرجة العظمى للمواد:
+                    </label>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <select
+                        value={directorMaxGradeType}
+                        onChange={e => {
+                          const val = e.target.value;
+                          setDirectorMaxGradeType(val);
+                          localStorage.setItem('school_max_grade_setting', val);
+                        }}
+                        className="bg-slate-900 text-white border border-indigo-400/50 rounded-xl px-3 py-2 text-xs font-bold focus:outline-none focus:ring-2 focus:ring-indigo-400 cursor-pointer flex-1"
+                      >
+                        <option value="100">100 (افتراضي)</option>
+                        <option value="unspecified">✨ غير محدد (مفتوح بدون حد أقصى)</option>
+                        <option value="50">50</option>
+                        <option value="20">20</option>
+                        <option value="custom">قيمة مخصصة أخرى...</option>
+                      </select>
+                      {directorMaxGradeType === 'custom' && (
+                        <input
+                          type="number"
+                          value={directorCustomMaxGrade}
+                          onChange={e => {
+                            setDirectorCustomMaxGrade(e.target.value);
+                            localStorage.setItem('school_custom_max_grade', e.target.value);
+                          }}
+                          placeholder="الدرجة"
+                          className="w-20 bg-slate-900 text-white border border-indigo-400 rounded-xl px-2 py-2 text-xs font-bold text-center"
+                        />
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Pass Grade Setting */}
+                  <div className="bg-white/10 p-3.5 rounded-xl border border-white/15 backdrop-blur-md">
+                    <label className="block text-xs font-bold text-indigo-200 mb-2">
+                      2. تحديد درجة النجاح (الحد الأدنى):
+                    </label>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <select
+                        value={directorPassGradeType}
+                        onChange={e => {
+                          const val = e.target.value;
+                          setDirectorPassGradeType(val);
+                          localStorage.setItem('school_pass_grade_setting', val);
+                        }}
+                        className="bg-slate-900 text-white border border-emerald-400/50 rounded-xl px-3 py-2 text-xs font-bold focus:outline-none focus:ring-2 focus:ring-emerald-400 cursor-pointer flex-1"
+                      >
+                        <option value="50">50 (افتراضي)</option>
+                        <option value="unspecified">✨ غير محدد (مفتوح بدون حد أدنى)</option>
+                        <option value="25">25</option>
+                        <option value="10">10</option>
+                        <option value="custom">قيمة مخصصة أخرى...</option>
+                      </select>
+                      {directorPassGradeType === 'custom' && (
+                        <input
+                          type="number"
+                          value={directorCustomPassGrade}
+                          onChange={e => {
+                            setDirectorCustomPassGrade(e.target.value);
+                            localStorage.setItem('school_custom_pass_grade', e.target.value);
+                          }}
+                          placeholder="الدرجة"
+                          className="w-20 bg-slate-900 text-white border border-emerald-400 rounded-xl px-2 py-2 text-xs font-bold text-center"
+                        />
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               {/* Excel Controls Panel */}
               <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm space-y-4">
-                <h3 className="font-bold text-slate-800 text-sm flex items-center gap-2 justify-end">
-                  <FileCheck className="w-5 h-5 text-indigo-600" />
-                  <span>معالجة الكشوفات الذكية (Excel)</span>
-                </h3>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
+                  <h3 className="font-bold text-slate-800 text-sm flex items-center gap-2">
+                    <FileCheck className="w-5 h-5 text-indigo-600" />
+                    <span>معالجة وتصدير الكشوفات الذكية (Excel) لكامل الفوج والصفوف</span>
+                  </h3>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs bg-indigo-50 text-indigo-700 font-bold px-3 py-1 rounded-xl border border-indigo-150">
+                      الفوج النشط: {activeCohort === 'evening' ? '🌙 الفوج المسائي' : '☀️ الفوج الصباحي'} ({students.filter(matchesCohort).length} طالب)
+                    </span>
+                  </div>
+                </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
                   <div>
-                    <label className="block text-xs font-semibold text-slate-600 mb-1.5">اختر الصف الدراسي للمعاينة والتحكم:</label>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1.5">اختر الصف الدراسي للمعاينة الفردية:</label>
                     <select
                       value={selectedClassForGrades}
                       onChange={e => setSelectedClassForGrades(e.target.value)}
                       className="w-full text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl bg-white focus:border-indigo-500 focus:outline-none"
                     >
-                      <option value="">-- اختر الصف الدراسي --</option>
+                      <option value="">-- اختر الصف الدراسي للمعالجة --</option>
                       {classes.filter(matchesCohort).map(c => (
                         <option key={c.id} value={c.id}>{c.name}</option>
                       ))}
                     </select>
                   </div>
 
-                  <div className="md:col-span-2 flex flex-col sm:flex-row gap-3">
+                  <div className="md:col-span-2 flex flex-wrap gap-2.5">
+                    {/* 1. Download Blank Templates (Class & Cohort) */}
                     <button
-                      onClick={handleDownloadEmptyTemplate}
+                      type="button"
+                      onClick={() => handleDownloadEmptyTemplate(false)}
                       disabled={!selectedClassForGrades}
-                      className="flex-1 text-xs font-bold text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 py-2.5 px-4 rounded-xl transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
+                      className="text-xs font-bold text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 py-2 px-3 rounded-xl transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5 shadow-2xs"
+                      title="تنزيل نموذج إكسل فارغ للصف المحدد"
                     >
-                      <Download className="w-4 h-4 text-slate-500" />
-                      <span>نموذج رصد فارغ (Excel) 📥</span>
+                      <Download className="w-3.5 h-3.5 text-slate-500" />
+                      <span>نموذج الصف 📥</span>
                     </button>
 
-                    <div className="flex-1 relative">
+                    <button
+                      type="button"
+                      onClick={() => handleDownloadEmptyTemplate(true)}
+                      className="text-xs font-bold text-indigo-800 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 py-2 px-3 rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5 shadow-2xs"
+                      title="تنزيل نموذج إكسل فارغ يحتوي على جميع طلاب الفوج بالكامل"
+                    >
+                      <Download className="w-3.5 h-3.5 text-indigo-600" />
+                      <span>🌟 نموذج كامل الفوج 📥</span>
+                    </button>
+
+                    {/* 2. Export Grades to Excel (Class & Cohort) */}
+                    <button
+                      type="button"
+                      onClick={() => handleExportGradesExcel(false)}
+                      disabled={!selectedClassForGrades}
+                      className="text-xs font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 py-2 px-3 rounded-xl transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5 shadow-2xs"
+                      title="تصدير كشف درجات طلاب الصف المحدد"
+                    >
+                      <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>درجات الصف 📊</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleExportGradesExcel(true)}
+                      className="text-xs font-black text-white bg-emerald-600 hover:bg-emerald-700 border border-emerald-500 py-2 px-3.5 rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5 shadow-xs"
+                      title="تصدير كشف درجات وأسماء طلاب كامل الفوج الدراسي دفعة واحدة إلى Excel"
+                    >
+                      <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-200" />
+                      <span>🌟 تصدير درجات كامل الفوج 📥</span>
+                    </button>
+
+                    {/* 3. Export Cohort Roster List */}
+                    <button
+                      type="button"
+                      onClick={handleExportCohortRosterExcel}
+                      className="text-xs font-bold text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-200 py-2 px-3 rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5 shadow-2xs"
+                      title="تصدير كشف حصر أسماء كامل الفوج مع الأرقام الموحدة والصفوف وأولياء الأمور"
+                    >
+                      <span>👥 حصر أسماء كامل الفوج 📋</span>
+                    </button>
+
+                    {/* 4. Import Grades from Excel (Supports Class & Cohort with unifiedNo + class matching) */}
+                    <div className="relative">
                       <input
                         ref={gradeImportInputRef}
                         type="file"
                         accept=".xlsx, .xls"
                         onChange={handleImportGradesExcel}
-                        disabled={!selectedClassForGrades}
                         className="hidden"
                       />
                       <button
                         type="button"
                         onClick={() => gradeImportInputRef.current?.click()}
-                        disabled={!selectedClassForGrades}
-                        className={`w-full text-xs font-bold py-2.5 px-4 rounded-xl border transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5 ${
-                          selectedClassForGrades
-                            ? 'border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100/80 shadow-xs'
-                            : 'border-slate-100 bg-slate-50 text-slate-400 cursor-not-allowed'
-                        }`}
+                        className="text-xs font-black py-2 px-3.5 rounded-xl border border-sky-300 bg-sky-50 text-sky-900 hover:bg-sky-100 transition cursor-pointer flex items-center justify-center gap-1.5 shadow-xs"
+                        title="استيراد الدرجات من Excel للصف أو لكامل الفوج وتوزيعها بدقة حسب الرقم الموحد والصف"
                       >
-                        <Upload className="w-4 h-4 text-emerald-600" />
-                        <span>📥 استيراد الدرجات من ملف إكسل</span>
+                        <Upload className="w-3.5 h-3.5 text-sky-600" />
+                        <span>📥 استيراد الدرجات (الصف أو كامل الفوج)</span>
                       </button>
                     </div>
 
+                    {/* 5. Save & Send to Parents */}
                     <button
                       type="button"
-                      onClick={handleSaveAndSendGradesToParents}
+                      onClick={() => handleSaveAndSendGradesToParents(false)}
                       disabled={!selectedClassForGrades}
-                      className={`flex-1 text-xs font-bold py-2.5 px-4 rounded-xl border transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5 ${
-                        selectedClassForGrades
-                          ? 'border-indigo-200 bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs'
-                          : 'border-slate-100 bg-slate-50 text-slate-400 cursor-not-allowed'
-                      }`}
+                      className="text-xs font-bold py-2 px-3 rounded-xl border border-indigo-200 bg-indigo-600 hover:bg-indigo-700 text-white transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5 shadow-xs"
+                      title="حفظ وإرسال كشف درجات طلاب الصف المحدد"
                     >
-                      <Send className="w-4 h-4" />
-                      <span>💾 حفظ وإرسال النتائج لأولياء الأمور</span>
+                      <Send className="w-3.5 h-3.5" />
+                      <span>💾 إرسال درجات الصف</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleSaveAndSendGradesToParents(true)}
+                      className="text-xs font-black py-2 px-3.5 rounded-xl border border-purple-300 bg-purple-700 hover:bg-purple-800 text-white transition cursor-pointer flex items-center justify-center gap-1.5 shadow-xs"
+                      title="حفظ واعتماد وإرسال كشوف الدرجات لكافة أولياء أمور الفوج الدراسي بالكامل"
+                    >
+                      <Send className="w-3.5 h-3.5 text-purple-200" />
+                      <span>🚀 حفظ وإرسال لكامل الفوج</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const cName = classes.find(c => c.id === selectedClassForGrades)?.name || 'الصف';
+                        printElementById('director-grades-print-container', `كشف رصد درجات ${cName} - شهر ${currentEvaluationMonth}`);
+                      }}
+                      disabled={!selectedClassForGrades}
+                      className="text-xs font-bold py-2 px-3 rounded-xl border border-slate-800 bg-slate-900 hover:bg-slate-800 text-white transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5 shadow-xs"
+                      title="طباعة كشف درجات الصف كامل شاملاً الأختام الرسمية وتواقيع الإدارة"
+                    >
+                      <Printer className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>🖨️ طباعة الصف</span>
                     </button>
                   </div>
                 </div>
@@ -8862,7 +9237,7 @@ if __name__ == "__main__":
 
               {/* Grades Table */}
               {selectedClassForGrades ? (
-                <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
+                <div id="director-grades-print-container" className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
                   <div className="p-5 border-b border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-4">
                     <div>
                       <h3 className="font-bold text-slate-800 text-sm">
@@ -8965,6 +9340,16 @@ ${sampleEval}
                         title="تخصيص صياغة وقالب رسائل الواتساب لأولياء الأمور"
                       >
                         <span>⚙️ تخصيص صياغة رسائل الواتساب</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setIsSealModalOpen(true)}
+                        className="text-xs font-bold bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 py-2 px-3.5 rounded-xl transition cursor-pointer shadow-2xs flex items-center justify-center gap-1.5"
+                        title="تعديل وتخصيص أسماء المدراء والختم الرسمي لكشوفات الدرجات والشهادات"
+                      >
+                        <Award className="w-3.5 h-3.5 text-amber-700" />
+                        <span>🖋️ تعديل أسماء الإدارة والختم</span>
                       </button>
 
                       <button
@@ -9101,7 +9486,7 @@ ${sampleEval}
                                     <input
                                       type="number"
                                       min="0"
-                                      max="100"
+                                      max={directorMaxGradeType === 'unspecified' ? undefined : (numericMaxGrade || 100)}
                                       value={subGrade ? subGrade.score : ''}
                                       onChange={e => {
                                         const valStr = e.target.value.trim();
@@ -9121,7 +9506,7 @@ ${sampleEval}
                                               subject: sub,
                                               examName: currentEvaluationMonth,
                                               score: score,
-                                              maxScore: 100,
+                                              maxScore: numericMaxGrade || 100,
                                               date: new Date().toISOString().split('T')[0],
                                               teacherId: 'director'
                                             });
@@ -9196,6 +9581,7 @@ ${sampleEval}
                                     };
                                     setMonthlyEvaluations(updated);
                                     localStorage.setItem('school_monthly_evaluations', JSON.stringify(updated));
+                                    window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_monthly_evaluations', value: JSON.stringify(updated) } }));
                                   }}
                                   className="w-full text-xs border border-slate-200 hover:border-indigo-400 focus:border-indigo-600 rounded-lg p-1.5 focus:outline-none text-right bg-slate-50/50 focus:bg-white"
                                   placeholder="توجيهات المعلم..."
@@ -9229,6 +9615,7 @@ ${sampleEval}
                                     };
                                     setMonthlyEvaluations(updated);
                                     localStorage.setItem('school_monthly_evaluations', JSON.stringify(updated));
+                                    window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_monthly_evaluations', value: JSON.stringify(updated) } }));
                                   }}
                                   className="w-full text-xs border border-slate-200 hover:border-indigo-400 focus:border-indigo-600 rounded-lg p-1.5 focus:outline-none text-right bg-amber-50/30 focus:bg-white"
                                   placeholder="توجيهات الإدارة..."
@@ -9361,6 +9748,14 @@ ${sampleEval}
                     </table>
                       );
                     })()}
+                  </div>
+
+                  {/* Dual Signatures and School Stamps */}
+                  <div className="p-5 border-t border-slate-150 bg-slate-50/50">
+                    <GradeSheetSignatures
+                      subtitle={`كشف رصد درجات ${classes.find(c => c.id === selectedClassForGrades)?.name || 'الصف'} - شهر: ${currentEvaluationMonth}`}
+                      onOpenEditModal={() => setIsSealModalOpen(true)}
+                    />
                   </div>
                 </div>
               ) : (
@@ -14305,6 +14700,12 @@ ${sampleEval}
             </div>
           )}
         </AnimatePresence>
+
+        {/* Official School Seal and Signatures Customization Modal */}
+        <SealAndSignaturesModal
+          isOpen={isSealModalOpen}
+          onClose={() => setIsSealModalOpen(false)}
+        />
 
         {/* Portal Bottom Designer Signature - Aligned completely to the left */}
         <div className="mt-8 pt-4 border-t border-slate-200/60 no-print flex flex-col sm:flex-row items-center justify-between gap-3">

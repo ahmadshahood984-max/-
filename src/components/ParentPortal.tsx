@@ -35,10 +35,16 @@ import {
   Sparkles,
   Building2,
   ArrowLeftRight,
-  Hash
+  Hash,
+  Printer,
+  FileSpreadsheet
 } from 'lucide-react';
+import * as XLSX from 'xlsx';
 import { Parent, Student, Attendance, Grade, Announcement, Message, AbsenceExcuse, Teacher, Class } from '../types';
 import { PortalDesignerBadge } from './PortalDesignerBadge';
+import { GradeSheetSignatures } from './GradeSheetSignatures';
+import { printElementById, downloadElementAsImage, exportElementAsPdf } from '../lib/printUtils';
+import { safeShowNotification } from '../lib/notificationHelper';
 import { getStoredWelcomeMessages, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { motion, AnimatePresence } from 'motion/react';
 import { trackActivityOperation } from '../lib/firestoreTracker';
@@ -150,6 +156,91 @@ export default function ParentPortal({
   });
 
   const [welcomeMsgs, setWelcomeMsgs] = useState<WelcomeMessagesConfig>(getStoredWelcomeMessages);
+
+  // Grade ceiling / passing settings: '100' | 'unspecified' | '50' | '20' | 'custom'
+  const [maxGradeChoice, setMaxGradeChoice] = useState<string>(() => {
+    return localStorage.getItem('school_parent_max_grade_choice') || 
+           localStorage.getItem('school_max_grade_setting') || 
+           '100';
+  });
+  const [customMaxGrade, setCustomMaxGrade] = useState<string>(() => {
+    return localStorage.getItem('school_parent_custom_max_grade') || 
+           localStorage.getItem('school_custom_max_grade') || 
+           '100';
+  });
+  const [passGradeChoice, setPassGradeChoice] = useState<string>(() => {
+    return localStorage.getItem('school_parent_pass_grade_choice') || 
+           localStorage.getItem('school_pass_grade_setting') || 
+           '50';
+  });
+  const [customPassGrade, setCustomPassGrade] = useState<string>(() => {
+    return localStorage.getItem('school_parent_custom_pass_grade') || 
+           localStorage.getItem('school_custom_pass_grade') || 
+           '50';
+  });
+
+  const displayMaxGrade = maxGradeChoice === 'unspecified' 
+    ? 'غير محدد' 
+    : maxGradeChoice === 'custom' 
+      ? (customMaxGrade || 'غير محدد')
+      : maxGradeChoice;
+
+  const displayPassGrade = passGradeChoice === 'unspecified' 
+    ? 'غير محدد' 
+    : passGradeChoice === 'custom' 
+      ? (customPassGrade || 'غير محدد')
+      : passGradeChoice;
+
+  const numericMaxGrade = maxGradeChoice === 'unspecified' 
+    ? null 
+    : parseFloat(displayMaxGrade) || null;
+
+  const numericPassGrade = passGradeChoice === 'unspecified' 
+    ? null 
+    : parseFloat(displayPassGrade) || null;
+
+  const handleExportStudentGradesExcel = (studentName: string, childClass: string, targetMonth: string, gradeValues: any[], avg: string | null, estimation: string) => {
+    const data = gradeValues.map((gv, idx) => ({
+      'م': idx + 1,
+      'المادة الدراسية': gv.subject,
+      'الدرجة المحرزة': gv.score !== null ? gv.score : 'قيد الرصد',
+      'الدرجة العظمى': displayMaxGrade,
+      'درجة النجاح': displayPassGrade,
+      'التقدير والمستوى': gv.score !== null ? (gv.score >= 90 ? 'ممتاز' : gv.score >= 80 ? 'جيد جداً' : gv.score >= 70 ? 'جيد' : gv.score >= 60 ? 'مقبول' : 'يحتاج متابعة') : 'قيد الرصد'
+    }));
+
+    data.push({
+      'م': '' as any,
+      'المادة الدراسية': 'المعدل والنتيجة الإجمالية',
+      'الدرجة المحرزة': avg !== null ? `${avg}%` : '---',
+      'الدرجة العظمى': displayMaxGrade,
+      'درجة النجاح': displayPassGrade,
+      'التقدير والمستوى': estimation
+    });
+
+    const worksheet = XLSX.utils.json_to_sheet(data);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'كشف الدرجات');
+    XLSX.writeFile(workbook, `كشف_درجات_${studentName.replace(/\s+/g, '_')}_شهر_${targetMonth}.xlsx`);
+  };
+
+  const handleExportCohortStudentsExcel = (childClass: string) => {
+    const targetStudents = students.filter(s => s.classId === activeChild?.classId || s.shift === activeChild?.shift);
+    const listToExport = targetStudents.length > 0 ? targetStudents : students;
+
+    const data = listToExport.map((s, idx) => ({
+      'م': idx + 1,
+      'الرقم الموحد': s.unifiedNo || s.rollNo || '',
+      'اسم الطالب': s.name,
+      'الصف والشعبة': classes.find(c => c.id === s.classId)?.name || childClass || '---',
+      'الفوج': s.shift === 'evening' ? 'الفوج المسائي' : 'الفوج الصباحي'
+    }));
+
+    const worksheet = XLSX.utils.json_to_sheet(data);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'حصر أسماء الفوج');
+    XLSX.writeFile(workbook, `أسماء_طلاب_فوج_${(activeChild?.name || '').replace(/\s+/g, '_')}.xlsx`);
+  };
 
   React.useEffect(() => {
     const handleStorageUpdate = () => {
@@ -442,9 +533,7 @@ export default function ParentPortal({
         const body = `تم رصد درجة الطالب ${activeChild?.name} في تقييم (${g.examName}): ${g.score}/${g.maxScore}`;
         playCustomNotificationSound();
         showLocalPortalToast(title, body, 'grade');
-        if ('Notification' in window && Notification.permission === 'granted') {
-          new Notification(title, { body, icon: '/icon.png' });
-        }
+        safeShowNotification(title, { body, icon: '/icon.png' });
       });
       prevGradesRef.current = gradeIds;
     }
@@ -458,9 +547,7 @@ export default function ParentPortal({
         const body = `تم رصد حالة الطالب ${activeChild?.name} ليوم ${a.date} كـ: ${statusAr}`;
         playCustomNotificationSound();
         showLocalPortalToast(title, body, 'attendance');
-        if ('Notification' in window && Notification.permission === 'granted') {
-          new Notification(title, { body, icon: '/icon.png' });
-        }
+        safeShowNotification(title, { body, icon: '/icon.png' });
       });
       prevAttendanceRef.current = attendanceIds;
     }
@@ -473,9 +560,7 @@ export default function ParentPortal({
         const body = `${an.title}: ${an.content.substring(0, 80)}...`;
         playCustomNotificationSound();
         showLocalPortalToast(title, body, 'announcement');
-        if ('Notification' in window && Notification.permission === 'granted') {
-          new Notification(title, { body, icon: '/icon.png' });
-        }
+        safeShowNotification(title, { body, icon: '/icon.png' });
       });
       prevAnnouncementsRef.current = announcementIds;
     }
@@ -489,9 +574,7 @@ export default function ParentPortal({
           const body = m.content.replace(/^📢 \[تصنيف الإشعار:[^\]]+\]\n/, '');
           playCustomNotificationSound();
           showLocalPortalToast(title, body, 'message');
-          if ('Notification' in window && Notification.permission === 'granted') {
-            new Notification(title, { body, icon: '/icon.png' });
-          }
+          safeShowNotification(title, { body, icon: '/icon.png' });
         }
       });
       prevMessagesRef.current = messageIds;
@@ -754,15 +837,11 @@ export default function ParentPortal({
                 }
                 
                 // Trigger native push notification
-                if (isTargetParent && typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
-                  try {
-                    new Notification(newMsg.senderName || 'إشعار مدرسي جديد 🔔', {
-                      body: newMsg.content,
-                      icon: '/icon.png'
-                    });
-                  } catch (e) {
-                    console.warn("Could not display system push notification in this context:", e);
-                  }
+                if (isTargetParent) {
+                  safeShowNotification(newMsg.senderName || 'إشعار مدرسي جديد 🔔', {
+                    body: newMsg.content,
+                    icon: '/icon.png'
+                  });
                 }
 
                 const updated = [...prev, newMsg];
@@ -1079,7 +1158,7 @@ export default function ParentPortal({
     return localStorage.getItem('school_evaluation_current_month') || 'تشرين الأول';
   });
   const [parentSelectedMonth, setParentSelectedMonth] = useState<string>('');
-  const [monthlyEvaluations, setMonthlyEvaluations] = useState<Record<string, { month: string; text: string }>>(() => {
+  const [monthlyEvaluations, setMonthlyEvaluations] = useState<Record<string, { month?: string; text?: string; teacherText?: string; directorText?: string }>>(() => {
     const saved = localStorage.getItem('school_monthly_evaluations');
     if (saved) {
       try {
@@ -2312,7 +2391,7 @@ export default function ParentPortal({
                     </div>
                   ) : (
                     <>
-                      {/* Horizontal Report Card Model sent by Director */}
+                      {/* Official Enhanced Monthly Grade Report Card */}
                       {(() => {
                         const savedSubjects = localStorage.getItem('school_custom_subjects');
                         const parsedSubjects = savedSubjects ? JSON.parse(savedSubjects) : [];
@@ -2326,20 +2405,19 @@ export default function ParentPortal({
                         
                         // Default month to show
                         const targetMonth = parentSelectedMonth || currentEvaluationMonth;
-                        
                         const studentGrades = allChildGrades.filter(g => g.examName === targetMonth);
 
                         let totalScore = 0;
                         let scoredCount = 0;
                         const gradeValues = activeSubjects.map(sub => {
                           const subGrade = studentGrades.find(g => g.subject === sub);
-                          if (subGrade) {
+                          if (subGrade && subGrade.score !== null && subGrade.score !== undefined) {
                             totalScore += subGrade.score;
                             scoredCount++;
                           }
                           return {
                             subject: sub,
-                            score: subGrade ? subGrade.score : null
+                            score: subGrade && subGrade.score !== null && subGrade.score !== undefined ? subGrade.score : null
                           };
                         });
 
@@ -2350,174 +2428,451 @@ export default function ParentPortal({
                           const avgNum = parseFloat(avg);
                           if (avgNum >= 90) {
                             estimation = 'ممتاز 🌟';
-                            badgeColor = 'bg-emerald-50 text-emerald-700 border-emerald-100';
+                            badgeColor = 'bg-emerald-50 text-emerald-800 border-emerald-200';
                           } else if (avgNum >= 80) {
                             estimation = 'جيد جداً 🎈';
-                            badgeColor = 'bg-teal-50 text-teal-700 border-teal-100';
+                            badgeColor = 'bg-teal-50 text-teal-800 border-teal-200';
                           } else if (avgNum >= 70) {
                             estimation = 'جيد 👍';
-                            badgeColor = 'bg-blue-50 text-blue-700 border-blue-100';
+                            badgeColor = 'bg-blue-50 text-blue-800 border-blue-200';
                           } else if (avgNum >= 60) {
                             estimation = 'مقبول';
-                            badgeColor = 'bg-amber-50 text-amber-700 border-amber-100';
+                            badgeColor = 'bg-amber-50 text-amber-800 border-amber-200';
                           } else {
-                            estimation = 'ضعيف';
-                            badgeColor = 'bg-rose-50 text-rose-700 border-rose-100';
+                            estimation = 'يحتاج متابعة ⚠️';
+                            badgeColor = 'bg-rose-50 text-rose-800 border-rose-200';
                           }
                         }
 
-                        return (
-                          <div className="bg-white rounded-2xl border-2 border-indigo-600/30 shadow-md p-5 text-right space-y-4 overflow-hidden mb-4" style={{ direction: 'rtl' }}>
-                            {/* Header */}
-                            <div className="border-b border-slate-100 pb-3 flex flex-col sm:flex-row items-center justify-between gap-3">
-                              <div className="space-y-1 w-full sm:w-auto">
-                                <div className="flex flex-wrap items-center gap-2">
-                                  <span className="text-base">📋</span>
-                                  <h4 className="text-sm font-black text-indigo-950">
-                                    التقرير الشهري المعتمد لشهر:
-                                  </h4>
-                                  <select
-                                    value={targetMonth}
-                                    onChange={(e) => setParentSelectedMonth(e.target.value)}
-                                    className="bg-indigo-50 border border-indigo-200 rounded-xl px-3 py-1 text-indigo-900 text-xs font-black focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer"
-                                  >
-                                    {Array.from(new Set([currentEvaluationMonth, ...uniqueGradeMonths])).map(m => (
-                                      <option key={m} value={m}>{m}</option>
-                                    ))}
-                                  </select>
-                                </div>
-                                <p className="text-[10px] text-slate-400 font-medium">التقرير المعتمد والموقّع إلكترونياً من إدارة المدرسة لولي الأمر</p>
-                              </div>
-                              <div className="bg-indigo-50 border border-indigo-100 px-3 py-1 rounded-lg flex items-center gap-1.5 shrink-0">
-                                <span className="text-[9px] text-indigo-700 font-bold">الحالة:</span>
-                                <span className="text-[9px] bg-emerald-500 text-white px-2 py-0.5 rounded-full font-black">
-                                  {scoredCount > 0 ? "مكتمل وموثّق ✅" : "قيد الانتظار ⏳"}
-                                </span>
-                              </div>
-                            </div>
-
-                            {/* Grades complete horizontally */}
-                            <div className="overflow-x-auto pb-1 scrollbar-thin">
-                              <table className="w-full text-center border border-slate-100 rounded-xl overflow-hidden min-w-[500px]">
-                                <thead>
-                                  <tr className="bg-slate-50 text-slate-600 text-[10px] font-bold border-b border-slate-100">
-                                    {gradeValues.map(gv => (
-                                      <th key={gv.subject} className="p-2 border-l border-slate-100 font-bold">{gv.subject}</th>
-                                    ))}
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  <tr className="bg-white text-slate-800 text-xs font-bold">
-                                    {gradeValues.map(gv => (
-                                      <td key={gv.subject} className="p-3 border-l border-slate-100 font-mono text-sm">
-                                        {gv.score !== null ? (
-                                          <span className={gv.score < 50 ? 'text-red-500 font-black' : 'text-slate-900 font-black'}>
-                                            {gv.score}
-                                          </span>
-                                        ) : (
-                                          <span className="text-slate-300 font-light">---</span>
-                                        )}
-                                      </td>
-                                    ))}
-                                  </tr>
-                                </tbody>
-                              </table>
-                            </div>
-
-                            {/* After the grades: average and appreciation */}
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-                              <div className="bg-indigo-50/60 border border-indigo-100 p-3 rounded-xl flex items-center justify-between">
-                                <span className="text-[11px] font-bold text-indigo-950 flex items-center gap-1">
-                                  <span>📈</span>
-                                  <span>المعدل العام للشهر:</span>
-                                </span>
-                                <span className="text-sm font-black text-indigo-700 font-mono">
-                                  {avg !== null ? `${avg}%` : '---'}
-                                </span>
-                              </div>
-
-                              <div className={`border p-3 rounded-xl flex items-center justify-between ${avg !== null ? badgeColor : 'bg-slate-50 border-slate-100'}`}>
-                                <span className="text-[11px] font-bold flex items-center gap-1">
-                                  <span>📝</span>
-                                  <span>التقدير العام:</span>
-                                </span>
-                                <span className="text-xs font-black">
-                                  {estimation}
-                                </span>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })()}
-
-                      {/* Monthly Evaluation Card from Director & Teacher */}
-                      {(() => {
-                        const targetMonth = parentSelectedMonth || currentEvaluationMonth;
+                        // Evaluation for target month
                         const evalForMonth = monthlyEvaluations[`${selectedChildId}_${targetMonth}`] || 
-                          (monthlyEvaluations[selectedChildId]?.month === targetMonth ? monthlyEvaluations[selectedChildId] : null);
-                        
+                          monthlyEvaluations[`${activeChild?.unifiedNo}_${targetMonth}`] ||
+                          monthlyEvaluations[`${activeChild?.rollNo}_${targetMonth}`] ||
+                          (monthlyEvaluations[selectedChildId]?.month === targetMonth ? monthlyEvaluations[selectedChildId] : null) ||
+                          monthlyEvaluations[selectedChildId] ||
+                          monthlyEvaluations[activeChild?.unifiedNo || ''] ||
+                          monthlyEvaluations[activeChild?.rollNo || ''];
+
                         const teacherMsg = evalForMonth?.teacherText !== undefined ? evalForMonth.teacherText : (evalForMonth?.text || '');
                         const directorMsg = evalForMonth?.directorText || '';
 
-                        const schoolLogo = localStorage.getItem('school_logo_image');
+                        const schoolLogo = localStorage.getItem('school_logo_image') || schoolAppIcon;
                         const studentPhoto = localStorage.getItem(`student_photo_${selectedChildId}`) || localStorage.getItem(`student_photo_${activeChild?.name}`);
 
-                        if (!teacherMsg.trim() && !directorMsg.trim()) return null;
+                        const getSubjectIcon = (sub: string) => {
+                          if (sub.includes('عربي') || sub.includes('قرآن') || sub.includes('قراءة')) return '📖';
+                          if (sub.includes('رياضيات') || sub.includes('حساب')) return '📐';
+                          if (sub.includes('علوم') || sub.includes('كيمياء') || sub.includes('فيزياء') || sub.includes('أحياء')) return '🔬';
+                          if (sub.includes('إسلام') || sub.includes('دين') || sub.includes('فقه') || sub.includes('توحيد')) return '🕋';
+                          if (sub.includes('إنكليز') || sub.includes('انقليز') || sub.includes('English') || sub.includes('لغات')) return '🌐';
+                          if (sub.includes('اجتماع') || sub.includes('تاريخ') || sub.includes('جغرافيا') || sub.includes('وطنية')) return '🌍';
+                          if (sub.includes('حاسوب') || sub.includes('معلومات') || sub.includes('تكنولوجيا')) return '💻';
+                          if (sub.includes('فني') || sub.includes('رسم')) return '🎨';
+                          if (sub.includes('رياضة') || sub.includes('بدنية')) return '⚽';
+                          return '📚';
+                        };
+
+                        const getSubjectScoreDetails = (score: number | null) => {
+                          if (score === null) {
+                            return {
+                              text: '---',
+                              appraisal: 'قيد الرصد ⏳',
+                              badgeClass: 'bg-slate-100 text-slate-400 border-slate-200',
+                              barColor: 'bg-slate-300',
+                              percentage: 0
+                            };
+                          }
+                          const pct = Math.min(Math.max(score, 0), 100);
+                          if (score >= 90) {
+                            return {
+                              text: `${score}`,
+                              appraisal: 'ممتاز ⭐',
+                              badgeClass: 'bg-emerald-50 text-emerald-800 border-emerald-200 font-black',
+                              barColor: 'bg-emerald-500',
+                              percentage: pct
+                            };
+                          }
+                          if (score >= 80) {
+                            return {
+                              text: `${score}`,
+                              appraisal: 'جيد جداً ✨',
+                              badgeClass: 'bg-teal-50 text-teal-800 border-teal-200 font-black',
+                              barColor: 'bg-teal-500',
+                              percentage: pct
+                            };
+                          }
+                          if (score >= 70) {
+                            return {
+                              text: `${score}`,
+                              appraisal: 'جيد 👍',
+                              badgeClass: 'bg-blue-50 text-blue-800 border-blue-200 font-black',
+                              barColor: 'bg-blue-500',
+                              percentage: pct
+                            };
+                          }
+                          if (score >= 60) {
+                            return {
+                              text: `${score}`,
+                              appraisal: 'مقبول',
+                              badgeClass: 'bg-amber-50 text-amber-800 border-amber-200 font-bold',
+                              barColor: 'bg-amber-500',
+                              percentage: pct
+                            };
+                          }
+                          return {
+                            text: `${score}`,
+                            appraisal: 'يحتاج متابعة ⚠️',
+                            badgeClass: 'bg-rose-50 text-rose-800 border-rose-200 font-black',
+                            barColor: 'bg-rose-500',
+                            percentage: pct
+                          };
+                        };
 
                         return (
-                          <div className={`p-5 rounded-2xl shadow-xs text-right space-y-3 border transition duration-200 ${
-                            isEvalUnread 
-                              ? 'bg-rose-50 border-rose-300 ring-2 ring-rose-400/50 shadow-sm' 
-                              : 'bg-indigo-50/80 border border-indigo-100/80'
-                          }`}>
-                            {/* Official Header with Logo & Photo if present */}
-                            {(schoolLogo || studentPhoto) && (
-                              <div className="bg-white/90 p-3 rounded-xl border border-indigo-100 flex items-center justify-between gap-3 shadow-2xs mb-2">
-                                <div className="flex items-center gap-2.5">
-                                  {schoolLogo && (
-                                    <img src={schoolLogo} alt="شعار المدرسة" className="w-9 h-9 object-contain rounded-lg border border-slate-100 p-0.5" />
+                          <div
+                            id="parent-report-card-container"
+                            className="bg-white rounded-3xl border-2 border-indigo-200 shadow-xl overflow-hidden mb-6 text-right transition-all"
+                            style={{ direction: 'rtl' }}
+                          >
+                            {/* 1. Official School Header Banner */}
+                            <div className="bg-gradient-to-l from-indigo-950 via-slate-900 to-indigo-900 text-white p-5 sm:p-6 relative overflow-hidden">
+                              <div className="absolute top-0 right-0 w-96 h-96 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none" />
+                              <div className="absolute bottom-0 left-0 w-80 h-80 bg-amber-500/10 rounded-full blur-2xl pointer-events-none" />
+
+                              <div className="relative z-10 flex flex-col md:flex-row items-center justify-between gap-4">
+                                {/* School Info with Logo */}
+                                <div className="flex items-center gap-3.5 w-full md:w-auto">
+                                  {schoolLogo ? (
+                                    <div className="w-14 h-14 rounded-2xl bg-white p-1.5 shadow-md shrink-0 flex items-center justify-center border border-white/20">
+                                      <img src={schoolLogo} alt="شعار المدرسة" className="w-full h-full object-contain rounded-xl" />
+                                    </div>
+                                  ) : (
+                                    <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-amber-500 to-amber-300 text-indigo-950 flex items-center justify-center font-black text-2xl shadow-md shrink-0">
+                                      🏛️
+                                    </div>
                                   )}
+
                                   <div>
-                                    <span className="font-bold text-xs text-indigo-950 block">المدرسة الدولية الخاصة</span>
-                                    <span className="text-[10px] text-slate-500 font-medium block">تقرير المتابعة المعتمد</span>
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <span className="text-xs bg-amber-400 text-indigo-950 font-black px-2.5 py-0.5 rounded-full shadow-2xs">
+                                        المدرسة الدولية الخاصة
+                                      </span>
+                                      <span className="text-[10px] text-indigo-200 font-bold">
+                                        قسم التعليم الأساسي والابتدائي • حلب - مارع
+                                      </span>
+                                    </div>
+                                    <h3 className="text-base sm:text-lg font-black text-white mt-1 tracking-wide">
+                                      كشف درجات وتقييم المتابعة الشهرية المعتمد 📜
+                                    </h3>
+                                    <p className="text-[11px] text-slate-300 font-medium">
+                                      وثيقة رسمية صادرة ومصدقة إلكترونياً من إدارة المدرسة لولي الأمر
+                                    </p>
                                   </div>
                                 </div>
 
-                                {studentPhoto && (
-                                  <img src={studentPhoto} alt="صورة الطالب" className="w-10 h-10 rounded-xl object-cover border border-indigo-200 shadow-2xs shrink-0" />
-                                )}
-                              </div>
-                            )}
+                                {/* Header Actions Toolbar (No-Print) */}
+                                <div className="flex items-center gap-2 flex-wrap justify-end w-full md:w-auto no-print pt-2 md:pt-0 border-t border-white/10 md:border-0">
+                                  {/* Month Selector */}
+                                  <div className="flex items-center gap-1.5 bg-white/10 backdrop-blur-md border border-white/20 rounded-xl px-2.5 py-1">
+                                    <span className="text-[11px] text-amber-300 font-bold">شهر:</span>
+                                    <select
+                                      value={targetMonth}
+                                      onChange={(e) => setParentSelectedMonth(e.target.value)}
+                                      className="bg-transparent text-white text-xs font-black focus:outline-none cursor-pointer"
+                                    >
+                                      {Array.from(new Set([currentEvaluationMonth, ...uniqueGradeMonths])).map(m => (
+                                        <option key={m} value={m} className="bg-slate-900 text-white">{m}</option>
+                                      ))}
+                                    </select>
+                                  </div>
 
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center gap-2">
-                                <span className="text-[10px] bg-indigo-600 text-white px-2.5 py-0.5 rounded-full font-bold">
-                                  توجيهات وتقارير المتابعة لشهر: {evalForMonth?.month || targetMonth}
-                                </span>
-                                {isEvalUnread && (
-                                  <span className="bg-red-500 text-white text-[9px] px-1.5 py-0.5 rounded font-bold animate-pulse">
-                                    جديد 🆕
-                                  </span>
-                                )}
+                                  {/* Print Button */}
+                                  <button
+                                    type="button"
+                                    onClick={() => printElementById('parent-report-card-container', `كشف درجات الطالب ${activeChild?.name || ''} - شهر ${targetMonth}`)}
+                                    className="bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs px-3 py-1.5 rounded-xl transition flex items-center gap-1.5 shadow-md cursor-pointer border border-indigo-400/40"
+                                    title="طباعة كشف الدرجات الرسمي مع الأختام والتواقيع"
+                                  >
+                                    <Printer className="w-3.5 h-3.5" />
+                                    <span>طباعة الشهادة</span>
+                                  </button>
+
+                                  {/* Download as Image Button */}
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      await downloadElementAsImage('parent-report-card-container', `كشف-درجات-${activeChild?.name || 'الطالب'}-${targetMonth}`);
+                                    }}
+                                    className="bg-white/15 hover:bg-white/25 text-white font-bold text-xs px-2.5 py-1.5 rounded-xl transition flex items-center gap-1 border border-white/20 cursor-pointer"
+                                    title="حفظ الشهادة كصورة على جهازك"
+                                  >
+                                    <Download className="w-3.5 h-3.5" />
+                                    <span>حفظ كصورة</span>
+                                  </button>
+                                </div>
                               </div>
-                              <span className="text-[10px] text-indigo-600 font-bold flex items-center gap-1">
-                                📋 التقرير الشهري المعتمد
-                              </span>
                             </div>
 
-                            <div className="space-y-2 text-xs">
-                              {teacherMsg.trim() !== '' && (
-                                <div className="bg-white/80 p-2.5 rounded-xl border border-indigo-100/80">
-                                  <span className="font-bold text-indigo-900 block text-[11px] mb-0.5">👨‍🏫 توجيهات المعلم:</span>
-                                  <p className="text-slate-800 font-medium whitespace-pre-line leading-relaxed">{teacherMsg}</p>
+                            {/* 2. Official Student Identity & Details Strip */}
+                            <div className="bg-gradient-to-r from-indigo-50/80 via-white to-amber-50/60 p-4 border-b border-indigo-100 flex flex-wrap items-center justify-between gap-3 text-xs">
+                              <div className="flex items-center gap-3">
+                                {studentPhoto ? (
+                                  <img
+                                    src={studentPhoto}
+                                    alt="صورة الطالب"
+                                    className="w-12 h-12 rounded-2xl object-cover border-2 border-indigo-300 shadow-xs shrink-0"
+                                  />
+                                ) : (
+                                  <div className="w-12 h-12 rounded-2xl bg-indigo-100 text-indigo-700 font-black text-xl flex items-center justify-center border-2 border-indigo-200 shrink-0">
+                                    👨‍🎓
+                                  </div>
+                                )}
+                                <div>
+                                  <div className="text-[10px] text-slate-500 font-bold">اسم التلميذ(ة):</div>
+                                  <div className="text-sm font-black text-indigo-950">{activeChild?.name || '---'}</div>
+                                  <div className="text-[10px] text-slate-500 font-medium">
+                                    ولي الأمر: <span className="font-bold text-slate-700">{activeChild?.parentName || 'ولي الأمر الموقر'}</span>
+                                  </div>
                                 </div>
-                              )}
-                              {directorMsg.trim() !== '' && (
-                                <div className="bg-amber-50/80 p-2.5 rounded-xl border border-amber-200/80">
-                                  <span className="font-bold text-amber-900 block text-[11px] mb-0.5">🏫 توجيهات الإدارة:</span>
-                                  <p className="text-slate-800 font-medium whitespace-pre-line leading-relaxed">{directorMsg}</p>
+                              </div>
+
+                              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-4 text-center">
+                                <div className="bg-white border border-indigo-100 px-3 py-1.5 rounded-xl shadow-2xs">
+                                  <span className="text-[10px] text-slate-400 font-bold block">الصف والشعبة</span>
+                                  <span className="text-xs font-black text-indigo-900 block mt-0.5">
+                                    {activeChildClass?.name || 'الصف الابتدائي'}
+                                  </span>
                                 </div>
-                              )}
+
+                                <div className="bg-white border border-indigo-100 px-3 py-1.5 rounded-xl shadow-2xs">
+                                  <span className="text-[10px] text-slate-400 font-bold block">الرقم الموحد / القيد</span>
+                                  <span className="text-xs font-mono font-black text-indigo-900 block mt-0.5">
+                                    #{activeChild?.unifiedNo || activeChild?.rollNo || '---'}
+                                  </span>
+                                </div>
+
+                                <div className="bg-white border border-indigo-100 px-3 py-1.5 rounded-xl shadow-2xs">
+                                  <span className="text-[10px] text-slate-400 font-bold block">شهر التقييم</span>
+                                  <span className="text-xs font-black text-indigo-900 block mt-0.5">
+                                    {targetMonth}
+                                  </span>
+                                </div>
+
+                                <div className="bg-white border border-indigo-100 px-3 py-1.5 rounded-xl shadow-2xs">
+                                  <span className="text-[10px] text-slate-400 font-bold block">حالة التوثيق</span>
+                                  <span className="text-xs font-black text-emerald-700 block mt-0.5">
+                                    {scoredCount > 0 ? "معتمد وموثّق ✓" : "قيد المراجعة ⏳"}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* 3. Grades Performance Table & Layout */}
+                            <div className="p-4 sm:p-6 space-y-6">
+                              <div>
+                                <div className="flex items-center justify-between mb-3">
+                                  <h4 className="text-xs font-black text-slate-800 flex items-center gap-1.5 border-r-2 border-indigo-600 pr-2">
+                                    <span>📊 جدول رصد درجات المواد والمستوى التحصيلي:</span>
+                                  </h4>
+                                  <span className="text-[10px] text-slate-500 font-bold bg-slate-100 px-2 py-0.5 rounded-full">
+                                    الدرجة العظمى: 100 • الصغرى للنجاح: 50
+                                  </span>
+                                </div>
+
+                                {/* High-Fidelity Table (Desktop and Print) */}
+                                <div className="overflow-x-auto rounded-2xl border border-indigo-100 shadow-2xs">
+                                  <table className="w-full text-center border-collapse">
+                                    <thead>
+                                      <tr className="bg-gradient-to-r from-slate-100 via-indigo-50/50 to-slate-100 text-slate-700 text-xs font-black border-b border-indigo-100">
+                                        <th className="p-3 text-right pr-4 font-black">المادة الدراسية</th>
+                                        <th className="p-3 font-bold text-slate-600">الدرجة العظمى</th>
+                                        <th className="p-3 font-bold text-slate-600">درجة النجاح</th>
+                                        <th className="p-3 font-black text-indigo-950">الدرجة المحرزة</th>
+                                        <th className="p-3 font-bold">التقدير والمستوى</th>
+                                        <th className="p-3 font-bold min-w-[130px]">مؤشر الإتقان</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100 text-xs font-bold text-slate-800 bg-white">
+                                      {gradeValues.map((gv, idx) => {
+                                        const details = getSubjectScoreDetails(gv.score);
+                                        const icon = getSubjectIcon(gv.subject);
+                                        return (
+                                          <tr
+                                            key={gv.subject}
+                                            className={`hover:bg-indigo-50/30 transition ${idx % 2 === 1 ? 'bg-slate-50/40' : 'bg-white'}`}
+                                          >
+                                            <td className="p-3 text-right pr-4 font-black text-slate-900 flex items-center gap-2">
+                                              <span className="text-base">{icon}</span>
+                                              <span>{gv.subject}</span>
+                                            </td>
+                                            <td className="p-3 font-mono text-slate-500 font-bold">100</td>
+                                            <td className="p-3 font-mono text-slate-500 font-bold">50</td>
+                                            <td className="p-3">
+                                              {gv.score !== null ? (
+                                                <span className={`inline-block px-3 py-1 rounded-xl font-mono text-sm font-black border shadow-2xs ${details.badgeClass}`}>
+                                                  {gv.score}
+                                                </span>
+                                              ) : (
+                                                <span className="text-slate-300 font-light font-mono">---</span>
+                                              )}
+                                            </td>
+                                            <td className="p-3">
+                                              <span className="text-xs font-extrabold">{details.appraisal}</span>
+                                            </td>
+                                            <td className="p-3 px-4">
+                                              <div className="w-full bg-slate-150 rounded-full h-2.5 overflow-hidden flex items-center shadow-inner">
+                                                <div
+                                                  className={`h-full rounded-full transition-all duration-500 ${details.barColor}`}
+                                                  style={{ width: `${details.percentage}%` }}
+                                                />
+                                              </div>
+                                              <span className="text-[10px] text-slate-400 font-mono mt-0.5 block">
+                                                {gv.score !== null ? `${details.percentage}%` : 'قيد الرصد'}
+                                              </span>
+                                            </td>
+                                          </tr>
+                                        );
+                                      })}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </div>
+
+                              {/* 4. Overall Academic Result & GPA Dashboard */}
+                              <div className="bg-gradient-to-br from-indigo-50/70 via-white to-amber-50/40 p-4 sm:p-5 rounded-2xl border-2 border-indigo-100 shadow-2xs space-y-3">
+                                <div className="flex items-center justify-between border-b border-indigo-100/70 pb-2">
+                                  <span className="text-xs font-black text-indigo-950 flex items-center gap-1.5">
+                                    <Sparkles className="w-4 h-4 text-amber-500" />
+                                    <span>النتيجة الإجمالية والتحصيل العام لشهر: {targetMonth}</span>
+                                  </span>
+                                  <span className="text-[10px] font-black text-indigo-700 bg-white border border-indigo-200 px-2.5 py-0.5 rounded-full shadow-2xs">
+                                    الاعتماد التربوي الرسمي
+                                  </span>
+                                </div>
+
+                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-1">
+                                  {/* Total Score */}
+                                  <div className="bg-white p-3.5 rounded-xl border border-indigo-100 text-center shadow-2xs flex flex-col justify-between">
+                                    <span className="text-[10px] text-slate-500 font-bold block">مجموع الدرجات المحصلة</span>
+                                    <div className="text-base sm:text-lg font-black text-indigo-950 font-mono mt-1">
+                                      {scoredCount > 0 ? totalScore : '---'}
+                                      <span className="text-xs text-slate-400 font-normal mr-1">/ {gradeValues.length * 100}</span>
+                                    </div>
+                                  </div>
+
+                                  {/* GPA Percentage */}
+                                  <div className="bg-white p-3.5 rounded-xl border border-indigo-100 text-center shadow-2xs flex flex-col justify-between">
+                                    <span className="text-[10px] text-slate-500 font-bold block">المعدل العام المئوي</span>
+                                    <div className="text-base sm:text-lg font-black text-indigo-700 font-mono mt-1">
+                                      {avg !== null ? `${avg}%` : '---'}
+                                    </div>
+                                  </div>
+
+                                  {/* Appreciation Badge */}
+                                  <div className={`p-3.5 rounded-xl border text-center shadow-2xs flex flex-col justify-between ${badgeColor}`}>
+                                    <span className="text-[10px] opacity-80 font-bold block">التقدير العام المعتمد</span>
+                                    <div className="text-sm sm:text-base font-black mt-1">
+                                      {estimation}
+                                    </div>
+                                  </div>
+
+                                  {/* Final Academic Status */}
+                                  <div className="bg-white p-3.5 rounded-xl border border-indigo-100 text-center shadow-2xs flex flex-col justify-between">
+                                    <span className="text-[10px] text-slate-500 font-bold block">القرار التربوي</span>
+                                    <div className="text-xs sm:text-sm font-black text-emerald-700 mt-1 flex items-center justify-center gap-1">
+                                      {scoredCount > 0 && avg && parseFloat(avg) >= 50 ? (
+                                        <span>ناجح ومجتهد بتفوق 🏆</span>
+                                      ) : scoredCount > 0 ? (
+                                        <span className="text-amber-700">يحتاج متابعة ⚠️</span>
+                                      ) : (
+                                        <span className="text-slate-400 font-normal">قيد الرصد ⏳</span>
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* 5. Directives from Teacher & Administration (توجيهات المعلم وتوجيهات الإدارة) */}
+                              <div className="space-y-3 pt-1">
+                                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 border-r-2 border-indigo-600 pr-2">
+                                  <h4 className="text-xs font-black text-slate-900 flex items-center gap-1.5">
+                                    <span>💬 التوجيهات والملاحظات التربوية المعتمدة (شهر: {evalForMonth?.month || targetMonth}):</span>
+                                  </h4>
+                                  <span className="text-[10px] text-slate-500 font-medium">
+                                    ملاحظات الكادر التعليمي والإدارة العامة لولي الأمر
+                                  </span>
+                                </div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                  {/* Teacher Directive */}
+                                  <div className="bg-gradient-to-br from-indigo-50/80 via-white to-indigo-50/40 p-4 rounded-2xl border-2 border-indigo-200/90 shadow-2xs space-y-2.5 text-right flex flex-col justify-between">
+                                    <div>
+                                      <div className="flex items-center justify-between border-b border-indigo-100 pb-2 mb-2">
+                                        <span className="font-black text-indigo-950 text-xs flex items-center gap-1.5">
+                                          <span>👨‍🏫</span>
+                                          <span>توجيهات المعلم (الكادر التعليمي):</span>
+                                        </span>
+                                        <span className="text-[9px] bg-indigo-100 text-indigo-850 font-black px-2.5 py-0.5 rounded-full border border-indigo-200 shadow-2xs">
+                                          الكادر التدريسي
+                                        </span>
+                                      </div>
+                                      <div className="text-slate-800 text-xs font-medium leading-relaxed min-h-[50px] flex items-center">
+                                        {teacherMsg && teacherMsg.trim() ? (
+                                          <p className="w-full text-slate-800 font-semibold whitespace-pre-line bg-white/70 p-2.5 rounded-xl border border-indigo-100/70">
+                                            {teacherMsg}
+                                          </p>
+                                        ) : (
+                                          <p className="text-slate-500 italic text-xs bg-white/70 p-2.5 rounded-xl border border-dashed border-indigo-200 w-full">
+                                            طالب مواظب ومتميز، متابع لدروسه ومشارك بإيجابية في الأنشطة والواجبات المدرسية. 🌟
+                                          </p>
+                                        )}
+                                      </div>
+                                    </div>
+                                    <div className="text-[10px] text-indigo-700/80 font-bold pt-1 border-t border-indigo-100/60 flex items-center justify-between">
+                                      <span>معلم المادة والصف</span>
+                                      <span className="font-mono text-[9px] text-slate-400">ملاحظة معتمدة</span>
+                                    </div>
+                                  </div>
+
+                                  {/* Director Directive */}
+                                  <div className="bg-gradient-to-br from-amber-50/80 via-white to-amber-50/40 p-4 rounded-2xl border-2 border-amber-200/90 shadow-2xs space-y-2.5 text-right flex flex-col justify-between">
+                                    <div>
+                                      <div className="flex items-center justify-between border-b border-amber-200/60 pb-2 mb-2">
+                                        <span className="font-black text-amber-950 text-xs flex items-center gap-1.5">
+                                          <span>🏫</span>
+                                          <span>توجيهات إدارة المدرسة:</span>
+                                        </span>
+                                        <span className="text-[9px] bg-amber-100 text-amber-900 font-black px-2.5 py-0.5 rounded-full border border-amber-200 shadow-2xs">
+                                          الإدارة العامة
+                                        </span>
+                                      </div>
+                                      <div className="text-slate-800 text-xs font-medium leading-relaxed min-h-[50px] flex items-center">
+                                        {directorMsg && directorMsg.trim() ? (
+                                          <p className="w-full text-slate-800 font-semibold whitespace-pre-line bg-white/70 p-2.5 rounded-xl border border-amber-100/70">
+                                            {directorMsg}
+                                          </p>
+                                        ) : (
+                                          <p className="text-slate-500 italic text-xs bg-white/70 p-2.5 rounded-xl border border-dashed border-amber-200 w-full">
+                                            تثمن إدارة المدرسة جهود ولي الأمر الموقر في المتابعة الأسرية المستمرة، ونتمنى للطالب دوام التفوق والازدهار. 🏫
+                                          </p>
+                                        )}
+                                      </div>
+                                    </div>
+                                    <div className="text-[10px] text-amber-800/80 font-bold pt-1 border-t border-amber-100/60 flex items-center justify-between">
+                                      <span>إدارة المدرسة الدولية الخاصة</span>
+                                      <span className="font-mono text-[9px] text-slate-400">توثيق رسمي</span>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* 6. Official Dual Signatures & School Rubber Stamps */}
+                              <div className="pt-2">
+                                <GradeSheetSignatures
+                                  className="mt-2"
+                                  subtitle={`الاعتماد الرسمي لكشف درجات الطالب: ${activeChild?.name || ''} - شهر ${targetMonth}`}
+                                />
+                              </div>
                             </div>
                           </div>
                         );
@@ -2835,23 +3190,46 @@ export default function ParentPortal({
                   {/* Dedicated Student Behavior View */}
                   <div className="space-y-6">
                     {/* A. Monthly Evaluation/Behavior Card (set by Director) */}
-                    {monthlyEvaluations[selectedChildId] && monthlyEvaluations[selectedChildId].text.trim() && (
-                      <div className="bg-gradient-to-br from-indigo-50/50 to-white border border-indigo-100 p-5 rounded-2xl shadow-xs space-y-3">
-                        <div className="flex justify-between items-center border-b border-indigo-50 pb-3">
-                          <div className="flex items-center gap-2">
-                            <span className="bg-indigo-100 text-indigo-700 px-2.5 py-1 rounded-lg text-[10px] font-bold">
-                              👑 تقييم معتمد من الإدارة
+                    {(() => {
+                      const evalObj = monthlyEvaluations[`${selectedChildId}_${currentEvaluationMonth}`] || 
+                        monthlyEvaluations[`${activeChild?.unifiedNo}_${currentEvaluationMonth}`] ||
+                        monthlyEvaluations[selectedChildId] ||
+                        monthlyEvaluations[activeChild?.unifiedNo || ''];
+
+                      const tText = evalObj?.teacherText !== undefined ? evalObj.teacherText : (evalObj?.text || '');
+                      const dText = evalObj?.directorText || '';
+
+                      if (!tText.trim() && !dText.trim()) return null;
+
+                      return (
+                        <div className="bg-gradient-to-br from-indigo-50/50 to-white border border-indigo-100 p-5 rounded-2xl shadow-xs space-y-3">
+                          <div className="flex justify-between items-center border-b border-indigo-50 pb-3">
+                            <div className="flex items-center gap-2">
+                              <span className="bg-indigo-100 text-indigo-700 px-2.5 py-1 rounded-lg text-[10px] font-bold">
+                                👑 التقرير والتوجيهات المعتمدة
+                              </span>
+                            </div>
+                            <span className="text-[11px] font-black text-slate-600">
+                              توجيهات شهر {evalObj?.month || currentEvaluationMonth}
                             </span>
                           </div>
-                          <span className="text-[11px] font-black text-slate-600">
-                            التقييم السلوكي لـ {monthlyEvaluations[selectedChildId].month || currentEvaluationMonth}
-                          </span>
+                          <div className="space-y-2.5 text-right">
+                            {tText.trim() && (
+                              <div className="bg-white p-3.5 rounded-xl border border-indigo-100 text-xs">
+                                <span className="font-bold text-indigo-900 block text-[11px] mb-1">👨‍🏫 توجيهات المعلم:</span>
+                                <p className="text-slate-700 font-medium whitespace-pre-line leading-relaxed">{tText}</p>
+                              </div>
+                            )}
+                            {dText.trim() && (
+                              <div className="bg-amber-50/70 p-3.5 rounded-xl border border-amber-200 text-xs">
+                                <span className="font-bold text-amber-900 block text-[11px] mb-1">🏫 توجيهات الإدارة:</span>
+                                <p className="text-slate-800 font-medium whitespace-pre-line leading-relaxed">{dText}</p>
+                              </div>
+                            )}
+                          </div>
                         </div>
-                        <p className="text-slate-700 text-xs font-bold leading-relaxed whitespace-pre-line text-right bg-white p-3.5 rounded-xl border border-indigo-50/50">
-                          {monthlyEvaluations[selectedChildId].text}
-                        </p>
-                      </div>
-                    )}
+                      );
+                    })()}
 
                     {/* B. Behavioral Notices & Messages (from Teacher or Director) */}
                     <div className="space-y-4">

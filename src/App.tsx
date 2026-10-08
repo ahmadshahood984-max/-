@@ -31,6 +31,7 @@ import TeacherPortal from './components/TeacherPortal';
 import ParentPortal from './components/ParentPortal';
 import PortalDesignerBadge from './components/PortalDesignerBadge';
 import { sanitizeAndDeduplicateStudents } from './lib/studentDeduplicator';
+import { safeShowNotification } from './lib/notificationHelper';
 import { 
   Building, 
   Users, 
@@ -466,7 +467,7 @@ export default function App() {
       setNotificationPermission(permission);
       if (permission === 'granted') {
         playPingSound();
-        new Notification('🔔 تم تفعيل الإشعارات بنجاح', {
+        safeShowNotification('🔔 تم تفعيل الإشعارات بنجاح', {
           body: 'المدرسة الدولية: ستصلك رسائل المعلمين والتقارير المدرسية هنا بشكل مباشر وفوري!',
           dir: 'rtl'
         });
@@ -588,20 +589,18 @@ export default function App() {
           studentName
         });
 
-        // Trigger HTML5 Web Notification outside application
-        if ('Notification' in window && Notification.permission === 'granted') {
-          // Strip internal code category markup for the body
-          const cleanBody = latest.content.replace(/^📢 \[تصنيف الإشعار:[^\]]+\]\n/, '');
-          const matchCategory = latest.content.match(/^📢 \[تصنيف الإشعار:\s*([^\]]+)\]/);
-          const prefix = matchCategory ? `[${matchCategory[1]}] ` : '';
+        // Trigger HTML5 Web Notification outside application safely
+        // Strip internal code category markup for the body
+        const cleanBody = latest.content.replace(/^📢 \[تصنيف الإشعار:[^\]]+\]\n/, '');
+        const matchCategory = latest.content.match(/^📢 \[تصنيف الإشعار:\s*([^\]]+)\]/);
+        const prefix = matchCategory ? `[${matchCategory[1]}] ` : '';
 
-          new Notification(`💬 رسالة جديدة رقم #${msgNumStr}`, {
-            body: `من المعلم: ${latest.senderName}\nالموضوع: ${prefix}${cleanBody}`,
-            icon: 'https://cdn-icons-png.flaticon.com/512/124/124034.png', // WhatsApp style logo
-            tag: 'msg-' + latest.id,
-            dir: 'rtl'
-          });
-        }
+        safeShowNotification(`💬 رسالة جديدة رقم #${msgNumStr}`, {
+          body: `من المعلم: ${latest.senderName}\nالموضوع: ${prefix}${cleanBody}`,
+          icon: 'https://cdn-icons-png.flaticon.com/512/124/124034.png',
+          tag: 'msg-' + latest.id,
+          dir: 'rtl'
+        });
       }
     }
     setLastMessageCount(messages.length);

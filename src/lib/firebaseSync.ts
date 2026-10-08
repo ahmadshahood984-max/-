@@ -29,7 +29,8 @@ const SYNC_KEYS = [
   'school_apk_mode',
   'school_fcm_config',
   'school_app_icon',
-  'school_welcome_messages'
+  'school_welcome_messages',
+  'school_seal_and_signatures_config'
 ];
 
 let isRemoteSyncing = false;
