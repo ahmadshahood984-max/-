@@ -32,6 +32,7 @@ import ParentPortal from './components/ParentPortal';
 import PortalDesignerBadge from './components/PortalDesignerBadge';
 import { sanitizeAndDeduplicateStudents } from './lib/studentDeduplicator';
 import { safeShowNotification } from './lib/notificationHelper';
+import { sendParentPushNotification } from './lib/pushDispatcher';
 import { 
   Building, 
   Users, 
@@ -811,10 +812,11 @@ export default function App() {
     logEvent(`المعلم رصد درجة الطالب ${student?.name || ''} بمادة ${gradeData.subject}: ${gradeData.score}/${gradeData.maxScore}`, 'success');
 
     // Send instant grade notification message to parent
-    const studentParent = parents.find(p => p.childrenIds.includes(gradeData.studentId));
+    const studentParent = parents.find(p => p.childrenIds.includes(gradeData.studentId) || (student && student.parentId === p.id));
     if (studentParent && student) {
       const teacher = teachers.find(t => t.id === gradeData.teacherId);
       const msgId = 'm_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+      const notifBody = `📢 [تصنيف الإشعار: رصد الدرجات الأكاديمية]\nتم رصد درجة جديدة للطالب (${student.name}) في مادة (${gradeData.subject}) - تقييم (${gradeData.examName}): الدرجة (${gradeData.score}/${gradeData.maxScore}).`;
       const newMsg: Message = {
         id: msgId,
         senderId: gradeData.teacherId || 'teacher',
@@ -823,11 +825,21 @@ export default function App() {
         receiverId: studentParent.id,
         receiverName: studentParent.name,
         receiverRole: 'parent',
-        content: `📢 [تصنيف الإشعار: رصد الدرجات الأكاديمية]\nتم رصد درجة جديدة للطالب (${student.name}) في مادة (${gradeData.subject}) - تقييم (${gradeData.examName}): الدرجة (${gradeData.score}/${gradeData.maxScore}).`,
+        content: notifBody,
         date: new Date().toISOString(),
-        read: false
+        read: false,
+        studentId: student.id
       };
       setMessages(prev => [newMsg, ...prev]);
+
+      // External Push Notification to parent's device
+      sendParentPushNotification(studentParent.id, {
+        title: `📊 رصد درجة جديدة: ${student.name}`,
+        body: `مادة ${gradeData.subject} (${gradeData.examName}): النتيجة ${gradeData.score}/${gradeData.maxScore}`,
+        studentId: student.id,
+        studentName: student.name,
+        category: 'grades'
+      });
     }
   };
 
@@ -839,6 +851,17 @@ export default function App() {
 
     setMessages(prev => [...prev, newMsg]);
     logEvent(`رسالة جديدة من المعلم ${msgData.senderName} إلى ولي الأمر ${msgData.receiverName}`, 'primary');
+
+    // Dispatch external push if recipient is a parent
+    if (msgData.receiverRole === 'parent' && msgData.receiverId) {
+      const cleanContent = msgData.content.replace(/^📢 \[تصنيف الإشعار:[^\]]+\]\n/, '');
+      sendParentPushNotification(msgData.receiverId, {
+        title: `📩 رسالة جديدة من: ${msgData.senderName}`,
+        body: cleanContent.slice(0, 150),
+        studentId: msgData.studentId,
+        category: 'direct'
+      });
+    }
   };
 
   // 8. Parent submits Excuse

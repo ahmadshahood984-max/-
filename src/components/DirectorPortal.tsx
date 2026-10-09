@@ -81,7 +81,8 @@ import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead } from '../lib/firestoreTracker';
 import { forceRefreshDataFromFirestore } from '../lib/firebaseSync';
 import { getStoredWelcomeMessages, saveWelcomeMessages, DEFAULT_WELCOME_MESSAGES, WelcomeMessagesConfig } from '../lib/welcomeMessages';
-import { Bell, Activity, Info } from 'lucide-react';
+import { Bell, Activity, Info, Smartphone } from 'lucide-react';
+import { sendParentPushNotification, sendBroadcastPushNotification, getRegisteredPushDevicesCount } from '../lib/pushDispatcher';
 
 const getShareableOrigin = () => {
   if (typeof window === 'undefined') return '';
@@ -442,9 +443,41 @@ export default function DirectorPortal({
         return updated;
       });
 
-      // Trigger Web Push Notification
+      // Trigger External Push Notification to affected parents
       if (newMsg.receiverId) {
-        sendPushNotificationViaFCM(newMsg.receiverId, newMsg.senderName, newMsg.content);
+        if (newMsg.receiverId.startsWith('all_class_')) {
+          const targetClassId = newMsg.receiverId.replace('all_class_', '');
+          const classStudents = students.filter(s => s.classId === targetClassId);
+          const classParentIds = Array.from(new Set(
+            classStudents.map(s => {
+              const p = parents.find(parent => parent.childrenIds.includes(s.id) || s.parentId === parent.id);
+              return p?.id;
+            }).filter(Boolean) as string[]
+          ));
+          sendBroadcastPushNotification(classParentIds, {
+            title: newMsg.senderName || '📢 تعميم مدرسي',
+            body: newMsg.content.slice(0, 150),
+            category: 'announcement'
+          });
+        } else if (newMsg.receiverId === 'all_cohort_parents' || newMsg.receiverId === 'all_everyone') {
+          const cohortParentIds = Array.from(new Set(
+            students.filter(matchesCohort).map(s => {
+              const p = parents.find(parent => parent.childrenIds.includes(s.id) || s.parentId === parent.id);
+              return p?.id;
+            }).filter(Boolean) as string[]
+          ));
+          sendBroadcastPushNotification(cohortParentIds, {
+            title: newMsg.senderName || '📢 تعميم مدرسي رسمي',
+            body: newMsg.content.slice(0, 150),
+            category: 'announcement'
+          });
+        } else {
+          sendParentPushNotification(newMsg.receiverId, {
+            title: newMsg.senderName || '📩 رسالة من الإدارة',
+            body: newMsg.content.slice(0, 150),
+            category: 'direct'
+          });
+        }
       }
 
       return newMsg;
@@ -523,6 +556,129 @@ export default function DirectorPortal({
   
   const [editingStudent, setEditingStudent] = useState<Student | null>(null);
   const [editingStudentPhone, setEditingStudentPhone] = useState<string>('');
+  const [quickPhoneStudent, setQuickPhoneStudent] = useState<Student | null>(null);
+  const [quickPhoneValue, setQuickPhoneValue] = useState<string>('');
+
+  // FCM & External Push Notification States for Director
+  const [registeredPushCount, setRegisteredPushCount] = useState<number>(0);
+  const [isTestingBroadcastPush, setIsTestingBroadcastPush] = useState<boolean>(false);
+  const [broadcastPushSuccessMsg, setBroadcastPushSuccessMsg] = useState<string | null>(null);
+
+  React.useEffect(() => {
+    getRegisteredPushDevicesCount().then(count => {
+      setRegisteredPushCount(count);
+    }).catch(() => {});
+  }, [activeTab]);
+
+  const handleTestBroadcastPush = async () => {
+    setIsTestingBroadcastPush(true);
+    try {
+      const parentIds = parents.map(p => p.id);
+      const res = await sendBroadcastPushNotification(parentIds, {
+        title: '📢 تجربة إشعار إدارة المدرسة الدولية',
+        body: 'فحص دوري للإشعارات الخارجية: تم تأكيد وصول الإشعار لهواتف أولياء الأمور بنجاح وبشكل مجاني 100%!',
+        category: 'announcement'
+      });
+      setBroadcastPushSuccessMsg(`🎉 تم بنجاح إرسال الإشعار التجريبي لـ ${res.sent} ولي أمر مسجل في المنظومة!`);
+      setTimeout(() => setBroadcastPushSuccessMsg(null), 6000);
+      getRegisteredPushDevicesCount().then(count => setRegisteredPushCount(count));
+    } catch (e) {
+      console.warn("Error broadcasting test push:", e);
+    } finally {
+      setIsTestingBroadcastPush(false);
+    }
+  };
+
+  const handleSaveStudentWhatsAppOnly = (targetStudent: Student, phoneVal: string) => {
+    const cleanPhone = phoneVal.trim();
+    const currentList = [...students];
+    const targetId = targetStudent.id;
+
+    // Prepare student object with explicitly assigned isolated phone
+    const updatedStudent: Student = {
+      ...targetStudent,
+      parentPhone: cleanPhone
+    };
+
+    // Check if current parent is shared with other students
+    const currentParent = parents.find(p => p.id === targetStudent.parentId || p.childrenIds.includes(targetStudent.id));
+    let updatedParents = [...parents];
+
+    if (currentParent) {
+      const otherChildren = currentParent.childrenIds.filter(cid => cid !== targetId);
+      const otherStudentsSharingParent = currentList.filter(s => s.id !== targetId && (s.parentId === currentParent.id || currentParent.childrenIds.includes(s.id)));
+
+      if (otherChildren.length > 0 || otherStudentsSharingParent.length > 0) {
+        // Parent is shared with other students! Detach targetStudent to preserve other students' data intact
+        updatedParents = updatedParents.map(p => {
+          if (p.id === currentParent.id) {
+            return {
+              ...p,
+              childrenIds: p.childrenIds.filter(cid => cid !== targetId)
+            };
+          }
+          return p;
+        });
+
+        // Dedicated parent record exclusively for this student
+        const dedicatedParentId = `p_std_${targetId}`;
+        updatedStudent.parentId = dedicatedParentId;
+        const existingDedicated = updatedParents.find(p => p.id === dedicatedParentId);
+        if (existingDedicated) {
+          updatedParents = updatedParents.map(p => p.id === dedicatedParentId ? {
+            ...p,
+            name: updatedStudent.parentName || p.name,
+            phone: cleanPhone
+          } : p);
+        } else {
+          updatedParents.push({
+            id: dedicatedParentId,
+            name: updatedStudent.parentName || `ولي أمر ${updatedStudent.name}`,
+            email: `${(updatedStudent.parentName || 'parent').replace(/\s+/g, '')}@school.edu`,
+            phone: cleanPhone,
+            childrenIds: [targetId]
+          });
+        }
+      } else {
+        // Parent belongs exclusively to this student, update phone safely
+        updatedParents = updatedParents.map(p => {
+          if (p.id === currentParent.id) {
+            return {
+              ...p,
+              name: updatedStudent.parentName || p.name,
+              phone: cleanPhone
+            };
+          }
+          return p;
+        });
+      }
+    } else if (cleanPhone) {
+      const dedicatedParentId = `p_std_${targetId}`;
+      updatedStudent.parentId = dedicatedParentId;
+      updatedParents.push({
+        id: dedicatedParentId,
+        name: updatedStudent.parentName || `ولي أمر ${updatedStudent.name}`,
+        email: `${(updatedStudent.parentName || 'parent').replace(/\s+/g, '')}@school.edu`,
+        phone: cleanPhone,
+        childrenIds: [targetId]
+      });
+    }
+
+    const updatedStudents = currentList.map(s => s.id === targetId ? updatedStudent : s);
+    const cleanList = sanitizeAndDeduplicateStudents(updatedStudents).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
+
+    setStudents(cleanList);
+    localStorage.setItem('school_students', JSON.stringify(cleanList));
+    window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_students', value: JSON.stringify(cleanList) } }));
+
+    setParents(updatedParents);
+    localStorage.setItem('school_parents', JSON.stringify(updatedParents));
+    window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_parents', value: JSON.stringify(updatedParents) } }));
+
+    setQuickPhoneStudent(null);
+    setQuickPhoneValue('');
+    alert(`✅ تم تحديث رقم الواتساب للطالب (${targetStudent.name}) بنجاح!\n📲 تم تطبيق التعديل على هذا الطالب المحدد حصراً دون المساس بأي طالب آخر.`);
+  };
   
   // Excel and Grade states
   const [selectedClassForGrades, setSelectedClassForGrades] = useState<string>('');
@@ -716,12 +872,31 @@ export default function DirectorPortal({
   };
 
   // Director Messages states
-  const [directorChatRecipientRole, setDirectorChatRecipientRole] = useState<'teacher' | 'parent'>('teacher');
-  const [directorChatRecipientId, setDirectorChatRecipientId] = useState<string>('');
+  const [directorChatRecipientRole, setDirectorChatRecipientRole] = useState<'teacher' | 'parent' | 'all_cohort'>('all_cohort');
+  const [broadcastTargetAudience, setBroadcastTargetAudience] = useState<'parents' | 'teachers' | 'everyone'>('parents');
+  const [directorChatRecipientId, setDirectorChatRecipientId] = useState<string>('all_cohort_parents');
   const [chatSelectedClassId, setChatSelectedClassId] = useState<string>('all');
   const [directorMessageText, setDirectorMessageText] = useState<string>('');
   const [directorNotificationType, setDirectorNotificationType] = useState<string>('عام');
   const [directorCustomTypeLabel, setDirectorCustomTypeLabel] = useState<string>('');
+
+  // Broadcast WhatsApp Modal state
+  const [broadcastWaModal, setBroadcastWaModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    scopeTitle: string;
+    messageText: string;
+    recipients: Array<{
+      id: string;
+      name: string;
+      phone: string;
+      studentNames: string;
+      className: string;
+    }>;
+  } | null>(null);
+  const [broadcastSentPhones, setBroadcastSentPhones] = useState<Record<string, boolean>>({});
+  const [broadcastSearchQuery, setBroadcastSearchQuery] = useState<string>('');
+  const [broadcastCopiedToast, setBroadcastCopiedToast] = useState<boolean>(false);
 
   // Custom Subjects Management State
   const [customSubjects, setCustomSubjects] = useState<string[]>(() => {
@@ -1146,12 +1321,94 @@ ${directivesFormatted}
   };
 
   const handleSendDirectMessageWhatsApp = () => {
-    if (!directorChatRecipientId) {
-      alert('الرجاء اختيار المستلم أولاً.');
+    if (!directorChatRecipientId && directorChatRecipientRole !== 'all_cohort') {
+      alert('الرجاء اختيار المستلم أو تحديد خيار التعميم أولاً.');
       return;
     }
     if (!directorMessageText.trim()) {
       alert('الرجاء كتابة مضمون الرسالة أولاً.');
+      return;
+    }
+
+    const isBroadcast = 
+      directorChatRecipientRole === 'all_cohort' ||
+      directorChatRecipientId === 'all_cohort_parents' ||
+      directorChatRecipientId === 'all_teachers' ||
+      directorChatRecipientId === 'all_everyone' ||
+      directorChatRecipientId.startsWith('all_class_');
+
+    if (isBroadcast) {
+      const isClassScope = directorChatRecipientId.startsWith('all_class_') || (directorChatRecipientRole === 'all_cohort' && chatSelectedClassId !== 'all');
+      const targetClassId = directorChatRecipientId.startsWith('all_class_') ? directorChatRecipientId.replace('all_class_', '') : chatSelectedClassId;
+      const targetClassName = classes.find(c => c.id === targetClassId)?.name || 'الصف المحدد';
+
+      const shouldIncludeParents = 
+        directorChatRecipientId === 'all_cohort_parents' || 
+        directorChatRecipientId === 'all_everyone' || 
+        directorChatRecipientId.startsWith('all_class_') ||
+        (directorChatRecipientRole === 'all_cohort' && broadcastTargetAudience !== 'teachers') || 
+        directorChatRecipientRole === 'parent';
+
+      const shouldIncludeTeachers = 
+        directorChatRecipientId === 'all_teachers' || 
+        directorChatRecipientId === 'all_everyone' || 
+        (directorChatRecipientRole === 'all_cohort' && (broadcastTargetAudience === 'teachers' || broadcastTargetAudience === 'everyone')) || 
+        directorChatRecipientRole === 'teacher';
+
+      let recipientList: Array<{ id: string; name: string; phone: string; studentNames: string; className: string; }> = [];
+
+      if (shouldIncludeParents) {
+        const pList = parents.filter(p => {
+          const parentStudents = students.filter(s => (s.parentId === p.id || p.childrenIds.includes(s.id)) && matchesCohort(s));
+          if (parentStudents.length === 0) return false;
+          if (isClassScope && targetClassId !== 'all') {
+            return parentStudents.some(s => s.classId === targetClassId);
+          }
+          return true;
+        }).map(p => {
+          const pStudents = students.filter(s => (s.parentId === p.id || p.childrenIds.includes(s.id)) && matchesCohort(s));
+          const sNames = pStudents.map(s => s.name).join('، ');
+          const cNames = pStudents.map(s => classes.find(c => c.id === s.classId)?.name || '').filter(Boolean).join('، ');
+          return {
+            id: p.id,
+            name: p.name || 'ولي أمر',
+            phone: p.phone || '',
+            studentNames: sNames || 'طالب مسجل',
+            className: cNames || 'شعبة الفوج'
+          };
+        });
+        recipientList.push(...pList);
+      }
+
+      if (shouldIncludeTeachers && (!isClassScope || targetClassId === 'all')) {
+        const tList = teachers.filter(matchesCohort).map(t => ({
+          id: t.id,
+          name: t.name || 'معلم',
+          phone: t.phone || '',
+          studentNames: 'كادر تعليمي',
+          className: t.subjects.join('، ') || 'المواد الدراسية'
+        }));
+        recipientList.push(...tList);
+      }
+
+      const finalType = directorNotificationType === 'custom' ? directorCustomTypeLabel || 'تعميم رسمي' : directorNotificationType;
+      const scopeTitle = isClassScope && targetClassId !== 'all' ? `أولياء أمور ${targetClassName}` : 'جميع الصفوف والشعب (كامل الفوج)';
+
+      const defaultGenerated = `💚 *المدرسة الدولية الخاصة* 💚\n📢 *تعميم رسمي لكافة الصفوف والشعب*\n═════════════════════════\n\n🌹 *السلام عليكم ورحمة الله وبركاته*\nإلى السادة المحترمين: *{اسم_المستلم}*\n\n📌 *نوع التعميم:* *${finalType}*\n\n📝 *مضمون التعميم:*\n${directorMessageText.trim()}\n\n═════════════════════════\n✨ *شاكرين لكم حسن التعاون*\n🏫 *إدارة المدرسة الدولية الخاصة*`;
+
+      const savedTemplate = localStorage.getItem('school_whatsapp_direct_message_template');
+      let baseMsg = savedTemplate || defaultGenerated;
+      baseMsg = baseMsg
+        .replace(/{نوع_الإشعار}/g, finalType)
+        .replace(/{مضمون_الرسالة}/g, directorMessageText.trim());
+
+      setBroadcastWaModal({
+        isOpen: true,
+        title: `📢 تعميم الواتساب: ${scopeTitle}`,
+        scopeTitle: scopeTitle,
+        messageText: baseMsg,
+        recipients: recipientList
+      });
       return;
     }
 
@@ -1383,8 +1640,14 @@ ${directivesFormatted}
         
         setMessages(prev => [newMsg, ...prev]);
 
-        // Send REST / FCM Push Notification
-        sendPushNotificationViaFCM(studentParent.id, `حالة حضور وغياب: ${student.name}`, `الحالة الموثقة: ${statusText}`);
+        // Send External Push Notification
+        sendParentPushNotification(studentParent.id, {
+          title: `حالة حضور وغياب: ${student.name}`,
+          body: `الحالة الموثقة: ${statusText}`,
+          category: 'attendance',
+          studentId: student.id,
+          studentName: student.name
+        });
       }
 
       return {
@@ -3375,6 +3638,7 @@ ${directivesFormatted}
       const existingStudent = updatedStudents.find(s => s.rollNo === rollNo || s.name.trim() === name);
       if (existingStudent) {
         if (phoneRaw) {
+          existingStudent.parentPhone = parentPhone;
           const existingParent = updatedParents.find(p => p.id === existingStudent.parentId || p.childrenIds.includes(existingStudent.id) || p.name === parentName);
           if (existingParent) {
             existingParent.phone = parentPhone;
@@ -3418,7 +3682,8 @@ ${directivesFormatted}
         gender: 'male',
         dob: '2018-01-01',
         parentName: parentName,
-        shift: activeCohort === 'evening' ? 'evening' : 'morning'
+        shift: activeCohort === 'evening' ? 'evening' : 'morning',
+        parentPhone: parentPhone
       });
 
       importedCount++;
@@ -3507,6 +3772,7 @@ ${directivesFormatted}
 
           if (existingStudent) {
             if (rawPhone) {
+              existingStudent.parentPhone = parentPhone;
               const existingParent = updatedParents.find(p => p.id === existingStudent.parentId || p.childrenIds.includes(existingStudent.id) || p.name === parentName);
               if (existingParent) {
                 existingParent.phone = parentPhone;
@@ -3558,7 +3824,8 @@ ${directivesFormatted}
             gender: gender,
             dob: dob,
             parentName: parentName,
-            shift: activeCohort === 'evening' ? 'evening' : 'morning'
+            shift: activeCohort === 'evening' ? 'evening' : 'morning',
+            parentPhone: parentPhone
           });
           
           importedCount++;
@@ -4180,7 +4447,7 @@ ${directivesFormatted}
         'الصف والشعبة': clsName,
         'الفوج / الدوام': s.shift === 'evening' ? 'الفوج المسائي' : 'الفوج الصباحي',
         'اسم ولي الأمر': s.parentName || 'ولي الأمر',
-        'رقم الهاتف': s.phone || s.parentPhone || ''
+        'رقم الهاتف': s.parentPhone || ''
       };
     });
 
@@ -5043,7 +5310,8 @@ ${directivesFormatted}
         gender: newStudent.gender || 'male',
         dob: newStudent.dob || '2018-01-01',
         parentName: newStudent.parentName,
-        shift: targetShift
+        shift: targetShift,
+        parentPhone: finalPhone
       },
       {
         name: newStudent.parentName,
@@ -7938,7 +8206,9 @@ ${directivesFormatted}
                       {filteredRegistryStudents.length > 0 ? (
                         filteredRegistryStudents.map((st, idx) => {
                           const cls = classes.find(c => c.id === st.classId);
-                          const parentPhone = st.parentPhone || '0501234567';
+                          const parentObj = parents.find(p => p.id === st.parentId || p.childrenIds.includes(st.id));
+                          const isExclusiveParent = parentObj && (parentObj.childrenIds.length <= 1 || parentObj.childrenIds.every(cid => cid === st.id));
+                          const parentPhone = st.parentPhone || (isExclusiveParent ? parentObj?.phone : '') || '';
 
                           return (
                             <tr key={getSafeStudentKey(st, idx, 'reg_tr')} className="hover:bg-emerald-50/30 transition font-medium text-slate-700">
@@ -8046,15 +8316,41 @@ ${directivesFormatted}
                                 {st.guardianNationalId || '-'}
                               </td>
                               <td className="p-2.5 border-l border-slate-150 text-center">
-                                <a
-                                  href={`https://wa.me/${parentPhone.replace(/[^0-9]/g, '')}`}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="inline-flex items-center gap-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 font-mono font-bold text-[11px] px-2.5 py-1 rounded-lg shadow-2xs transition"
-                                >
-                                  <span>📲</span>
-                                  <span>{parentPhone}</span>
-                                </a>
+                                {parentPhone ? (
+                                  <div className="inline-flex items-center gap-1 justify-center">
+                                    <a
+                                      href={`https://wa.me/${parentPhone.replace(/[^0-9]/g, '')}`}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="inline-flex items-center gap-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 font-mono font-bold text-[11px] px-2 py-0.5 rounded-lg shadow-2xs transition"
+                                    >
+                                      <span>📲</span>
+                                      <span>{parentPhone}</span>
+                                    </a>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setQuickPhoneStudent(st);
+                                        setQuickPhoneValue(st.parentPhone || parentPhone || '');
+                                      }}
+                                      title="تعديل رقم واتساب هذا الطالب حصراً"
+                                      className="text-[10px] p-1 text-slate-500 hover:text-emerald-700 hover:bg-emerald-50 rounded transition cursor-pointer"
+                                    >
+                                      ✏️
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setQuickPhoneStudent(st);
+                                      setQuickPhoneValue('');
+                                    }}
+                                    className="text-[10px] bg-slate-50 hover:bg-emerald-50 text-slate-500 hover:text-emerald-700 border border-dashed border-slate-300 hover:border-emerald-300 px-2 py-0.5 rounded-lg transition cursor-pointer"
+                                  >
+                                    + إضافة رقم
+                                  </button>
+                                )}
                               </td>
                               <td className="p-2.5 border-l border-slate-150 text-center font-mono text-[11px] text-slate-700">
                                 {st.parentBackupPhone || '-'}
@@ -8417,8 +8713,9 @@ if __name__ == "__main__":
                       <tbody className="divide-y divide-slate-150">
                         {filteredStudents.length > 0 ? (
                           filteredStudents.map((student, idx) => {
-                            const parentObj = parents.find(p => p.childrenIds.includes(student.id) || p.id === student.parentId);
-                            const parentPhone = parentObj?.phone || '';
+                            const parentObj = parents.find(p => p.id === student.parentId || p.childrenIds.includes(student.id));
+                            const isExclusiveParent = parentObj && (parentObj.childrenIds.length <= 1 || parentObj.childrenIds.every(cid => cid === student.id));
+                            const parentPhone = student.parentPhone || (isExclusiveParent ? parentObj?.phone : '') || '';
 
                             return (
                               <tr key={getSafeStudentKey(student, idx, 'affair_tr')} className="hover:bg-slate-50/40 font-medium text-slate-600">
@@ -8428,12 +8725,34 @@ if __name__ == "__main__":
                                 <td className="p-3 border-l border-slate-150">{student.parentName || parentObj?.name || `ولي أمر ${student.name}`}</td>
                                 <td className="p-3 border-l border-slate-150 text-center font-mono text-emerald-700 font-bold text-[11px] dir-ltr">
                                   {parentPhone ? (
-                                    <span className="inline-flex items-center gap-1 bg-emerald-50 text-emerald-800 border border-emerald-200 px-2 py-0.5 rounded-lg shadow-2xs">
-                                      <span>📲</span>
-                                      <span>{parentPhone}</span>
-                                    </span>
+                                    <div className="inline-flex items-center gap-1.5 justify-center">
+                                      <span className="inline-flex items-center gap-1 bg-emerald-50 text-emerald-800 border border-emerald-200 px-2 py-0.5 rounded-lg shadow-2xs">
+                                        <span>📲</span>
+                                        <span>{parentPhone}</span>
+                                      </span>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setQuickPhoneStudent(student);
+                                          setQuickPhoneValue(student.parentPhone || parentPhone || '');
+                                        }}
+                                        title="تعديل رقم واتساب هذا الطالب حصراً"
+                                        className="text-[10px] p-1 text-slate-500 hover:text-emerald-700 hover:bg-emerald-50 rounded transition cursor-pointer"
+                                      >
+                                        ✏️
+                                      </button>
+                                    </div>
                                   ) : (
-                                    <span className="text-slate-400 font-sans italic text-[10px]">غير مسجل</span>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setQuickPhoneStudent(student);
+                                        setQuickPhoneValue('');
+                                      }}
+                                      className="text-[10px] bg-slate-50 hover:bg-emerald-50 text-slate-500 hover:text-emerald-700 border border-dashed border-slate-300 hover:border-emerald-300 px-2 py-0.5 rounded-lg transition cursor-pointer"
+                                    >
+                                      + إضافة رقم واتساب
+                                    </button>
                                   )}
                                 </td>
                                 <td className="p-3 text-center">
@@ -8442,7 +8761,7 @@ if __name__ == "__main__":
                                       type="button"
                                       onClick={() => {
                                         setEditingStudent(student);
-                                        setEditingStudentPhone(parentPhone);
+                                        setEditingStudentPhone(student.parentPhone || parentPhone || '');
                                       }}
                                       className="text-[10px] bg-indigo-50 hover:bg-indigo-100 text-indigo-700 px-2.5 py-1 rounded-lg border border-indigo-100 transition cursor-pointer flex items-center gap-1 font-bold"
                                     >
@@ -8635,6 +8954,103 @@ if __name__ == "__main__":
                             className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-5 py-2.5 rounded-xl transition shadow-md shadow-indigo-100 cursor-pointer"
                           >
                             تأكيد وإضافة الطالب 💾
+                          </button>
+                        </div>
+                      </form>
+                    </motion.div>
+                  </div>
+                )}
+              </AnimatePresence>
+
+              {/* Quick Individual Student WhatsApp Phone Modal */}
+              <AnimatePresence>
+                {quickPhoneStudent && (
+                  <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+                    <motion.div
+                      initial={{ opacity: 0, scale: 0.95 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.95 }}
+                      className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200 text-right"
+                      style={{ direction: 'rtl' }}
+                    >
+                      <div className="flex items-center justify-between border-b border-slate-100 pb-3 mb-4">
+                        <div className="flex items-center gap-2">
+                          <span className="p-2 bg-emerald-50 text-emerald-600 rounded-xl text-lg">📲</span>
+                          <div>
+                            <h3 className="font-black text-slate-800 text-base">تعديل رقم واتساب الطالب</h3>
+                            <p className="text-[11px] text-emerald-700 font-bold">{quickPhoneStudent.name}</p>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setQuickPhoneStudent(null);
+                            setQuickPhoneValue('');
+                          }}
+                          className="text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-50 transition cursor-pointer"
+                        >
+                          <X className="w-5 h-5" />
+                        </button>
+                      </div>
+
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          handleSaveStudentWhatsAppOnly(quickPhoneStudent, quickPhoneValue);
+                        }}
+                        className="space-y-4"
+                      >
+                        <div className="bg-amber-50 border border-amber-200 p-3 rounded-xl text-[11px] text-amber-900 leading-relaxed font-medium">
+                          💡 <strong>تنبيه دقة البيانات:</strong> سيتم حفظ وتحديث رقم الواتساب لهذا الطالب المحدد حصراً <strong className="font-black underline">({quickPhoneStudent.name})</strong> دون تعديل أي طالب آخر في المدرسة.
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                            رقم هاتف / واتساب ولي الأمر: <span className="text-red-500">*</span>
+                          </label>
+                          <input
+                            type="tel"
+                            required
+                            placeholder="مثال: 0501234567 أو 00963912345678"
+                            value={quickPhoneValue}
+                            onChange={(e) => setQuickPhoneValue(e.target.value)}
+                            className="w-full text-sm font-mono font-bold border border-slate-300 bg-white px-3.5 py-2.5 rounded-xl focus:border-emerald-600 focus:outline-none text-right dir-ltr"
+                            autoFocus
+                          />
+                        </div>
+
+                        <div className="text-[11px] text-slate-500 space-y-1 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+                          <div className="flex justify-between">
+                            <span>الرقم الموحد:</span>
+                            <span className="font-mono font-bold text-slate-800">{quickPhoneStudent.unifiedNo || quickPhoneStudent.rollNo || '-'}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span>الصف والشعبة:</span>
+                            <span className="font-bold text-slate-800">{classes.find(c => c.id === quickPhoneStudent.classId)?.name || 'غير محدد'}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span>ولي الأمر:</span>
+                            <span className="font-bold text-slate-800">{quickPhoneStudent.parentName || `ولي أمر ${quickPhoneStudent.name}`}</span>
+                          </div>
+                        </div>
+
+                        <div className="flex gap-2 pt-2 justify-end">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setQuickPhoneStudent(null);
+                              setQuickPhoneValue('');
+                            }}
+                            className="bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-bold px-4 py-2.5 rounded-xl transition cursor-pointer"
+                          >
+                            إلغاء
+                          </button>
+                          <button
+                            type="submit"
+                            className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-5 py-2.5 rounded-xl transition shadow-md shadow-emerald-100 cursor-pointer flex items-center gap-1.5"
+                          >
+                            <Save className="w-4 h-4" />
+                            <span>حفظ الرقم للطالب المحدد فقط 💾</span>
                           </button>
                         </div>
                       </form>
@@ -10652,16 +11068,16 @@ ${sampleEval}
                   <div className="space-y-4">
                     <div>
                       <label className="block text-xs font-semibold text-slate-600 mb-1.5">جهة التواصل المستهدفة *</label>
-                      <div className="grid grid-cols-2 gap-2 bg-slate-50 p-1 rounded-xl">
+                      <div className="grid grid-cols-3 gap-1.5 bg-slate-50 p-1 rounded-xl">
                         <button
                           type="button"
                           onClick={() => {
-                            setDirectorChatRecipientRole('teacher');
-                            setDirectorChatRecipientId('');
+                            setDirectorChatRecipientRole('all_cohort');
+                            setDirectorChatRecipientId('all_cohort_parents');
                           }}
-                          className={`text-xs font-bold py-2 rounded-lg transition cursor-pointer ${directorChatRecipientRole === 'teacher' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-500 hover:text-slate-800'}`}
+                          className={`text-[11px] font-extrabold py-2 px-1 rounded-lg transition cursor-pointer flex items-center justify-center gap-1 ${directorChatRecipientRole === 'all_cohort' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-500 hover:text-slate-800'}`}
                         >
-                          👨‍🏫 المعلمون
+                          📢 تعميم لكامل الفوج
                         </button>
                         <button
                           type="button"
@@ -10669,12 +11085,108 @@ ${sampleEval}
                             setDirectorChatRecipientRole('parent');
                             setDirectorChatRecipientId('');
                           }}
-                          className={`text-xs font-bold py-2 rounded-lg transition cursor-pointer ${directorChatRecipientRole === 'parent' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-500 hover:text-slate-800'}`}
+                          className={`text-[11px] font-extrabold py-2 px-1 rounded-lg transition cursor-pointer flex items-center justify-center gap-1 ${directorChatRecipientRole === 'parent' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-500 hover:text-slate-800'}`}
                         >
                           👥 أولياء الأمور
                         </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setDirectorChatRecipientRole('teacher');
+                            setDirectorChatRecipientId('');
+                          }}
+                          className={`text-[11px] font-extrabold py-2 px-1 rounded-lg transition cursor-pointer flex items-center justify-center gap-1 ${directorChatRecipientRole === 'teacher' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-500 hover:text-slate-800'}`}
+                        >
+                          👨‍🏫 المعلمون
+                        </button>
                       </div>
                     </div>
+
+                    {directorChatRecipientRole === 'all_cohort' && (
+                      <div className="bg-gradient-to-r from-indigo-50/90 via-sky-50/70 to-purple-50/90 p-3.5 rounded-2xl border border-indigo-200/80 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-black text-indigo-950 flex items-center gap-1.5">
+                            <span>📢 تعميم رسمي لكافة الصفوف والشعب</span>
+                          </span>
+                          <span className="bg-indigo-600 text-white text-[9px] px-2 py-0.5 rounded-full font-bold">
+                            كامل الفوج ({activeCohort === 'evening' ? 'المسائي' : 'الصباحي'})
+                          </span>
+                        </div>
+
+                        <div>
+                          <label className="block text-[11px] font-bold text-slate-700 mb-1">فئة مستلمي التعميم:</label>
+                          <div className="grid grid-cols-3 gap-1 bg-white p-1 rounded-xl border border-indigo-100 text-center">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setBroadcastTargetAudience('parents');
+                                setDirectorChatRecipientId(chatSelectedClassId === 'all' ? 'all_cohort_parents' : `all_class_${chatSelectedClassId}`);
+                              }}
+                              className={`py-1.5 rounded-lg text-[10px] font-extrabold transition cursor-pointer ${
+                                broadcastTargetAudience === 'parents' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-600 hover:bg-slate-50'
+                              }`}
+                            >
+                              👥 أولياء الأمور
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setBroadcastTargetAudience('teachers');
+                                setDirectorChatRecipientId('all_teachers');
+                              }}
+                              className={`py-1.5 rounded-lg text-[10px] font-extrabold transition cursor-pointer ${
+                                broadcastTargetAudience === 'teachers' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-600 hover:bg-slate-50'
+                              }`}
+                            >
+                              👨‍🏫 المعلمون
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setBroadcastTargetAudience('everyone');
+                                setDirectorChatRecipientId('all_everyone');
+                              }}
+                              className={`py-1.5 rounded-lg text-[10px] font-extrabold transition cursor-pointer ${
+                                broadcastTargetAudience === 'everyone' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-600 hover:bg-slate-50'
+                              }`}
+                            >
+                              🌟 الجميع معاً
+                            </button>
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="block text-[11px] font-bold text-slate-700 mb-1">نطاق الصفوف والشعب المستهدفة بالتعميم:</label>
+                          <select
+                            value={chatSelectedClassId}
+                            onChange={e => {
+                              const val = e.target.value;
+                              setChatSelectedClassId(val);
+                              if (val === 'all') {
+                                setDirectorChatRecipientId(broadcastTargetAudience === 'teachers' ? 'all_teachers' : broadcastTargetAudience === 'everyone' ? 'all_everyone' : 'all_cohort_parents');
+                              } else {
+                                setDirectorChatRecipientId(`all_class_${val}`);
+                              }
+                            }}
+                            className="w-full text-xs border border-indigo-200 px-3 py-2 rounded-xl bg-white focus:outline-none focus:border-indigo-500 font-bold text-indigo-950"
+                          >
+                            <option value="all">📁 جميع الصفوف والشعب (كامل الفوج - كافة المراحل)</option>
+                            {classes.filter(matchesCohort).map(c => (
+                              <option key={c.id} value={c.id}>🏫 {c.name}</option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div className="bg-indigo-600/10 p-2.5 rounded-xl border border-indigo-200/60 text-[10.5px] text-indigo-900 font-bold flex items-center gap-2">
+                          <span>💡</span>
+                          <span>
+                            {chatSelectedClassId === 'all'
+                              ? `سيصل هذا التعميم لجميع طلاب وأولياء أمور الفوج بالكامل (${classes.filter(matchesCohort).length} صفوف وشعب - ${students.filter(matchesCohort).length} طالب) في بواباتهم وحساباتهم فوراً.`
+                              : `سيصل هذا التعميم لجميع طلاب وأولياء أمور صف (${classes.find(c => c.id === chatSelectedClassId)?.name}) فقط.`}
+                          </span>
+                        </div>
+                      </div>
+                    )}
 
                     {directorChatRecipientRole === 'parent' && (
                       <div className="bg-sky-50/50 p-3 rounded-2xl border border-sky-100/60 space-y-2">
@@ -10687,48 +11199,73 @@ ${sampleEval}
                           }}
                           className="w-full text-xs border border-sky-200 px-3 py-2 rounded-xl bg-white focus:outline-none focus:border-sky-500 font-semibold text-slate-700"
                         >
-                          <option value="all">📁 جميع الصفوف والشعب</option>
+                          <option value="all">📁 جميع الصفوف والشعب (تعميم لكامل الفوج)</option>
                           {classes.filter(matchesCohort).map(c => (
-                            <option key={c.id} value={c.id}>{c.name}</option>
+                            <option key={c.id} value={c.id}>🏫 {c.name}</option>
                           ))}
                         </select>
                       </div>
                     )}
 
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-600 mb-1.5">
-                        {directorChatRecipientRole === 'teacher' ? 'اختر المعلم المستلم *' : 'اختر ولي الأمر المستلم *'}
-                      </label>
-                      <select
-                        value={directorChatRecipientId}
-                        onChange={e => setDirectorChatRecipientId(e.target.value)}
-                        className="w-full text-xs border border-slate-200 px-3 py-2.5 rounded-xl bg-white focus:outline-none focus:border-indigo-500 font-semibold"
-                        required
-                      >
-                        <option value="">-- اختر من القائمة --</option>
-                        {directorChatRecipientRole === 'teacher' 
-                          ? teachers.filter(matchesCohort).map(t => (
-                              <option key={t.id} value={t.id}>{t.name} ({t.subjects.join('، ')})</option>
-                            ))
-                          : parents
-                              .filter(p => {
-                                const parentStudents = students.filter(s => (s.parentId === p.id || p.childrenIds.includes(s.id)) && matchesCohort(s));
-                                if (parentStudents.length === 0) return false;
-                                if (chatSelectedClassId === 'all') return true;
-                                return parentStudents.some(s => s.classId === chatSelectedClassId);
-                              })
-                              .map(p => {
-                                const children = students.filter(s => (s.parentId === p.id || p.childrenIds.includes(s.id)) && matchesCohort(s));
-                                const childrenNames = children.map(s => `${s.name} (${classes.find(c => c.id === s.classId)?.name || ''})`).join('، ');
-                                return (
-                                  <option key={p.id} value={p.id}>
-                                    {p.name} {childrenNames ? `[أبناؤه: ${childrenNames}]` : ''} ({p.phone})
+                    {directorChatRecipientRole !== 'all_cohort' && (
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-600 mb-1.5">
+                          {directorChatRecipientRole === 'teacher' ? 'اختر المعلم المستلم أو التعميم *' : 'اختر ولي الأمر المستلم أو أرسل تعميماً *'}
+                        </label>
+                        <select
+                          value={directorChatRecipientId}
+                          onChange={e => setDirectorChatRecipientId(e.target.value)}
+                          className="w-full text-xs border border-slate-200 px-3 py-2.5 rounded-xl bg-white focus:outline-none focus:border-indigo-500 font-semibold"
+                          required
+                        >
+                          <option value="">-- اختر من القائمة --</option>
+                          {directorChatRecipientRole === 'teacher' ? (
+                            <>
+                              <option value="all_teachers" className="font-extrabold text-indigo-700 bg-indigo-50">
+                                📢 تعميم لجميع المعلمين (كامل الكادر التعليمي - {teachers.filter(matchesCohort).length} معلم)
+                              </option>
+                              {teachers.filter(matchesCohort).map(t => (
+                                <option key={t.id} value={t.id}>{t.name} ({t.subjects.join('، ')})</option>
+                              ))}
+                            </>
+                          ) : (
+                            <>
+                              {chatSelectedClassId === 'all' ? (
+                                <option value="all_cohort_parents" className="font-extrabold text-indigo-700 bg-indigo-50">
+                                  📢 تعميم لجميع أولياء الأمور (جميع الصفوف والشعب - كامل الفوج) [{parents.filter(p => students.some(s => (s.parentId === p.id || p.childrenIds.includes(s.id)) && matchesCohort(s))).length} ولي أمر]
+                                </option>
+                              ) : (
+                                <>
+                                  <option value={`all_class_${chatSelectedClassId}`} className="font-extrabold text-emerald-700 bg-emerald-50">
+                                    📢 تعميم لجميع أولياء أمور هذا الصف ({classes.find(c => c.id === chatSelectedClassId)?.name}) [{parents.filter(p => students.some(s => (s.parentId === p.id || p.childrenIds.includes(s.id)) && matchesCohort(s) && s.classId === chatSelectedClassId)).length} ولي أمر]
                                   </option>
-                                );
-                              })
-                        }
-                      </select>
-                    </div>
+                                  <option value="all_cohort_parents" className="font-extrabold text-indigo-700 bg-indigo-50">
+                                    📢 تعميم شامل لجميع الصفوف والشعب (كامل الفوج) [{parents.filter(p => students.some(s => (s.parentId === p.id || p.childrenIds.includes(s.id)) && matchesCohort(s))).length} ولي أمر]
+                                  </option>
+                                </>
+                              )}
+                              {parents
+                                .filter(p => {
+                                  const parentStudents = students.filter(s => (s.parentId === p.id || p.childrenIds.includes(s.id)) && matchesCohort(s));
+                                  if (parentStudents.length === 0) return false;
+                                  if (chatSelectedClassId === 'all') return true;
+                                  return parentStudents.some(s => s.classId === chatSelectedClassId);
+                                })
+                                .map(p => {
+                                  const children = students.filter(s => (s.parentId === p.id || p.childrenIds.includes(s.id)) && matchesCohort(s));
+                                  const childrenNames = children.map(s => `${s.name} (${classes.find(c => c.id === s.classId)?.name || ''})`).join('، ');
+                                  return (
+                                    <option key={p.id} value={p.id}>
+                                      {p.name} {childrenNames ? `[أبناؤه: ${childrenNames}]` : ''} ({p.phone})
+                                    </option>
+                                  );
+                                })
+                              }
+                            </>
+                          )}
+                        </select>
+                      </div>
+                    )}
 
                     <div>
                       <label className="block text-xs font-semibold text-slate-600 mb-2">نوع الإشعار أو الرسالة *</label>
@@ -10794,22 +11331,111 @@ ${sampleEval}
                       <div className="grid grid-cols-2 gap-2">
                         <button
                           type="button"
-                          onClick={() => {
-                            if (!directorChatRecipientId) {
-                              alert('الرجاء اختيار مستلم أولاً');
+                          onClick={async () => {
+                            const isBroadcast = 
+                              directorChatRecipientRole === 'all_cohort' ||
+                              directorChatRecipientId === 'all_cohort_parents' ||
+                              directorChatRecipientId === 'all_teachers' ||
+                              directorChatRecipientId === 'all_everyone' ||
+                              directorChatRecipientId.startsWith('all_class_');
+
+                            if (!directorChatRecipientId && !isBroadcast) {
+                              alert('الرجاء اختيار مستلم أو تحديد خيار التعميم أولاً');
                               return;
                             }
                             if (!directorMessageText.trim()) {
-                              alert('الرجاء كتابة محتوى الرسالة');
+                              alert('الرجاء كتابة محتوى الرسالة أو التعميم أولاً');
+                              return;
+                            }
+
+                            const finalType = directorNotificationType === 'custom' ? directorCustomTypeLabel || 'تعميم' : directorNotificationType;
+                            const finalContent = finalType !== 'عام' ? `[${finalType}] ${directorMessageText}` : directorMessageText;
+
+                            if (isBroadcast) {
+                              const isClassScope = directorChatRecipientId.startsWith('all_class_') || (directorChatRecipientRole === 'all_cohort' && chatSelectedClassId !== 'all');
+                              const targetClassId = directorChatRecipientId.startsWith('all_class_') ? directorChatRecipientId.replace('all_class_', '') : chatSelectedClassId;
+                              const targetClassName = classes.find(c => c.id === targetClassId)?.name || 'الصف المحدد';
+
+                              const shouldTargetParents = 
+                                directorChatRecipientId === 'all_cohort_parents' ||
+                                directorChatRecipientId === 'all_everyone' ||
+                                directorChatRecipientId.startsWith('all_class_') ||
+                                (directorChatRecipientRole === 'all_cohort' && broadcastTargetAudience !== 'teachers') ||
+                                directorChatRecipientRole === 'parent';
+
+                              const shouldTargetTeachers = 
+                                directorChatRecipientId === 'all_teachers' ||
+                                directorChatRecipientId === 'all_everyone' ||
+                                (directorChatRecipientRole === 'all_cohort' && (broadcastTargetAudience === 'teachers' || broadcastTargetAudience === 'everyone')) ||
+                                directorChatRecipientRole === 'teacher';
+
+                              const affectedParents = parents.filter(p => {
+                                const pStudents = students.filter(s => (s.parentId === p.id || p.childrenIds.includes(s.id)) && matchesCohort(s));
+                                if (pStudents.length === 0) return false;
+                                if (isClassScope && targetClassId !== 'all') {
+                                  return pStudents.some(s => s.classId === targetClassId);
+                                }
+                                return true;
+                              });
+
+                              const affectedTeachers = teachers.filter(matchesCohort);
+
+                              const promises: Promise<any>[] = [];
+
+                              if (shouldTargetParents) {
+                                const receiverId = isClassScope && targetClassId !== 'all' ? `all_class_${targetClassId}` : 'all_cohort_parents';
+                                const receiverName = isClassScope && targetClassId !== 'all' 
+                                  ? `تعميم لأولياء أمور ${targetClassName}`
+                                  : 'تعميم لجميع الصفوف والشعب (كامل الفوج)';
+
+                                promises.push(
+                                  addNotification({
+                                    receiverId: receiverId,
+                                    receiverName: receiverName,
+                                    receiverRole: 'parent',
+                                    content: finalContent
+                                  })
+                                );
+                              }
+
+                              if (shouldTargetTeachers && (!isClassScope || targetClassId === 'all')) {
+                                promises.push(
+                                  addNotification({
+                                    receiverId: 'all_teachers',
+                                    receiverName: 'تعميم لجميع المعلمين (كامل الكادر التعليمي)',
+                                    receiverRole: 'teacher',
+                                    content: finalContent
+                                  })
+                                );
+                              }
+
+                              if (addAnnouncement) {
+                                try {
+                                  addAnnouncement({
+                                    title: `📢 تعميم رسمي: ${finalType}`,
+                                    content: directorMessageText.trim(),
+                                    target: shouldTargetParents && shouldTargetTeachers ? 'all' : shouldTargetTeachers ? 'teachers' : 'parents',
+                                    authorRole: 'director',
+                                    shift: activeCohort === 'evening' ? 'evening' : 'morning'
+                                  });
+                                } catch (err) {
+                                  console.warn("Could not save to announcements:", err);
+                                }
+                              }
+
+                              await Promise.all(promises);
+                              setDirectorMessageText('');
+                              alert(`📢 تم بنجاح إرسال ونشر التعميم الرسمي لكافة الصفوف والشعب!\n\nنطاق التسليم:\n${
+                                isClassScope && targetClassId !== 'all'
+                                  ? `• أولياء أمور (${targetClassName}) [${affectedParents.length} ولي أمر]`
+                                  : `• جميع الصفوف والشعب لكامل الفوج (${affectedParents.length} ولي أمر${shouldTargetTeachers ? ` + ${affectedTeachers.length} معلم` : ''})`
+                              }\n\nيصل التعميم فوراً لجميع الحسابات في بواباتهم بالمنصة! 📤`);
                               return;
                             }
 
                             const recipientName = directorChatRecipientRole === 'teacher'
                               ? teachers.find(t => t.id === directorChatRecipientId)?.name || 'معلم'
                               : parents.find(p => p.id === directorChatRecipientId)?.name || 'ولي أمر';
-
-                            const finalType = directorNotificationType === 'custom' ? directorCustomTypeLabel : directorNotificationType;
-                            const finalContent = finalType !== 'عام' ? `[${finalType}] ${directorMessageText}` : directorMessageText;
 
                             addNotification({
                               receiverId: directorChatRecipientId,
@@ -12013,6 +12639,96 @@ ${sampleEval}
               </div>
 
 
+              {/* External Push Notification & FCM Control Center */}
+              <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleTestBroadcastPush}
+                      disabled={isTestingBroadcastPush}
+                      className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white font-extrabold text-xs px-4 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-2 shadow-xs"
+                    >
+                      <Sparkles className="w-4 h-4 text-amber-300" />
+                      <span>{isTestingBroadcastPush ? 'جارِ إرسال الإشعار التجريبي...' : 'اختبار إرسال إشعار لكافة الهواتف 📢'}</span>
+                    </button>
+                  </div>
+                  <div className="text-right">
+                    <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2 justify-end">
+                      <span>مركز الإشعارات الخارجية للهواتف (FCM & Web Push) 🔔</span>
+                    </h2>
+                    <p className="text-slate-500 text-xs mt-1">
+                      نظام تسليم إشعارات الدرجات والملاحظات والتعاميم لهواتف أولياء الأمور حتى والتطبيق مغلق، مجاناً 100% بدون أي بطاقة بنكية.
+                    </p>
+                  </div>
+                </div>
+
+                {broadcastPushSuccessMsg && (
+                  <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 p-3.5 rounded-xl text-xs font-bold text-right flex items-center justify-end gap-2">
+                    <span>{broadcastPushSuccessMsg}</span>
+                    <CheckCircle className="w-4 h-4 text-emerald-600" />
+                  </div>
+                )}
+
+                {/* 3 Status Metric Badges */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-right">
+                  <div className="bg-emerald-50/70 border border-emerald-200/60 p-4 rounded-xl space-y-1">
+                    <span className="text-[10px] font-extrabold text-emerald-700 block">تكلفة الخدمة والاشتراك</span>
+                    <div className="text-base font-black text-emerald-950 flex items-center justify-end gap-1.5">
+                      <span>مجانية بالكامل (0.00$)</span>
+                      <CheckCircle className="w-4 h-4 text-emerald-600" />
+                    </div>
+                    <p className="text-[10px] text-emerald-800 leading-relaxed">
+                      تعمل ضمن خطة Firebase Spark المجانية مدى الحياة من Google دون طلب أي بطاقة ائتمانية.
+                    </p>
+                  </div>
+
+                  <div className="bg-indigo-50/70 border border-indigo-200/60 p-4 rounded-xl space-y-1">
+                    <span className="text-[10px] font-extrabold text-indigo-700 block">الهواتف المرتبطة بالنظام</span>
+                    <div className="text-base font-black text-indigo-950 flex items-center justify-end gap-1.5 font-mono">
+                      <span>{registeredPushCount} هاتف مسجل</span>
+                      <Smartphone className="w-4 h-4 text-indigo-600" />
+                    </div>
+                    <p className="text-[10px] text-indigo-800 leading-relaxed">
+                      عدد أولياء الأمور الذين قاموا بتفعيل إشعارات الهاتف المباشرة في بواباتهم.
+                    </p>
+                  </div>
+
+                  <div className="bg-purple-50/70 border border-purple-200/60 p-4 rounded-xl space-y-1">
+                    <span className="text-[10px] font-extrabold text-purple-700 block">بروتوكول التسليم السحابي</span>
+                    <div className="text-base font-black text-purple-950 flex items-center justify-end gap-1.5">
+                      <span>Service Worker & Push API</span>
+                      <Bell className="w-4 h-4 text-purple-600" />
+                    </div>
+                    <p className="text-[10px] text-purple-800 leading-relaxed">
+                      يوقظ شاشة الهاتف في الخلفية ويعرض التنبيه كإشعار نظام رسمي مع الصوت والاهتزاز.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Technical clarification cards */}
+                <div className="bg-slate-50 border border-slate-200/80 p-4 rounded-xl space-y-3 text-right">
+                  <h4 className="font-extrabold text-xs text-slate-800 flex items-center gap-1.5 justify-end">
+                    <span>💡 توضيح فني حول حقيقة الاشتراك المدفوع والتكلفة:</span>
+                    <Info className="w-4 h-4 text-indigo-600" />
+                  </h4>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-[11px] text-slate-600 leading-relaxed">
+                    <div className="p-3 bg-white rounded-lg border border-slate-100 space-y-1">
+                      <strong className="text-slate-800 block text-xs">هل تتطلب الإشعارات اشتراكاً مدفوعاً؟</strong>
+                      <p>
+                        <strong>لا.</strong> خدمة Firebase Cloud Messaging (FCM) وإشعارات المتصفح Web Push مجانية 100% ولا تفرض غوغل أي رسوم على إرسال الإشعارات لهواتف المستخدمين.
+                      </p>
+                    </div>
+                    <div className="p-3 bg-white rounded-lg border border-slate-100 space-y-1">
+                      <strong className="text-slate-800 block text-xs">ما هي الخدمة المدفوعة التي يُسأل عنها وسببها؟</strong>
+                      <p>
+                        الخدمة المدفوعة هي <strong>Google Cloud Functions (الخوادم السحابية)</strong> بخطة Blaze. نظام مدرستنا مبرمج بتقنية الإرسال المباشر <em>(Direct Dispatcher)</em> وبالتالي <strong>لا نحتاج Cloud Functions نهائياً</strong> ولا يلزمك إدخال أي بطاقة بنكية!
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               {/* Targeted Custom Data Deletion & Management Panel */}
               <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6">
                 <div>
@@ -12486,35 +13202,92 @@ ${sampleEval}
                       return;
                     }
                     const currentList = students.length > 0 ? students : sampleRegistryStudents;
-                    const exists = currentList.some(s => s.id === editingStudent.id);
+                    const parentPhoneVal = (editingStudentPhone !== undefined ? editingStudentPhone : (editingStudent.parentPhone || '')).trim();
+                    const studentToSave: Student = {
+                      ...editingStudent,
+                      parentPhone: parentPhoneVal
+                    };
+
+                    // Check if current parent object is shared with other students
+                    const currentParent = parents.find(p => p.id === editingStudent.parentId || p.childrenIds.includes(editingStudent.id));
+                    let updatedParents = [...parents];
+
+                    if (currentParent) {
+                      const otherChildren = currentParent.childrenIds.filter(cid => cid !== editingStudent.id);
+                      const otherStudentsSharingParent = currentList.filter(s => s.id !== editingStudent.id && (s.parentId === currentParent.id || currentParent.childrenIds.includes(s.id)));
+
+                      if (otherChildren.length > 0 || otherStudentsSharingParent.length > 0) {
+                        // Current parent is shared with other students! Detach editingStudent from shared parent so other students remain untouched
+                        updatedParents = updatedParents.map(p => {
+                          if (p.id === currentParent.id) {
+                            return {
+                              ...p,
+                              childrenIds: p.childrenIds.filter(cid => cid !== editingStudent.id)
+                            };
+                          }
+                          return p;
+                        });
+
+                        // Create or update a dedicated parent record exclusively for this student
+                        const dedicatedParentId = `p_std_${editingStudent.id}`;
+                        studentToSave.parentId = dedicatedParentId;
+                        const existingDedicated = updatedParents.find(p => p.id === dedicatedParentId);
+                        if (existingDedicated) {
+                          updatedParents = updatedParents.map(p => p.id === dedicatedParentId ? {
+                            ...p,
+                            name: studentToSave.parentName || p.name,
+                            phone: parentPhoneVal
+                          } : p);
+                        } else {
+                          updatedParents.push({
+                            id: dedicatedParentId,
+                            name: studentToSave.parentName || `ولي أمر ${studentToSave.name}`,
+                            email: `${(studentToSave.parentName || 'parent').replace(/\s+/g, '')}@school.edu`,
+                            phone: parentPhoneVal,
+                            childrenIds: [studentToSave.id]
+                          });
+                        }
+                      } else {
+                        // Parent belongs exclusively to this student, update it safely
+                        updatedParents = updatedParents.map(p => {
+                          if (p.id === currentParent.id) {
+                            return {
+                              ...p,
+                              name: studentToSave.parentName || p.name,
+                              phone: parentPhoneVal
+                            };
+                          }
+                          return p;
+                        });
+                      }
+                    } else if (parentPhoneVal) {
+                      // No parent existed yet, create dedicated parent for this student
+                      const dedicatedParentId = `p_std_${editingStudent.id}`;
+                      studentToSave.parentId = dedicatedParentId;
+                      updatedParents.push({
+                        id: dedicatedParentId,
+                        name: studentToSave.parentName || `ولي أمر ${studentToSave.name}`,
+                        email: `${(studentToSave.parentName || 'parent').replace(/\s+/g, '')}@school.edu`,
+                        phone: parentPhoneVal,
+                        childrenIds: [studentToSave.id]
+                      });
+                    }
+
+                    const exists = currentList.some(s => s.id === studentToSave.id);
                     const updatedStudents = (exists
-                      ? currentList.map(s => s.id === editingStudent.id ? editingStudent : s)
-                      : [...currentList, editingStudent]);
+                      ? currentList.map(s => s.id === studentToSave.id ? studentToSave : s)
+                      : [...currentList, studentToSave]);
                     const cleanList = sanitizeAndDeduplicateStudents(updatedStudents).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
 
                     setStudents(cleanList);
                     localStorage.setItem('school_students', JSON.stringify(cleanList));
                     window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_students', value: JSON.stringify(cleanList) } }));
 
-                    // Update parent
-                    const parentPhoneVal = editingStudentPhone || editingStudent.parentPhone || '';
-                    if (editingStudent.parentId || parentPhoneVal) {
-                      const updatedParents = parents.map(p => {
-                        if (p.id === editingStudent.parentId || p.childrenIds.includes(editingStudent.id)) {
-                          return {
-                            ...p,
-                            name: editingStudent.parentName || p.name,
-                            phone: parentPhoneVal || p.phone
-                          };
-                        }
-                        return p;
-                      });
-                      setParents(updatedParents);
-                      localStorage.setItem('school_parents', JSON.stringify(updatedParents));
-                      window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_parents', value: JSON.stringify(updatedParents) } }));
-                    }
+                    setParents(updatedParents);
+                    localStorage.setItem('school_parents', JSON.stringify(updatedParents));
+                    window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_parents', value: JSON.stringify(updatedParents) } }));
 
-                    alert(`✅ تم حفظ وتحديث بيانات الطالب (${editingStudent.name}) بنجاح.`);
+                    alert(`✅ تم حفظ وتحديث بيانات الطالب (${studentToSave.name}) بنجاح.\n📲 تم تحديث رقم الواتساب لهذا الطالب المحدد فقط.`);
                     setEditingStudent(null);
                   }}
                   className="space-y-5 text-xs font-normal"
@@ -14694,6 +15467,174 @@ ${sampleEval}
                     >
                       <span>الانتقال إلى لوحة الإدارة 🚀</span>
                     </button>
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* Broadcast WhatsApp Circular Modal */}
+        <AnimatePresence>
+          {broadcastWaModal && broadcastWaModal.isOpen && (
+            <div className="fixed inset-0 bg-slate-950/75 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 z-[10020] overflow-y-auto no-print">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95, y: 15 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 15 }}
+                className="bg-white rounded-3xl max-w-2xl w-full shadow-2xl border border-emerald-100 overflow-hidden text-right flex flex-col max-h-[90vh]"
+                style={{ direction: 'rtl' }}
+              >
+                {/* Header */}
+                <div className="bg-gradient-to-r from-emerald-800 via-emerald-700 to-teal-800 text-white p-5 relative shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setBroadcastWaModal(null)}
+                    className="absolute top-4 left-4 text-emerald-200 hover:text-white p-1.5 hover:bg-white/10 rounded-full transition cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                  <div className="flex items-center gap-3">
+                    <div className="w-11 h-11 bg-white/15 border border-white/20 rounded-2xl flex items-center justify-center shrink-0">
+                      <MessageSquare className="w-6 h-6 text-emerald-200" />
+                    </div>
+                    <div>
+                      <h3 className="font-extrabold text-base text-white">{broadcastWaModal.title}</h3>
+                      <p className="text-xs text-emerald-100 mt-0.5">
+                        النطاق: {broadcastWaModal.scopeTitle} • ({broadcastWaModal.recipients.length} مستلم)
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Content */}
+                <div className="p-5 space-y-4 overflow-y-auto grow">
+                  {/* Message Preview Box */}
+                  <div className="bg-emerald-50/60 border border-emerald-200/80 rounded-2xl p-4 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-black text-emerald-900 flex items-center gap-1.5">
+                        <span>📝 نص التعميم المعد للمشاركة:</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const cleanMsg = broadcastWaModal.messageText.replace(/{اسم_المستلم}/g, 'السادة الكرام');
+                          if (navigator.clipboard) {
+                            navigator.clipboard.writeText(cleanMsg);
+                          }
+                          setBroadcastCopiedToast(true);
+                          setTimeout(() => setBroadcastCopiedToast(false), 2500);
+                        }}
+                        className="bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold px-3 py-1.5 rounded-xl transition cursor-pointer shadow-xs flex items-center gap-1.5"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>{broadcastCopiedToast ? 'تم النسخ بنجاح! ✓' : 'نسخ نص التعميم لمجموعات الواتساب 📋'}</span>
+                      </button>
+                    </div>
+                    <div className="bg-white p-3 rounded-xl border border-emerald-100 font-mono text-[11px] text-slate-800 whitespace-pre-wrap leading-relaxed max-h-36 overflow-y-auto">
+                      {broadcastWaModal.messageText.replace(/{اسم_المستلم}/g, '[اسم ولي الأمر / المعلم]')}
+                    </div>
+                  </div>
+
+                  {/* Search and Filters */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-black text-slate-800">
+                        👥 قائمة المستلمين ({broadcastWaModal.recipients.length} مستلم):
+                      </span>
+                      <span className="text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">
+                        تم الإرسال لـ: {Object.keys(broadcastSentPhones).filter(k => broadcastSentPhones[k]).length}
+                      </span>
+                    </div>
+
+                    <input
+                      type="text"
+                      value={broadcastSearchQuery}
+                      onChange={e => setBroadcastSearchQuery(e.target.value)}
+                      placeholder="🔍 ابحث بالاسم أو اسم الطالب أو الصف أو رقم الهاتف..."
+                      className="w-full text-xs border border-slate-200 px-3.5 py-2 rounded-xl bg-slate-50 focus:bg-white focus:outline-none focus:border-emerald-500 font-semibold"
+                    />
+                  </div>
+
+                  {/* Recipients List */}
+                  <div className="space-y-2 max-h-64 overflow-y-auto">
+                    {broadcastWaModal.recipients
+                      .filter(r => {
+                        if (!broadcastSearchQuery.trim()) return true;
+                        const q = broadcastSearchQuery.toLowerCase();
+                        return (
+                          r.name.toLowerCase().includes(q) ||
+                          r.studentNames.toLowerCase().includes(q) ||
+                          r.className.toLowerCase().includes(q) ||
+                          r.phone.includes(q)
+                        );
+                      })
+                      .map((r, idx) => {
+                        const isSent = broadcastSentPhones[r.id || r.phone];
+                        return (
+                          <div
+                            key={r.id + '_' + idx}
+                            className={`p-3 rounded-2xl border transition flex items-center justify-between gap-3 text-xs ${
+                              isSent ? 'bg-emerald-50/40 border-emerald-200' : 'bg-slate-50/70 border-slate-200/80 hover:bg-white'
+                            }`}
+                          >
+                            <div className="space-y-0.5 grow min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className="font-extrabold text-slate-800 truncate">{r.name}</span>
+                                {isSent && (
+                                  <span className="bg-emerald-100 text-emerald-800 text-[9px] font-black px-1.5 py-0.2 rounded-md">
+                                    تم الفتح ✓
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[11px] text-slate-500 truncate">
+                                <span>{r.studentNames}</span>
+                                {r.className && <span className="text-slate-400 mr-1.5">• {r.className}</span>}
+                              </div>
+                              <div className="font-mono text-[10px] text-emerald-700 font-bold dir-ltr text-right">
+                                {r.phone || 'بدون رقم هاتف'}
+                              </div>
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (!r.phone) {
+                                  alert('لا يتوفر رقم هاتف مسجل لهذا المستلم.');
+                                  return;
+                                }
+                                const personalized = broadcastWaModal.messageText.replace(/{اسم_المستلم}/g, r.name);
+                                openWhatsAppDirectly(r.phone, personalized, 'auto');
+                                setBroadcastSentPhones(prev => ({ ...prev, [r.id || r.phone]: true }));
+                              }}
+                              disabled={!r.phone}
+                              className={`px-3 py-2 rounded-xl text-xs font-bold transition cursor-pointer flex items-center gap-1.5 shrink-0 shadow-2xs ${
+                                isSent
+                                  ? 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                                  : 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                              }`}
+                            >
+                              <MessageSquare className="w-3.5 h-3.5" />
+                              <span>{isSent ? 'إعادة الإرسال ↺' : 'إرسال واتساب 💬'}</span>
+                            </button>
+                          </div>
+                        );
+                      })}
+                  </div>
+                </div>
+
+                {/* Footer */}
+                <div className="bg-slate-50 p-4 border-t border-slate-200 flex items-center justify-between gap-3 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setBroadcastWaModal(null)}
+                    className="bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 text-xs font-bold px-5 py-2.5 rounded-xl transition cursor-pointer shadow-2xs"
+                  >
+                    إغلاق النافذة ✕
+                  </button>
+
+                  <div className="text-xs text-slate-500 font-bold">
+                    💡 يمكنك الضغط على "إرسال واتساب" لكل ولي أمر لفتح محادثته مباشرة مع نص التعميم.
                   </div>
                 </div>
               </motion.div>

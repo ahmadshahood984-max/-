@@ -38,6 +38,7 @@ import {
   CheckCircle2
 } from 'lucide-react';
 import { buildWhatsAppUrl, openWhatsAppDirectly, getWhatsAppSentRecords, recordWhatsAppSent, WhatsAppSentRecord } from '../lib/whatsapp';
+import { sendParentPushNotification } from '../lib/pushDispatcher';
 import { WhatsAppMessageCustomizerModal } from './WhatsAppMessageCustomizerModal';
 import { PortalDesignerBadge } from './PortalDesignerBadge';
 import { Teacher, Student, Class, Attendance, Grade, Parent, Message, Announcement } from '../types';
@@ -189,6 +190,20 @@ export default function TeacherPortal({
         localStorage.setItem('school_grades', JSON.stringify(updated));
         return updated;
       });
+
+      // Dispatch push notification to parent for grade edit
+      const student = students.find(s => s.id === gradeToEdit.studentId);
+      const studentParent = parents.find(p => p.childrenIds.includes(gradeToEdit.studentId) || (student && student.parentId === p.id));
+      if (studentParent && student) {
+        sendParentPushNotification(studentParent.id, {
+          title: `📊 تحديث درجة: ${student.name}`,
+          body: `تم تعديل درجة مادة ${gradeToEdit.subject} (${gradeToEdit.examName}): النتيجة المحدثة ${newScore}/${effectiveMax}`,
+          studentId: student.id,
+          studentName: student.name,
+          category: 'grades'
+        });
+      }
+
       alert('🎉 تم تعديل الدرجة بنجاح وتحديثها لدى ولي الأمر فوراً!');
     }
     setGradeToEdit(null);
@@ -789,6 +804,27 @@ export default function TeacherPortal({
         authorName: activeTeacher?.name ? `المعلم ${activeTeacher.name}` : 'معلم الصف',
         authorRole: 'teacher'
       });
+
+      // Dispatch push notifications to affected parents
+      if (announceTarget === 'parents' || announceTarget === 'all') {
+        const teacherClassIds = activeTeacher?.classes || [];
+        const targetStudents = students.filter(s => teacherClassIds.length === 0 || teacherClassIds.includes(s.classId));
+        const targetParentIds = Array.from(new Set(
+          targetStudents.map(s => {
+            const p = parents.find(parent => parent.childrenIds.includes(s.id) || s.parentId === parent.id);
+            return p?.id;
+          }).filter(Boolean) as string[]
+        ));
+
+        targetParentIds.forEach(pId => {
+          sendParentPushNotification(pId, {
+            title: `📢 إعلان من المعلم: ${announceTitle}`,
+            body: announceContent.slice(0, 150),
+            category: 'announcement'
+          });
+        });
+      }
+
       alert('🎉 تم نشر التعميم والإعلان بنجاح، وسيظهر فوراً لأولياء الأمور المعنيين!');
       setAnnounceTitle('');
       setAnnounceContent('');

@@ -31,15 +31,15 @@ if ('caches' in window) {
   });
 }
 
-// Register Progressive Web App (PWA) Service Worker with graceful fallback
-if ('serviceWorker' in navigator && window.self === window.top) {
+// Register Progressive Web App (PWA) & FCM Service Worker with graceful fallback
+if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/service-worker.js')
+    navigator.serviceWorker.register('/firebase-messaging-sw.js')
       .then((reg) => {
-        console.log('[PWA] Service Worker registered with scope:', reg.scope);
+        console.log('[PWA/FCM] Service Worker registered with scope:', reg.scope);
       })
       .catch((err) => {
-        console.log('[PWA] Service worker registration deferred or unavailable in current frame:', err?.message || err);
+        console.log('[PWA/FCM] Service worker registration note:', err?.message || err);
       });
   });
 }
