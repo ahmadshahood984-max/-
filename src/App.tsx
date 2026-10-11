@@ -32,7 +32,7 @@ import ParentPortal from './components/ParentPortal';
 import PortalDesignerBadge from './components/PortalDesignerBadge';
 import { sanitizeAndDeduplicateStudents } from './lib/studentDeduplicator';
 import { safeShowNotification } from './lib/notificationHelper';
-import { sendParentPushNotification } from './lib/pushDispatcher';
+import { sendParentPushNotification, sendBroadcastPushNotification } from './lib/pushDispatcher';
 import { 
   Building, 
   Users, 
@@ -731,6 +731,16 @@ export default function App() {
     logEvent(`${newAnn.authorName} نشر تعميماً جديداً: "${newAnn.title}" المستهدف: ${
       newAnn.target === 'all' ? 'الجميع' : newAnn.target === 'teachers' ? 'المعلمون' : 'أولياء الأمور'
     }`, 'primary');
+
+    // Send broadcast push notification to parents
+    if (newAnn.target === 'all' || newAnn.target === 'parents') {
+      const allParentIds = parents.map(p => p.id);
+      sendBroadcastPushNotification(allParentIds, {
+        title: `📢 تعميم مدرسي: ${newAnn.title}`,
+        body: newAnn.content.slice(0, 150),
+        category: 'announcement'
+      });
+    }
   };
 
   // 4. Director approves/rejects Absence Excuse (INTERCONNECTED LOGIC)
@@ -769,6 +779,17 @@ export default function App() {
           logEvent(`تم رفض عذر غياب الطالب: ${exc.studentName} للتاريخ ${exc.date}`, 'warning');
         }
 
+        // Send push notification to parent with decision
+        const parent = parents.find(p => p.id === exc.parentId);
+        if (parent) {
+          sendParentPushNotification(parent.id, {
+            title: status === 'approved' ? '✅ تم قبول عذر الغياب' : '❌ تم رفض عذر الغياب',
+            body: `عذر غياب الطالب (${exc.studentName}) لتاريخ ${exc.date}: ${status === 'approved' ? 'تم اعتماده وتوثيقه كعذر مقبول رسمياً' : 'تم رفضه من إدارة المدرسة'}${notes ? ` - ملاحظة: ${notes}` : ''}`,
+            studentId: exc.studentId,
+            category: 'attendance'
+          });
+        }
+
         return updated;
       }
       return exc;
@@ -799,6 +820,23 @@ export default function App() {
     const presentCount = newAttendance.filter(a => a.status === 'present').length;
     const absentCount = newAttendance.filter(a => a.status === 'absent').length;
     logEvent(`المعلم قام بتحضير الطلاب وتوثيق: ${presentCount} حضور، ${absentCount} غياب.`, 'info');
+
+    // Send push notification for absent or late students
+    newAttendance.forEach(item => {
+      if (item.status === 'absent' || item.status === 'late') {
+        const student = students.find(s => s.id === item.studentId);
+        const parent = parents.find(p => p.childrenIds.includes(item.studentId) || (student && student.parentId === p.id));
+        if (parent && student) {
+          sendParentPushNotification(parent.id, {
+            title: item.status === 'absent' ? `🚨 تنبيه غياب: ${student.name}` : `⏰ تنبيه تأخر: ${student.name}`,
+            body: `تم تسجيل الطالب (${student.name}) كـ (${item.status === 'absent' ? 'غائب عن المدرسة' : 'متأخر في الحضور'}) لتاريخ اليوم ${item.date}.${item.notes ? ` ملاحظات: ${item.notes}` : ''}`,
+            studentId: student.id,
+            studentName: student.name,
+            category: 'attendance'
+          });
+        }
+      }
+    });
   };
 
   // 6. Teacher records a Grade
@@ -836,6 +874,7 @@ export default function App() {
       sendParentPushNotification(studentParent.id, {
         title: `📊 رصد درجة جديدة: ${student.name}`,
         body: `مادة ${gradeData.subject} (${gradeData.examName}): النتيجة ${gradeData.score}/${gradeData.maxScore}`,
+        msgId: msgId,
         studentId: student.id,
         studentName: student.name,
         category: 'grades'
@@ -845,7 +884,7 @@ export default function App() {
 
   // 7. Messaging
   const sendMessage = (msgData: Omit<Message, 'id' | 'date' | 'read'>) => {
-    const id = 'm' + (messages.length + 1);
+    const id = 'm_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
     const date = new Date().toISOString();
     const newMsg: Message = { ...msgData, id, date, read: false };
 
@@ -854,12 +893,43 @@ export default function App() {
 
     // Dispatch external push if recipient is a parent
     if (msgData.receiverRole === 'parent' && msgData.receiverId) {
-      const cleanContent = msgData.content.replace(/^📢 \[تصنيف الإشعار:[^\]]+\]\n/, '');
+      const student = students.find(s => s.id === msgData.studentId);
+      let notifTitle = `📩 رسالة جديدة من: ${msgData.senderName}`;
+      let notifCategory: 'direct' | 'grades' | 'behavior' | 'finance' | 'attendance' = 'direct';
+
+      if (msgData.content.includes('كشف درجات') || msgData.content.includes('كشف الدرجات') || msgData.content.includes('الدرجات والأداء')) {
+        notifTitle = `📊 كشف درجات: ${student?.name || 'الطالب'}`;
+        notifCategory = 'grades';
+      } else if (msgData.content.includes('سلوك') || msgData.content.includes('تنبيه سلوكي') || msgData.content.includes('التقرير السلوكي')) {
+        const isPos = msgData.content.includes('إيجابي') || msgData.content.includes('متميز') || msgData.content.includes('شكر');
+        notifTitle = isPos 
+          ? `🌟 سلوك إيجابي متميز: ${student?.name || 'الطالب'}` 
+          : `⚠️ تنبيه ومتابعة سلوكية: ${student?.name || 'الطالب'}`;
+        notifCategory = 'behavior';
+      } else if (msgData.content.includes('إشعار مالي') || msgData.content.includes('الأقساط') || msgData.content.includes('الرسوم الدراسية')) {
+        notifTitle = `💳 كشف حساب ورسوم: ${student?.name || 'الطالب'}`;
+        notifCategory = 'finance';
+      } else if (msgData.content.includes('حضور') || msgData.content.includes('غياب') || msgData.content.includes('تأخر')) {
+        notifTitle = `🚨 تنبيه حضور وغياب: ${student?.name || 'الطالب'}`;
+        notifCategory = 'attendance';
+      }
+
+      const cleanContent = msgData.content
+        .replace(/^📢 \[تصنيف الإشعار:[^\]]+\]\n/, '')
+        .replace(/^📢 \[إشعار رسمي:[^\]]+\]\n/, '')
+        .trim();
+
       sendParentPushNotification(msgData.receiverId, {
-        title: `📩 رسالة جديدة من: ${msgData.senderName}`,
-        body: cleanContent.slice(0, 150),
+        title: notifTitle,
+        body: cleanContent.slice(0, 160),
+        fullContent: msgData.content,
+        senderName: msgData.senderName,
+        senderRole: (msgData.senderRole as any) || 'teacher',
+        senderId: msgData.senderId,
+        msgId: id,
         studentId: msgData.studentId,
-        category: 'direct'
+        studentName: student?.name,
+        category: notifCategory
       });
     }
   };

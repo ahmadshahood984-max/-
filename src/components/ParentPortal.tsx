@@ -29,6 +29,7 @@ import {
   Camera,
   Video,
   Bell,
+  BellRing,
   Smartphone,
   Download,
   ExternalLink,
@@ -37,14 +38,18 @@ import {
   ArrowLeftRight,
   Hash,
   Printer,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Copy,
+  Check,
+  CheckCheck,
+  AlertTriangle
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { Parent, Student, Attendance, Grade, Announcement, Message, AbsenceExcuse, Teacher, Class } from '../types';
 import { PortalDesignerBadge } from './PortalDesignerBadge';
 import { GradeSheetSignatures } from './GradeSheetSignatures';
 import { printElementById, downloadElementAsImage, exportElementAsPdf } from '../lib/printUtils';
-import { safeShowNotification } from '../lib/notificationHelper';
+import { safeShowNotification, dismissNotification, dismissAllNotifications } from '../lib/notificationHelper';
 import { sendParentPushNotification } from '../lib/pushDispatcher';
 import { getStoredWelcomeMessages, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { motion, AnimatePresence } from 'motion/react';
@@ -540,7 +545,14 @@ export default function ParentPortal({
         const body = `تم رصد درجة الطالب ${activeChild?.name} في تقييم (${g.examName}): ${g.score}/${g.maxScore}`;
         playCustomNotificationSound();
         showLocalPortalToast(title, body, 'grade');
-        safeShowNotification(title, { body, icon: '/icon.png' });
+        safeShowNotification(title, {
+          body,
+          icon: '/icon.png',
+          badge: '/badge.png',
+          tag: `grade_${g.id}`,
+          renotify: true,
+          data: { msgId: g.id, url: `/?portal=parent&tab=grades` }
+        });
       });
       prevGradesRef.current = gradeIds;
     }
@@ -554,7 +566,14 @@ export default function ParentPortal({
         const body = `تم رصد حالة الطالب ${activeChild?.name} ليوم ${a.date} كـ: ${statusAr}`;
         playCustomNotificationSound();
         showLocalPortalToast(title, body, 'attendance');
-        safeShowNotification(title, { body, icon: '/icon.png' });
+        safeShowNotification(title, {
+          body,
+          icon: '/icon.png',
+          badge: '/badge.png',
+          tag: `att_${a.date}`,
+          renotify: true,
+          data: { url: `/?portal=parent&tab=attendance` }
+        });
       });
       prevAttendanceRef.current = attendanceIds;
     }
@@ -567,7 +586,14 @@ export default function ParentPortal({
         const body = `${an.title}: ${an.content.substring(0, 80)}...`;
         playCustomNotificationSound();
         showLocalPortalToast(title, body, 'announcement');
-        safeShowNotification(title, { body, icon: '/icon.png' });
+        safeShowNotification(title, {
+          body,
+          icon: '/icon.png',
+          badge: '/badge.png',
+          tag: `ann_${an.id}`,
+          renotify: true,
+          data: { msgId: an.id, url: `/?portal=parent&tab=notes` }
+        });
       });
       prevAnnouncementsRef.current = announcementIds;
     }
@@ -581,7 +607,14 @@ export default function ParentPortal({
           const body = m.content.replace(/^📢 \[تصنيف الإشعار:[^\]]+\]\n/, '');
           playCustomNotificationSound();
           showLocalPortalToast(title, body, 'message');
-          safeShowNotification(title, { body, icon: '/icon.png' });
+          safeShowNotification(title, {
+            body,
+            icon: '/icon.png',
+            badge: '/badge.png',
+            tag: `notif_${m.id}`,
+            renotify: true,
+            data: { msgId: m.id, url: `/?portal=parent&tab=messages&msgId=${m.id}` }
+          });
         }
       });
       prevMessagesRef.current = messageIds;
@@ -606,7 +639,9 @@ export default function ParentPortal({
   );
   const [isTestingPush, setIsTestingPush] = useState<boolean>(false);
   const [testPushSuccess, setTestPushSuccess] = useState<boolean>(false);
-  const [showPushGuide, setShowPushGuide] = useState<boolean>(false);
+  const [showRestrictedEnvModal, setShowRestrictedEnvModal] = useState<boolean>(false);
+  const [copiedLink, setCopiedLink] = useState<boolean>(false);
+  const [openedMessageDetail, setOpenedMessageDetail] = useState<Message | null>(null);
 
   // PWA Install prompt state
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
@@ -712,7 +747,7 @@ export default function ParentPortal({
   // Request Push notification permissions and save token
   const requestPushPermission = async () => {
     if (typeof window === 'undefined' || !('Notification' in window)) {
-      alert('⚠️ متصفحك لا يدعم الإشعارات المباشرة أو تم فتحه داخل بيئة مقيدة.');
+      setShowRestrictedEnvModal(true);
       return;
     }
 
@@ -739,7 +774,7 @@ export default function ParentPortal({
               }
             }
 
-            let configuredVapidKey = 'BPr7CisEId0VlPof_fC7WlO5X4QY68Kby6eNclvX6XoI1XUf_SgM_f7E6G8Q9g2g5Ncl7H5p18qHlJ7m8Q9p2p0';
+            let configuredVapidKey = '';
             const savedFcmConfig = localStorage.getItem('school_fcm_config');
             if (savedFcmConfig) {
               try {
@@ -750,10 +785,14 @@ export default function ParentPortal({
               }
             }
 
-            const token = await getToken(messaging, {
-              serviceWorkerRegistration: activeRegistration,
-              vapidKey: configuredVapidKey
-            });
+            const tokenOptions: { serviceWorkerRegistration?: ServiceWorkerRegistration; vapidKey?: string } = {
+              serviceWorkerRegistration: activeRegistration
+            };
+            if (configuredVapidKey) {
+              tokenOptions.vapidKey = configuredVapidKey;
+            }
+
+            const token = await getToken(messaging, tokenOptions);
 
             if (token) {
               registeredToken = token;
@@ -824,12 +863,66 @@ export default function ParentPortal({
     }
   };
 
-  // Check initial permission status on load
+  // Helper to copy website link for opening in Chrome
+  const handleCopySiteLink = () => {
+    if (typeof window !== 'undefined') {
+      const url = window.location.href;
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(url).then(() => {
+          setCopiedLink(true);
+          setTimeout(() => setCopiedLink(false), 2500);
+        }).catch(() => {
+          prompt('انسخ رابط المنصة لفتحه في متصفح Google Chrome:', url);
+        });
+      } else {
+        prompt('انسخ رابط المنصة لفتحه في متصفح Google Chrome:', url);
+      }
+    }
+  };
+
+  // Helper to open link in Chrome on Android
+  const handleOpenInChrome = () => {
+    if (typeof window !== 'undefined') {
+      const currentUrl = window.location.href;
+      const cleanUrl = currentUrl.replace(/^https?:\/\//, '');
+      const intentUrl = `intent://${cleanUrl}#Intent;scheme=https;package=com.android.chrome;end`;
+      try {
+        window.location.href = intentUrl;
+      } catch {
+        window.open(currentUrl, '_blank');
+      }
+    }
+  };
+
+  // Check initial permission status on load & auto-register if granted
   React.useEffect(() => {
     if (typeof window !== 'undefined' && 'Notification' in window) {
-      setPushPermissionStatus(Notification.permission);
+      const currentPerm = Notification.permission;
+      setPushPermissionStatus(currentPerm);
+
+      // If already granted, auto-register/update device token silently in background
+      if (currentPerm === 'granted' && selectedParentId) {
+        (async () => {
+          try {
+            const { doc, setDoc } = await import('firebase/firestore');
+            const { db } = await import('../lib/firebase');
+            if (db) {
+              await setDoc(doc(db, 'fcm_tokens', selectedParentId), {
+                parentId: selectedParentId,
+                parentName: activeParent?.name || 'ولي أمر',
+                deviceInfo: typeof navigator !== 'undefined' ? navigator.userAgent.slice(0, 140) : 'Web Device',
+                platform: typeof navigator !== 'undefined' && /iPhone|iPad|iPod/.test(navigator.userAgent) ? 'iOS' : 'Android/Web',
+                permission: 'granted',
+                updatedAt: Date.now()
+              }, { merge: true });
+            }
+          } catch (e) {
+            // silent catch
+          }
+        })();
+      }
     }
-  }, [selectedParentId]);
+  }, [selectedParentId, activeParent]);
 
   // Subscribe to real-time notifications from Firestore
   React.useEffect(() => {
@@ -895,10 +988,19 @@ export default function ParentPortal({
                 }
                 
                 // Trigger native push notification
-                if (isTargetParent) {
-                  safeShowNotification(newMsg.senderName || 'إشعار مدرسي جديد 🔔', {
-                    body: newMsg.content,
-                    icon: '/icon.png'
+                if (isTargetParent && !newMsg.read) {
+                  const notifTitle = data.title || newMsg.senderName || 'إشعار مدرسي جديد 🔔';
+                  const notifBody = data.body || newMsg.content;
+                  safeShowNotification(notifTitle, {
+                    body: notifBody,
+                    icon: '/icon.png',
+                    tag: `notif_${newMsg.id}`,
+                    // @ts-ignore
+                    renotify: true,
+                    data: {
+                      msgId: newMsg.id,
+                      url: `/?portal=parent&tab=messages&msgId=${newMsg.id}`
+                    }
                   });
                 }
 
@@ -906,6 +1008,17 @@ export default function ParentPortal({
                 localStorage.setItem('school_messages', JSON.stringify(updated));
                 return updated;
               });
+            } else if (change.type === "modified") {
+              const data = change.doc.data();
+              if (data.read) {
+                const docId = data.id || change.doc.id;
+                dismissNotification(docId);
+                setMessages(prev => {
+                  const updated = prev.map(m => m.id === docId ? { ...m, read: true } : m);
+                  localStorage.setItem('school_messages', JSON.stringify(updated));
+                  return updated;
+                });
+              }
             }
           });
         }, (error) => {
@@ -931,6 +1044,55 @@ export default function ParentPortal({
       }
     };
   }, [setMessages, selectedParentId]);
+
+  // Handle opening message from external notification click or service worker message
+  React.useEffect(() => {
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      const urlTab = urlParams.get('tab');
+      const urlMsgId = urlParams.get('msgId');
+
+      if (urlTab === 'messages') {
+        setActiveTab('messages');
+      }
+
+      if (urlMsgId) {
+        markAsRead(urlMsgId);
+        const match = messages.find(m => m.id === urlMsgId);
+        if (match) {
+          setOpenedMessageDetail(match);
+        }
+        const cleanUrl = window.location.pathname;
+        window.history.replaceState({}, '', cleanUrl);
+      }
+    } catch {
+      // ignore
+    }
+
+    const handleSwMessage = (event: MessageEvent) => {
+      if (event.data && event.data.type === 'OPEN_MESSAGE') {
+        setActiveTab('messages');
+        const mId = event.data.msgId;
+        if (mId) {
+          markAsRead(mId);
+          const match = messages.find(m => m.id === mId);
+          if (match) {
+            setOpenedMessageDetail(match);
+          }
+        }
+      }
+    };
+
+    if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('message', handleSwMessage);
+    }
+
+    return () => {
+      if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+        navigator.serviceWorker.removeEventListener('message', handleSwMessage);
+      }
+    };
+  }, [messages]);
 
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
@@ -965,7 +1127,7 @@ export default function ParentPortal({
     setLoginError('');
   };
 
-  const markAsRead = (msgId: string) => {
+  const markAsRead = async (msgId: string) => {
     if (setMessages) {
       setMessages(prev => {
         const updated = prev.map(m => m.id === msgId ? { ...m, read: true } : m);
@@ -973,16 +1135,65 @@ export default function ParentPortal({
         return updated;
       });
     }
+
+    // Dismiss external push/system notification immediately so it vanishes from status bar
+    await dismissNotification(msgId);
+
+    // Update in Firestore notifications collection
+    try {
+      const { doc, updateDoc } = await import('firebase/firestore');
+      const { db } = await import('../lib/firebase');
+      if (db) {
+        await updateDoc(doc(db, 'notifications', msgId), {
+          read: true,
+          status: 'read'
+        });
+      }
+    } catch {
+      // ignore
+    }
   };
 
-  const markAllAsRead = () => {
+  const markAllAsRead = async () => {
     if (setMessages) {
       setMessages(prev => {
-        const updated = prev.map(m => m.receiverId === selectedParentId && !m.read ? { ...m, read: true } : m);
+        const updated = prev.map(m => {
+          const isTarget = m.receiverId === selectedParentId || 
+            m.receiverId === selectedChildId || 
+            m.receiverRole === 'parent' || 
+            m.receiverId === 'all' || 
+            m.receiverId === 'all_cohort_parents' || 
+            (m.receiverId?.startsWith('all_class_') && activeChild?.classId === m.receiverId.replace('all_class_', ''));
+          return isTarget && !m.read ? { ...m, read: true } : m;
+        });
         localStorage.setItem('school_messages', JSON.stringify(updated));
         return updated;
       });
     }
+
+    // Dismiss all system notifications
+    await dismissAllNotifications();
+
+    try {
+      const { collection, getDocs, query, where, updateDoc, doc } = await import('firebase/firestore');
+      const { db } = await import('../lib/firebase');
+      if (db && selectedParentId) {
+        const q = query(collection(db, 'notifications'), where('receiverId', '==', selectedParentId));
+        const snap = await getDocs(q);
+        snap.forEach(d => {
+          if (!d.data().read) {
+            updateDoc(doc(db, 'notifications', d.id), { read: true, status: 'read' }).catch(() => {});
+          }
+        });
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleOpenMessage = (msg: Message) => {
+    markAsRead(msg.id);
+    setOpenedMessageDetail(msg);
   };
 
   const handleDeleteParentMessage = (msgId: string) => {
@@ -1076,11 +1287,15 @@ export default function ParentPortal({
 
   const unreadBehaviorCount = childBehaviorMessages.filter(m => !m.read).length;
 
-  const unreadMessagesCount = messages.filter(m => 
-    (m.studentId ? m.studentId === selectedChildId : (m.receiverId === selectedChildId || m.receiverId === selectedParentId || m.receiverRole === 'parent')) && 
-    !m.read &&
-    isTeacherGradeMessage(m)
-  ).length;
+  const unreadMessagesCount = messages.filter(m => {
+    const isForChild = !m.studentId || m.studentId === selectedChildId;
+    const isClassCircular = m.receiverId?.startsWith('all_class_') && activeChild?.classId === m.receiverId.replace('all_class_', '');
+    const isCohortCircular = m.receiverId === 'all_cohort_parents' || m.receiverId === 'all';
+    const isDirectToMe = m.receiverId === selectedParentId || (m.receiverRole === 'parent' && !m.receiverId);
+    const isTarget = isForChild && (isDirectToMe || isCohortCircular || isClassCircular);
+    const isIncoming = m.senderRole !== 'parent' && m.senderId !== selectedParentId;
+    return isTarget && isIncoming && !m.read;
+  }).length;
 
   // Tabs inside parent portal
   const [activeTab, setActiveTab] = useState<'grades' | 'attendance' | 'announcements' | 'messages' | 'behavior' | 'excuse' | 'tuition'>('grades');
@@ -1451,6 +1666,18 @@ export default function ParentPortal({
                 </span>
               )}
             </button>
+
+            {(unreadDirectCount > 0 || teacherGradeMessages.filter(m => m.receiverId === selectedParentId && !m.read).length > 0) && (
+              <button
+                type="button"
+                onClick={markAllAsRead}
+                className="mr-auto flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-xl text-[11px] font-bold transition shadow-2xs cursor-pointer"
+                title="تحديد كافة الرسائل كمقروءة وإخفاء التنبيهات من الجهاز"
+              >
+                <CheckCheck className="w-3.5 h-3.5 text-emerald-600" />
+                <span>إخفاء التنبيهات وقراءة الكل 👁️</span>
+              </button>
+            )}
           </div>
 
           {/* SUCCESS BANNER */}
@@ -1624,17 +1851,15 @@ export default function ParentPortal({
                   return (
                     <div
                       key={msg.id}
-                      onClick={() => {
-                        if (isUnread) markAsRead(msg.id);
-                      }}
-                      className={`p-3.5 rounded-2xl border text-xs transition-all duration-200 text-right space-y-2 ${
+                      onClick={() => handleOpenMessage(msg)}
+                      className={`p-3.5 rounded-2xl border text-xs transition-all duration-200 text-right space-y-2 cursor-pointer ${
                         isSentByParent
                           ? 'bg-indigo-50/80 border-indigo-200 text-slate-800 mr-4 border-r-4 border-r-indigo-600'
                           : isCohortCircular || isClassCircular
                           ? 'bg-gradient-to-r from-amber-50/90 to-indigo-50/60 border-indigo-200/90 text-slate-800 ml-2 shadow-xs border-r-4 border-r-amber-500'
                           : isUnread
-                          ? 'bg-amber-50 border-amber-300 text-slate-800 ml-4 cursor-pointer ring-2 ring-amber-400 animate-pulse'
-                          : 'bg-white border-slate-200 text-slate-800 ml-4 shadow-3xs'
+                          ? 'bg-amber-50 border-amber-300 text-slate-800 ml-4 ring-2 ring-amber-400 hover:bg-amber-100/60 animate-pulse'
+                          : 'bg-white border-slate-200 text-slate-800 ml-4 shadow-3xs hover:border-indigo-200'
                       }`}
                     >
                       <div className="flex justify-between items-center text-[10px] font-bold text-slate-500 border-b border-slate-100/60 pb-1.5">
@@ -1697,14 +1922,10 @@ export default function ParentPortal({
                   return (
                     <div
                       key={msg.id}
-                      onClick={() => {
-                        if (isIncomingUnread) {
-                          markAsRead(msg.id);
-                        }
-                      }}
-                      className={`p-4 rounded-2xl border text-xs transition-all duration-200 text-right space-y-2 ${
+                      onClick={() => handleOpenMessage(msg)}
+                      className={`p-4 rounded-2xl border text-xs transition-all duration-200 text-right space-y-2 cursor-pointer ${
                         isIncomingUnread
-                          ? 'bg-amber-50/90 border-amber-300 text-slate-800 cursor-pointer ring-1 ring-amber-400 animate-pulse shadow-sm'
+                          ? 'bg-amber-50/90 border-amber-300 text-slate-800 ring-1 ring-amber-400 hover:bg-amber-100/60 animate-pulse shadow-sm'
                           : 'bg-white border-slate-200/80 text-slate-800 shadow-3xs hover:border-indigo-200'
                       }`}
                     >
@@ -2378,131 +2599,69 @@ export default function ParentPortal({
               </div>
             </div>
 
-            {/* Dedicated Unified Number Badge & Switch Button */}
-            <div className="flex flex-col sm:flex-row sm:items-center gap-3 self-stretch xl:self-auto">
-              <div className="bg-gradient-to-br from-indigo-50 to-slate-50 border-2 border-indigo-500/30 p-3 rounded-2xl flex items-center justify-between sm:justify-start gap-4 shadow-2xs">
+            {/* Dedicated Unified Number Badge & Switch Button & Compact Notification Button */}
+            <div className="flex flex-wrap items-center gap-2.5 self-stretch xl:self-auto">
+              <div className="bg-gradient-to-br from-indigo-50 to-slate-50 border-2 border-indigo-500/30 p-2.5 px-3 rounded-2xl flex items-center justify-between sm:justify-start gap-3 shadow-2xs">
                 <div className="text-right">
-                  <span className="text-[10px] text-indigo-600 font-extrabold block">الرقم الموحد المخصص:</span>
-                  <span className="text-base font-black text-indigo-950 font-mono tracking-wider">
+                  <span className="text-[10px] text-indigo-600 font-extrabold block">الرقم الموحد:</span>
+                  <span className="text-sm font-black text-indigo-950 font-mono tracking-wider">
                     #{activeChild?.unifiedNo || activeChild?.rollNo || '---'}
                   </span>
                 </div>
-                <div className="w-8 h-8 rounded-xl bg-indigo-600 text-white flex items-center justify-center font-mono font-bold text-xs shadow-2xs shrink-0">
+                <div className="w-7 h-7 rounded-lg bg-indigo-600 text-white flex items-center justify-center font-mono font-bold text-xs shadow-2xs shrink-0">
                   #{activeChild?.unifiedNo || activeChild?.rollNo}
                 </div>
               </div>
 
               {activeChildTeacher && (
-                <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200/80 text-xs shrink-0 text-right">
+                <div className="p-2.5 px-3 bg-slate-50 rounded-2xl border border-slate-200/80 text-xs shrink-0 text-right">
                   <span className="text-indigo-600 block text-[10px] font-bold">المعلم المشرف:</span>
                   <span className="font-bold text-slate-800">{activeChildTeacher.name}</span>
-                  <span className="text-[10px] text-slate-500 block mt-0.5 font-mono">{activeChildTeacher.phone}</span>
                 </div>
+              )}
+
+              {/* زر الإشعارات المصغر والأنيق */}
+              {pushPermissionStatus === 'granted' ? (
+                <button
+                  type="button"
+                  onClick={handleTestParentNotification}
+                  disabled={isTestingPush}
+                  className="bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200/80 px-3 py-2 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs shrink-0"
+                  title="الإشعارات مفعلة - اضغط لإجراء تجربة"
+                >
+                  <span className="relative flex h-2 w-2">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                  </span>
+                  <BellRing className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>{isTestingPush ? 'فحص...' : testPushSuccess ? 'وصل بنجاح ✓' : 'الإشعارات'}</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={requestPushPermission}
+                  className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 px-3 py-2 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs shrink-0"
+                  title="تفعيل إشعارات الهاتف للدرجات والملاحظات"
+                >
+                  <Bell className="w-3.5 h-3.5 text-indigo-600" />
+                  <span>تفعيل التنبيهات</span>
+                </button>
               )}
 
               <button
                 type="button"
                 onClick={handleLogout}
-                className="bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 px-4 py-2.5 rounded-2xl text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer shadow-2xs shrink-0"
+                className="bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 px-3 py-2 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs shrink-0"
                 title="فتح ملف طالب آخر برقم موحد مختلف"
               >
-                <ArrowLeftRight className="w-4 h-4 text-indigo-600" />
-                <span>تغيير الرقم الموحد</span>
+                <ArrowLeftRight className="w-3.5 h-3.5 text-indigo-600" />
+                <span>تغيير الطالب</span>
               </button>
             </div>
           </div>
         ) : (
           <div className="bg-amber-50 p-6 rounded-2xl border border-amber-200 text-amber-800 text-sm text-center">
             يرجى إدخال الرقم الموحد للطالب للاطلاع على بياناته.
-          </div>
-        )}
-
-        {/* External Phone Push Notification Card for Parent */}
-        {activeChild && (
-          <div className="mb-6 bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white p-4 sm:p-5 rounded-2xl border border-indigo-700/40 shadow-sm text-right">
-            <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
-              <div className="flex items-start gap-3.5">
-                <div className={`p-3 rounded-2xl text-white shrink-0 shadow-md ${
-                  pushPermissionStatus === 'granted' ? 'bg-emerald-600' : 'bg-indigo-600 animate-pulse'
-                }`}>
-                  <Bell className="w-5 h-5" />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <h3 className="font-extrabold text-sm text-white">إشعارات الهاتف الخارجية (الدرجات والملاحظات فوراً)</h3>
-                    {pushPermissionStatus === 'granted' ? (
-                      <span className="text-[10px] font-extrabold px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-400/30">
-                        مفعلة على هاتفك بنجاح ✓
-                      </span>
-                    ) : (
-                      <span className="text-[10px] font-extrabold px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-400/30">
-                        بانتظار التفعيل 🔔
-                      </span>
-                    )}
-                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-400/30">
-                      مجانية 100% بدون أي رسوم
-                    </span>
-                  </div>
-                  <p className="text-xs text-slate-300 mt-1 leading-relaxed">
-                    {pushPermissionStatus === 'granted'
-                      ? 'تصلك إشعارات درجات وملاحظات وغياب الطالب مباشرة على شاشة هاتفك كإشعار خارجي حتى لو كان التطبيق مغلقاً.'
-                      : 'فعّل إشعارات الهاتف لتصلك نتائج الاختبارات والملاحظات السلوكية والتوجيهات فور رصدها من المعلمين والإدارة على شاشة هاتفك.'}
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2 w-full lg:w-auto shrink-0 flex-wrap">
-                {pushPermissionStatus !== 'granted' ? (
-                  <button
-                    type="button"
-                    onClick={requestPushPermission}
-                    className="w-full sm:w-auto bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold text-xs px-4 py-2.5 rounded-xl transition cursor-pointer flex items-center justify-center gap-2 shadow-sm"
-                  >
-                    <Smartphone className="w-4 h-4" />
-                    <span>تفعيل إشعارات الهاتف الآن 🔔</span>
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={handleTestParentNotification}
-                    disabled={isTestingPush}
-                    className="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs px-3.5 py-2.5 rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5 shadow-sm"
-                  >
-                    <Sparkles className="w-3.5 h-3.5 text-amber-300" />
-                    <span>{isTestingPush ? 'جارِ الإرسال...' : testPushSuccess ? 'وصل الإشعار بنجاح! ✓' : 'اختبار وصول الإشعار لهاتفي 📲'}</span>
-                  </button>
-                )}
-
-                <button
-                  type="button"
-                  onClick={() => setShowPushGuide(!showPushGuide)}
-                  className="w-full sm:w-auto bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs px-3 py-2.5 rounded-xl border border-slate-700 transition cursor-pointer flex items-center justify-center gap-1.5"
-                >
-                  <span>{showPushGuide ? 'إخفاء الإرشادات' : 'إرشادات الهاتف 📱'}</span>
-                </button>
-              </div>
-            </div>
-
-            {/* Expandable guide for Android and iPhone */}
-            {showPushGuide && (
-              <div className="mt-4 pt-4 border-t border-slate-800 grid grid-cols-1 md:grid-cols-2 gap-4 text-xs text-right leading-relaxed bg-slate-950/70 p-3.5 rounded-xl">
-                <div className="space-y-1.5 p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
-                  <span className="font-extrabold text-emerald-400 block text-xs">📱 لهواتف أندرويد (Samsung / Xiaomi / Huawei):</span>
-                  <p className="text-slate-300 text-[11px] leading-relaxed">
-                    1. اضغط على زر "تفعيل إشعارات الهاتف" ثم اختر <strong>"سماح Allow"</strong> عند ظهور رسالة المتصفح.<br />
-                    2. يمكنك الضغط على خيارات المتصفح (⋮) ثم <strong>"إضافة إلى الشاشة الرئيسية أو تثبيت التطبيق"</strong> ليعمل كتطبيق كامل يصلك منه الإشعار حتى لو كان هاتفك مقفلاً ومجاناً مدى الحياة.
-                  </p>
-                </div>
-                <div className="space-y-1.5 p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
-                  <span className="font-extrabold text-sky-400 block text-xs">🍎 لهواتف آيفون (Apple iOS 16.4 فما فوق):</span>
-                  <p className="text-slate-300 text-[11px] leading-relaxed">
-                    1. افتح رابط المنصة في متصفح <strong>Safari</strong>.<br />
-                    2. اضغط على زر المشاركة بالأسفل (مربع بسهم للأعلى ⬆️) ثم اختر <strong>"إضافة إلى الشاشة الرئيسية Add to Home Screen"</strong>.<br />
-                    3. افتح أيقونة المدرسة الدولية من شاشتك واضغط تفعيل الإشعارات لتصلك حتى عندما يكون التطبيق مغلقاً.
-                  </p>
-                </div>
-              </div>
-            )}
           </div>
         )}
 
@@ -3408,13 +3567,26 @@ export default function ParentPortal({
                           tagText = 'تنبيه سلوكي هام ⚠️';
                         }
 
+                        const isUnread = !msg.read;
+
                         return (
-                          <div key={msg.id} className={`p-5 rounded-2xl border ${cardBorder} shadow-2xs space-y-3 transition duration-200 hover:shadow-xs`}>
+                          <div
+                            key={msg.id}
+                            onClick={() => handleOpenMessage(msg)}
+                            className={`p-5 rounded-2xl border ${cardBorder} shadow-2xs space-y-3 transition duration-200 hover:shadow-xs cursor-pointer ${
+                              isUnread ? 'ring-2 ring-rose-400 bg-rose-50/30' : ''
+                            }`}
+                          >
                             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100/80 pb-2.5">
                               <div className="flex items-center gap-2">
                                 <span className={`px-2.5 py-0.5 rounded-full border text-[10px] font-bold ${tagBg}`}>
                                   {tagText}
                                 </span>
+                                {isUnread && (
+                                  <span className="bg-rose-500 text-white text-[8px] px-2 py-0.5 rounded-full font-bold animate-bounce">
+                                    جديد ✉️
+                                  </span>
+                                )}
                                 <span className="text-[10px] text-slate-400 font-mono">
                                   {new Date(msg.date).toLocaleDateString('ar-EG', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
                                   {' - '}
@@ -3895,6 +4067,201 @@ export default function ParentPortal({
                     <span>متابعة بيانات الطالب 🎓</span>
                   </button>
                 </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Restricted Environment / AppsGeyser Modal Guide */}
+      <AnimatePresence>
+        {showRestrictedEnvModal && (
+          <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-[10020] pointer-events-auto">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="bg-white rounded-3xl max-w-lg w-full shadow-2xl border border-amber-200 overflow-hidden text-right relative"
+              style={{ direction: 'rtl' }}
+            >
+              {/* Header */}
+              <div className="bg-gradient-to-r from-amber-600 via-amber-700 to-slate-900 text-white p-5 relative overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setShowRestrictedEnvModal(false)}
+                  className="absolute top-4 left-4 text-amber-200 hover:text-white p-1.5 hover:bg-white/10 rounded-full transition cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+                <div className="flex items-center gap-3">
+                  <div className="w-12 h-12 bg-white/15 border border-white/20 rounded-2xl flex items-center justify-center shrink-0 shadow-inner">
+                    <AlertTriangle className="w-6 h-6 text-amber-200" />
+                  </div>
+                  <div>
+                    <span className="inline-block bg-amber-400/20 text-amber-200 text-[10px] font-extrabold px-2.5 py-0.5 rounded-full mb-1 border border-amber-300/30">
+                      تشخيص المشكلة وحلها المجاني 100%
+                    </span>
+                    <h3 className="font-extrabold text-base text-white">تفعيل الإشعارات خارج بيئة AppsGeyser</h3>
+                  </div>
+                </div>
+              </div>
+
+              {/* Body */}
+              <div className="p-5 sm:p-6 space-y-4 max-h-[75vh] overflow-y-auto">
+                {/* Explanation */}
+                <div className="bg-amber-50 border border-amber-200/80 rounded-2xl p-4 text-xs text-amber-950 leading-relaxed space-y-2">
+                  <h4 className="font-extrabold text-sm text-amber-900 flex items-center gap-1.5">
+                    <span>🔍 أين تكمن المشكلة بالضبط؟</span>
+                  </h4>
+                  <p className="text-slate-700">
+                    أنت تتصفح حالياً من خلال تطبيق تم إنشاؤه عبر أداة <strong>AppsGeyser</strong> (وهي التي تعرض شريط الإعلانات وزر <span className="text-amber-800 font-bold">Buy Premium</span> في أسفل شاشتك).
+                  </p>
+                  <p className="text-slate-700">
+                    تطبيقات الـ WebView المجانية هذه <strong>تمنع وصول إشعارات المتصفح القياسية عمداً</strong> لإجبارك على شراء باقة مدفوعة أو إدخال بطاقة بنكية!
+                  </p>
+                </div>
+
+                {/* Solution */}
+                <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-4 text-xs text-emerald-950 leading-relaxed space-y-2.5">
+                  <h4 className="font-extrabold text-sm text-emerald-800 flex items-center gap-1.5">
+                    <Sparkles className="w-4 h-4 text-emerald-600" />
+                    <span>الحل الرسمي المجاني 100% (خلال 30 ثانية):</span>
+                  </h4>
+                  <p className="text-slate-700 font-medium">
+                    لا تحتاج لدفع أي مبالغ ولا لاستخدام برامج وسيطة بها إعلانات! نظام المدرسة يدعم تقنية <strong>PWA</strong> المعتمدة من Google:
+                  </p>
+                  <ol className="list-decimal list-inside space-y-2 text-slate-800 pr-1">
+                    <li className="font-bold text-slate-900">
+                      اضغط زر <strong>«نسخ رابط المنصة»</strong> بالأسفل.
+                    </li>
+                    <li>
+                      افتح متصفح <strong>Google Chrome</strong> على هاتفك وألصق الرابط.
+                    </li>
+                    <li>
+                      اضغط زر <strong>«تفعيل إشعارات الهاتف 🔔»</strong> واختر <strong>سماح (Allow)</strong>.
+                    </li>
+                    <li className="font-bold text-emerald-900">
+                      اضغط خيارات كروم (الثلاث نقاط ⋮) واختر <strong>«تثبيت التطبيق»</strong> أو <strong>«إضافة إلى الشاشة الرئيسية»</strong>.
+                    </li>
+                  </ol>
+                  <p className="text-[11px] text-emerald-700 font-bold bg-emerald-100/60 p-2 rounded-lg mt-1">
+                    ✓ سيعمل كتطبيق رسمي نظيف تماماً بدون إعلانات AppsGeyser، وستصلك إشعارات الدرجات والملاحظات فوراً حتى لو كان هاتفك مقفلاً مجاناً مدى الحياة!
+                  </p>
+                </div>
+
+                {/* Action Buttons */}
+                <div className="pt-2 space-y-2.5">
+                  <button
+                    type="button"
+                    onClick={handleCopySiteLink}
+                    className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold rounded-xl transition cursor-pointer shadow-md flex items-center justify-center gap-2"
+                  >
+                    {copiedLink ? <Check className="w-4 h-4 text-emerald-200" /> : <Copy className="w-4 h-4" />}
+                    <span>{copiedLink ? 'تم نسخ الرابط بنجاح! الصقه في Chrome ✓' : 'نسخ رابط المنصة لفتحه في Google Chrome 📋'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleOpenInChrome}
+                    className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition cursor-pointer flex items-center justify-center gap-2"
+                  >
+                    <ExternalLink className="w-4 h-4 text-amber-300" />
+                    <span>محاولة الفتح المباشر في متصفح Chrome 🌐</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowRestrictedEnvModal(false)}
+                    className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition cursor-pointer"
+                  >
+                    فهمت، حسناً
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {/* Opened Message Detail Modal */}
+        {openedMessageDetail && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 15 }}
+              className="bg-white rounded-3xl shadow-2xl border border-slate-200 w-full max-w-lg overflow-hidden text-right"
+              style={{ direction: 'rtl' }}
+            >
+              {/* Header */}
+              <div className="bg-gradient-to-l from-indigo-900 via-slate-900 to-indigo-950 p-5 text-white flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-2xl bg-indigo-500/20 border border-indigo-400/30 flex items-center justify-center text-indigo-300">
+                    <MessageSquare className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <span className="text-[10px] font-bold text-indigo-300 block">
+                      {openedMessageDetail.senderRole === 'teacher' ? '👨‍🏫 رسالة من معلم الصف' : openedMessageDetail.senderRole === 'director' ? '🏫 رسالة من إدارة المدرسة' : '📩 تفاصيل الإشعار المدرسي'}
+                    </span>
+                    <h3 className="font-extrabold text-sm text-white">
+                      {openedMessageDetail.senderName || 'المدرسة'}
+                    </h3>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setOpenedMessageDetail(null)}
+                  className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 text-slate-300 hover:text-white flex items-center justify-center transition cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Status bar */}
+              <div className="bg-emerald-50 border-b border-emerald-100 px-5 py-2.5 flex items-center justify-between text-xs text-emerald-800 font-bold">
+                <span className="flex items-center gap-1.5">
+                  <CheckCircle className="w-4 h-4 text-emerald-600" />
+                  <span>تمت القراءة واختفى إشعار التنبيه من جهازك ✓</span>
+                </span>
+                <span className="text-[10px] text-slate-400 font-mono">
+                  {new Date(openedMessageDetail.date).toLocaleDateString('ar-EG', { weekday: 'short', month: 'short', day: 'numeric' })} - {new Date(openedMessageDetail.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                </span>
+              </div>
+
+              {/* Message Body */}
+              <div className="p-5 sm:p-6 space-y-4 max-h-[60vh] overflow-y-auto">
+                <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-4 text-xs sm:text-sm text-slate-800 leading-relaxed font-medium whitespace-pre-line">
+                  {renderMessageContent(openedMessageDetail.content)}
+                </div>
+              </div>
+
+              {/* Actions Footer */}
+              <div className="p-4 bg-slate-50/70 border-t border-slate-100 flex items-center justify-between gap-3">
+                <button
+                  type="button"
+                  onClick={() => setOpenedMessageDetail(null)}
+                  className="px-5 py-2.5 bg-slate-200 hover:bg-slate-300 text-slate-800 text-xs font-bold rounded-xl transition cursor-pointer"
+                >
+                  إغلاق الرسالة
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const senderRole = openedMessageDetail.senderRole;
+                    setOpenedMessageDetail(null);
+                    setActiveTab('messages');
+                    setActiveChatSubTab('send');
+                    if (senderRole === 'teacher') {
+                      setParentMsgTarget('teacher');
+                    } else {
+                      setParentMsgTarget('director');
+                    }
+                  }}
+                  className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-extrabold rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-xs"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  <span>الرد على هذه الرسالة</span>
+                </button>
               </div>
             </motion.div>
           </div>

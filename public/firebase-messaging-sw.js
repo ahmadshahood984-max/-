@@ -30,11 +30,14 @@ try {
     const title = payload.notification?.title || payload.data?.title || 'إشعار من المدرسة الدولية 🔔';
     const body = payload.notification?.body || payload.data?.body || 'لديك رسالة أو تحديث جديد من المنصة المدرسية.';
 
+    const iconUrl = self.location.origin + '/icon.png';
+    const badgeUrl = self.location.origin + '/badge.png';
+
     const options = {
       body: body,
-      icon: '/icon.png',
-      badge: '/icon.png',
-      vibrate: [250, 100, 250],
+      icon: iconUrl,
+      badge: badgeUrl,
+      vibrate: [300, 150, 300, 150, 400],
       dir: 'rtl',
       lang: 'ar',
       data: {
@@ -62,11 +65,14 @@ self.addEventListener('push', function(event) {
   }
 
   const notificationTitle = data.notification?.title || data.title || 'إشعار من المدرسة الدولية 🔔';
+  const iconUrl = self.location.origin + '/icon.png';
+  const badgeUrl = self.location.origin + '/badge.png';
+
   const notificationOptions = {
     body: data.notification?.body || data.body || 'لديك إشعار جديد بخصوص درجات وملاحظات الطالب.',
-    icon: '/icon.png',
-    badge: '/icon.png',
-    vibrate: [300, 150, 300],
+    icon: iconUrl,
+    badge: badgeUrl,
+    vibrate: [300, 150, 300, 150, 400],
     dir: 'rtl',
     lang: 'ar',
     tag: data.tag || 'school-alert',
@@ -84,33 +90,57 @@ self.addEventListener('message', function(event) {
   if (event.data && event.data.type === 'DISPATCH_PUSH_NOTIFICATION') {
     const title = event.data.title || 'إشعار من المدرسة الدولية 🔔';
     const body = event.data.body || 'لديك تحديث جديد في المنصة المدرسية.';
+    const msgId = event.data.payload?.msgId || event.data.msgId || Date.now();
+    const iconUrl = self.location.origin + '/icon.png';
+    const badgeUrl = self.location.origin + '/badge.png';
+
     const options = {
       body: body,
-      icon: '/icon.png',
-      badge: '/icon.png',
-      vibrate: [300, 150, 300],
+      icon: iconUrl,
+      badge: badgeUrl,
+      vibrate: [300, 150, 300, 150, 400],
       dir: 'rtl',
       lang: 'ar',
-      tag: `sw_push_${Date.now()}`,
+      tag: `notif_${msgId}`,
       renotify: true,
       data: {
-        url: '/?portal=parent'
+        msgId: msgId,
+        url: `/?portal=parent&tab=messages&msgId=${msgId}`
       }
     };
     event.waitUntil(self.registration.showNotification(title, options));
+  } else if (event.data && event.data.type === 'DISMISS_NOTIFICATION') {
+    const tag = event.data.tag;
+    const msgId = event.data.msgId;
+    self.registration.getNotifications().then(notifications => {
+      notifications.forEach(n => {
+        if (
+          n.tag === tag || 
+          n.tag === `notif_${msgId}` || 
+          n.tag === `msg-${msgId}` || 
+          (n.data && n.data.msgId === msgId)
+        ) {
+          n.close();
+        }
+      });
+    });
   }
 });
 
 // 4. Handle clicking on notifications
 self.addEventListener('notificationclick', function(event) {
   event.notification.close();
-  const targetUrl = event.notification.data?.url || '/';
+  const msgId = event.notification.data?.msgId || event.notification.tag?.replace(/^(notif_|msg-)/, '');
+  const targetUrl = event.notification.data?.url || (msgId ? `/?portal=parent&tab=messages&msgId=${msgId}` : '/?portal=parent&tab=messages');
 
   event.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function(clientList) {
       for (let i = 0; i < clientList.length; i++) {
         const client = clientList[i];
         if (client.url.includes(self.location.origin) && 'focus' in client) {
+          if (msgId) {
+            client.postMessage({ type: 'OPEN_MESSAGE', msgId: msgId, tab: 'messages' });
+          }
           return client.focus();
         }
       }

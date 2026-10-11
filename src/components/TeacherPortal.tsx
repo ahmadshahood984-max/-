@@ -276,6 +276,23 @@ export default function TeacherPortal({
 
     openWhatsAppDirectly(finalPhone, finalMessage, targetType);
 
+    // Also dispatch message & external push notification to parent portal
+    const targetStudent = students.find(s => s.id === waModalState.studentId || s.name === waModalState.studentName);
+    const targetParent = parents.find(p => (targetStudent && (p.childrenIds.includes(targetStudent.id) || p.id === targetStudent.parentId)) || p.phone === finalPhone);
+
+    if (targetParent) {
+      sendMessage({
+        senderId: selectedTeacherId,
+        senderName: activeTeacher?.name || 'المعلم',
+        senderRole: 'teacher',
+        receiverId: targetParent.id,
+        receiverName: targetParent.name,
+        receiverRole: 'parent',
+        content: finalMessage,
+        studentId: targetStudent?.id
+      });
+    }
+
     const rec = recordWhatsAppSent(waModalState.waKey, waModalState.studentName, 'behavior');
     recordWhatsAppSent(waModalState.waKeyGeneral, waModalState.studentName, 'behavior');
 

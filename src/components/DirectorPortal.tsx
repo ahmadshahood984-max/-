@@ -767,12 +767,104 @@ export default function DirectorPortal({
     onConfirm: () => void;
   } | null>(null);
 
+  // Automatic Backup Snapshot before any deletion or wipe operation
+  const saveAutomaticSnapshot = () => {
+    try {
+      const snapshot = {
+        teachers,
+        students,
+        classes,
+        parents,
+        grades,
+        attendance,
+        announcements,
+        messages,
+        excuses,
+        directorPassword,
+        timestamp: Date.now(),
+        dateStr: new Date().toLocaleString('ar-SA')
+      };
+      localStorage.setItem('school_emergency_snapshot', JSON.stringify(snapshot));
+      console.log('[Safety Backup] Emergency snapshot saved before operation.');
+    } catch (e) {
+      console.warn('[Safety Backup] Could not save emergency snapshot:', e);
+    }
+  };
+
+  const [hasEmergencySnapshot, setHasEmergencySnapshot] = useState<boolean>(() => {
+    return !!localStorage.getItem('school_emergency_snapshot');
+  });
+
+  const handleRestoreEmergencySnapshot = () => {
+    try {
+      const saved = localStorage.getItem('school_emergency_snapshot');
+      if (!saved) {
+        alert('لا توجد نسخة استرجاع تلقائية سابقة محفوظة في ذاكرة النظام.');
+        return;
+      }
+      const snapshot = JSON.parse(saved);
+      if (confirm(`هل أنت متأكد من إلغاء آخر حذف واسترجاع كافة البيانات المحفوظة بتاريخ (${snapshot.dateStr || 'سابقاً'})؟`)) {
+        if (snapshot.teachers) {
+          setTeachers(snapshot.teachers);
+          localStorage.setItem('school_teachers', JSON.stringify(snapshot.teachers));
+          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_teachers', value: JSON.stringify(snapshot.teachers) } }));
+        }
+        if (snapshot.students) {
+          setStudents(snapshot.students);
+          localStorage.setItem('school_students', JSON.stringify(snapshot.students));
+          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_students', value: JSON.stringify(snapshot.students) } }));
+        }
+        if (snapshot.classes) {
+          setClasses(snapshot.classes);
+          localStorage.setItem('school_classes', JSON.stringify(snapshot.classes));
+          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_classes', value: JSON.stringify(snapshot.classes) } }));
+        }
+        if (snapshot.parents) {
+          setParents(snapshot.parents);
+          localStorage.setItem('school_parents', JSON.stringify(snapshot.parents));
+          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_parents', value: JSON.stringify(snapshot.parents) } }));
+        }
+        if (snapshot.grades) {
+          setGrades(snapshot.grades);
+          localStorage.setItem('school_grades', JSON.stringify(snapshot.grades));
+          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_grades', value: JSON.stringify(snapshot.grades) } }));
+        }
+        if (snapshot.attendance) {
+          setAttendance(snapshot.attendance);
+          localStorage.setItem('school_attendance', JSON.stringify(snapshot.attendance));
+          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_attendance', value: JSON.stringify(snapshot.attendance) } }));
+        }
+        if (snapshot.announcements) {
+          setAnnouncements(snapshot.announcements);
+          localStorage.setItem('school_announcements', JSON.stringify(snapshot.announcements));
+          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_announcements', value: JSON.stringify(snapshot.announcements) } }));
+        }
+        if (snapshot.messages) {
+          setMessages(snapshot.messages);
+          localStorage.setItem('school_messages', JSON.stringify(snapshot.messages));
+          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_messages', value: JSON.stringify(snapshot.messages) } }));
+        }
+        if (snapshot.excuses) {
+          setExcuses(snapshot.excuses);
+          localStorage.setItem('school_excuses', JSON.stringify(snapshot.excuses));
+          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_excuses', value: JSON.stringify(snapshot.excuses) } }));
+        }
+
+        alert('🎉 تم بنجاح إلغاء الحذف واسترجاع كافة الأسماء والبيانات المحفوظة بنجاح!');
+      }
+    } catch (err) {
+      alert('حدث خطأ أثناء استعادة البيانات.');
+    }
+  };
+
   const confirmAndExecute = (title: string, message: string, onConfirm: () => void) => {
     setDeleteConfirmModal({
       isOpen: true,
       title,
       message,
       onConfirm: () => {
+        saveAutomaticSnapshot();
+        setHasEmergencySnapshot(true);
         onConfirm();
         setDeleteConfirmModal(null);
       }
@@ -6549,33 +6641,45 @@ ${directivesFormatted}
                   <h1 className="text-2xl font-bold text-slate-800 text-right">شؤون المعلمين 👤</h1>
                   <p className="text-slate-500 text-sm mt-1 text-right">إضافة، تعديل ومتابعة الكادر التعليمي بالفصول</p>
                 </div>
-                <button
-                  id="dir-btn-add-teacher"
-                  onClick={() => {
-                    if (showTeacherForm && editingTeacher) {
-                      setEditingTeacher(null);
-                      setNewTeacher({ name: '', email: '', phone: '', subjectsStr: '', classId: '', password: '123' });
-                      setTeacherSelectedClassId('');
-                      setTeacherSelectedSubjects([]);
-                      setTeacherSelectedClassIds([]);
-                      setTeacherNewSubjectInput('');
-                    } else {
-                      setShowTeacherForm(!showTeacherForm);
-                      if (!showTeacherForm) {
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={handleRestoreEmergencySnapshot}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-3.5 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-sm shadow-emerald-200"
+                    title="التراجع عن آخر حذف واسترجاع كافة المعلمين والبيانات المحفوظة"
+                  >
+                    <RotateCcw className="w-4 h-4 text-emerald-100" />
+                    <span>تراجع عن الحذف واسترجاع المعلمين 🔄</span>
+                  </button>
+
+                  <button
+                    id="dir-btn-add-teacher"
+                    onClick={() => {
+                      if (showTeacherForm && editingTeacher) {
                         setEditingTeacher(null);
                         setNewTeacher({ name: '', email: '', phone: '', subjectsStr: '', classId: '', password: '123' });
                         setTeacherSelectedClassId('');
                         setTeacherSelectedSubjects([]);
                         setTeacherSelectedClassIds([]);
                         setTeacherNewSubjectInput('');
+                      } else {
+                        setShowTeacherForm(!showTeacherForm);
+                        if (!showTeacherForm) {
+                          setEditingTeacher(null);
+                          setNewTeacher({ name: '', email: '', phone: '', subjectsStr: '', classId: '', password: '123' });
+                          setTeacherSelectedClassId('');
+                          setTeacherSelectedSubjects([]);
+                          setTeacherSelectedClassIds([]);
+                          setTeacherNewSubjectInput('');
+                        }
                       }
-                    }
-                  }}
-                  className="bg-sky-600 text-white px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2 hover:bg-sky-700 shadow-md shadow-sky-100 transition cursor-pointer self-start sm:self-auto"
-                >
-                  <Plus className="w-5 h-5" />
-                  <span>{editingTeacher ? 'إلغاء التعديل والعودة للإضافة' : 'إضافة معلم جديد'}</span>
-                </button>
+                    }}
+                    className="bg-sky-600 text-white px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2 hover:bg-sky-700 shadow-md shadow-sky-100 transition cursor-pointer self-start sm:self-auto"
+                  >
+                    <Plus className="w-5 h-5" />
+                    <span>{editingTeacher ? 'إلغاء التعديل والعودة للإضافة' : 'إضافة معلم جديد'}</span>
+                  </button>
+                </div>
               </div>
 
               {/* Add Teacher Form Toggle */}
@@ -8513,6 +8617,16 @@ if __name__ == "__main__":
                   <p className="text-slate-500 text-sm mt-1">إدارة كشوف الطلاب وتوثيق ارتباطهم بأولياء أمورهم عبر تصدير واستيراد ملفات Excel ومعاينتها فورياً</p>
                 </div>
                 <div className="flex items-center gap-2 flex-wrap self-start sm:self-auto">
+                  <button
+                    type="button"
+                    onClick={handleRestoreEmergencySnapshot}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white px-3.5 py-2.5 rounded-xl text-xs font-bold flex items-center gap-1.5 justify-center shadow-md shadow-emerald-100 transition cursor-pointer"
+                    title="التراجع عن آخر حذف واسترجاع كافة بيانات الطلاب"
+                  >
+                    <RotateCcw className="w-4 h-4 text-emerald-100" />
+                    <span>تراجع عن الحذف واسترجاع الطلاب 🔄</span>
+                  </button>
+
                   <button
                     type="button"
                     onClick={() => {
@@ -12731,13 +12845,35 @@ ${sampleEval}
 
               {/* Targeted Custom Data Deletion & Management Panel */}
               <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6">
-                <div>
-                  <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2 justify-end">
-                    <span>لوحة تصفير وإدارة البيانات المخصصة 🧹</span>
-                  </h2>
-                  <p className="text-slate-500 text-xs mt-1 text-right">
-                    أداة تحكم متقدمة تتيح لك البحث عن أي طالب، معلم، إعلان، رسالة، أو صف دراسي وحذفه بمفرده، أو تصفير القسم بالكامل دفعة واحدة بكل أمان.
-                  </p>
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleRestoreEmergencySnapshot}
+                      className="bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs px-4 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-2 shadow-sm shadow-emerald-200"
+                      title="إلغاء آخر عملية حذف واسترجاع كافة البيانات المحفوظة"
+                    >
+                      <RotateCcw className="w-4 h-4 text-emerald-100" />
+                      <span>إلغاء الحذف واسترجاع البيانات كاملة 🔄</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleDownloadBackup}
+                      className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-extrabold text-xs px-3.5 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 border border-indigo-200"
+                      title="تنزيل نسخة احتياطية كاملة لكافة بيانات المدرسة"
+                    >
+                      <Download className="w-4 h-4 text-indigo-600" />
+                      <span>حفظ نسخة احتياطية 💾</span>
+                    </button>
+                  </div>
+                  <div className="text-right">
+                    <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2 justify-end">
+                      <span>لوحة تصفير وإدارة البيانات المخصصة 🧹</span>
+                    </h2>
+                    <p className="text-slate-500 text-xs mt-1 text-right">
+                      أداة تحكم متقدمة تتيح لك البحث عن أي طالب، معلم، إعلان، رسالة، أو صف دراسي وحذفه بمفرده، أو إلغاء الحذف في أي وقت بأمان تام.
+                    </p>
+                  </div>
                 </div>
 
                 {/* Category Selection Tabs */}

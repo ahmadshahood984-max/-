@@ -11,9 +11,14 @@ import { safeShowNotification } from './notificationHelper';
 export interface PushNotificationPayload {
   title: string;
   body: string;
+  fullContent?: string;
+  senderName?: string;
+  senderRole?: 'teacher' | 'director' | 'system' | 'admin';
+  senderId?: string;
+  msgId?: string;
   studentId?: string;
   studentName?: string;
-  category?: 'grades' | 'notes' | 'attendance' | 'announcement' | 'direct' | 'general';
+  category?: 'grades' | 'notes' | 'attendance' | 'announcement' | 'direct' | 'general' | 'behavior' | 'finance';
   url?: string;
 }
 
@@ -29,6 +34,7 @@ export async function sendParentPushNotification(
 
   const title = payload.title || 'إشعار من المدرسة الدولية 🔔';
   const body = payload.body || 'لديك تحديث جديد في المنصة المدرسية.';
+  const msgId = payload.msgId || `m_push_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
 
   let success = false;
 
@@ -36,11 +42,15 @@ export async function sendParentPushNotification(
   try {
     if (db) {
       await addDoc(collection(db, 'notifications'), {
+        id: msgId,
         receiverId: parentId,
         receiverRole: 'parent',
         title: title,
-        content: body,
+        content: payload.fullContent || body,
         body: body,
+        senderId: payload.senderId || 'school',
+        senderName: payload.senderName || 'المدرسة الدولية الخاصة 🏫',
+        senderRole: payload.senderRole || 'teacher',
         studentId: payload.studentId || null,
         studentName: payload.studentName || null,
         category: payload.category || 'grades',
@@ -51,7 +61,7 @@ export async function sendParentPushNotification(
       });
       trackFirestoreWrite(1);
       success = true;
-      console.log(`[PushDispatcher] Saved notification to Firestore for parent: ${parentId}`);
+      console.log(`[PushDispatcher] Saved notification to Firestore for parent: ${parentId} (ID: ${msgId})`);
     }
   } catch (err) {
     console.warn('[PushDispatcher] Could not record notification to Firestore:', err);
@@ -65,7 +75,8 @@ export async function sendParentPushNotification(
         title,
         body,
         parentId,
-        payload
+        msgId,
+        payload: { ...payload, msgId }
       });
     }
   } catch (swErr) {
@@ -86,13 +97,30 @@ export async function sendParentPushNotification(
         if (fcmToken) {
           console.log(`[PushDispatcher] Found active FCM device token for parent ${parentId}. Device: ${tokenData?.deviceInfo || 'Unknown'}`);
 
-          // Read custom VAPID/Server config if configured in school settings
+          // Read custom VAPID/Server config if configured in school settings (localStorage or Firestore)
           let serverKey = '';
           const savedFcmConfig = localStorage.getItem('school_fcm_config');
           if (savedFcmConfig) {
             try {
               const parsed = JSON.parse(savedFcmConfig);
               if (parsed?.serverKey) serverKey = parsed.serverKey;
+            } catch {
+              // ignore
+            }
+          }
+
+          if (!serverKey && db) {
+            try {
+              const configDoc = await getDoc(doc(db, 'school_live_data', 'school_fcm_config'));
+              if (configDoc.exists()) {
+                const cfg = configDoc.data()?.data;
+                if (typeof cfg === 'string') {
+                  const parsed = JSON.parse(cfg);
+                  if (parsed?.serverKey) serverKey = parsed.serverKey;
+                } else if (cfg?.serverKey) {
+                  serverKey = cfg.serverKey;
+                }
+              }
             } catch {
               // ignore
             }
@@ -142,7 +170,11 @@ export async function sendParentPushNotification(
       safeShowNotification(title, {
         body: body,
         icon: '/icon.png',
-        tag: `notif_${Date.now()}`
+        tag: `notif_${msgId}`,
+        data: {
+          msgId,
+          url: `/?portal=parent&tab=messages&msgId=${msgId}`
+        }
       });
     }
   } catch {
