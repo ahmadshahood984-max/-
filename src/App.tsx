@@ -713,7 +713,7 @@ export default function App() {
   };
 
   // 3. Director or Teacher publishes Announcement
-  const addAnnouncement = (announceData: Omit<Announcement, 'id' | 'date'> & { authorName?: string; authorRole?: 'director' | 'teacher'; shift?: 'morning' | 'evening' }) => {
+  const addAnnouncement = (announceData: Omit<Announcement, 'id' | 'date'> & { authorName?: string; authorRole?: 'director' | 'teacher'; shift?: 'morning' | 'evening'; skipPushNotification?: boolean }) => {
     const id = 'a' + (announcements.length + 1);
     const date = new Date().toISOString().split('T')[0];
     const newAnn: Announcement = {
@@ -732,8 +732,8 @@ export default function App() {
       newAnn.target === 'all' ? 'الجميع' : newAnn.target === 'teachers' ? 'المعلمون' : 'أولياء الأمور'
     }`, 'primary');
 
-    // Send broadcast push notification to parents
-    if (newAnn.target === 'all' || newAnn.target === 'parents') {
+    // Send broadcast push notification to parents only if not already dispatched
+    if (!announceData.skipPushNotification && (newAnn.target === 'all' || newAnn.target === 'parents')) {
       const allParentIds = parents.map(p => p.id);
       sendBroadcastPushNotification(allParentIds, {
         title: `📢 تعميم مدرسي: ${newAnn.title}`,
@@ -820,23 +820,6 @@ export default function App() {
     const presentCount = newAttendance.filter(a => a.status === 'present').length;
     const absentCount = newAttendance.filter(a => a.status === 'absent').length;
     logEvent(`المعلم قام بتحضير الطلاب وتوثيق: ${presentCount} حضور، ${absentCount} غياب.`, 'info');
-
-    // Send push notification for absent or late students
-    newAttendance.forEach(item => {
-      if (item.status === 'absent' || item.status === 'late') {
-        const student = students.find(s => s.id === item.studentId);
-        const parent = parents.find(p => p.childrenIds.includes(item.studentId) || (student && student.parentId === p.id));
-        if (parent && student) {
-          sendParentPushNotification(parent.id, {
-            title: item.status === 'absent' ? `🚨 تنبيه غياب: ${student.name}` : `⏰ تنبيه تأخر: ${student.name}`,
-            body: `تم تسجيل الطالب (${student.name}) كـ (${item.status === 'absent' ? 'غائب عن المدرسة' : 'متأخر في الحضور'}) لتاريخ اليوم ${item.date}.${item.notes ? ` ملاحظات: ${item.notes}` : ''}`,
-            studentId: student.id,
-            studentName: student.name,
-            category: 'attendance'
-          });
-        }
-      }
-    });
   };
 
   // 6. Teacher records a Grade

@@ -124,6 +124,10 @@ self.addEventListener('message', function(event) {
         }
       });
     });
+  } else if (event.data && event.data.type === 'DISMISS_ALL_NOTIFICATIONS') {
+    self.registration.getNotifications().then(notifications => {
+      notifications.forEach(n => n.close());
+    });
   }
 });
 

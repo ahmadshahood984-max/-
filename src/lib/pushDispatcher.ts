@@ -4,7 +4,7 @@
  */
 
 import { db } from './firebase';
-import { collection, addDoc, doc, getDoc, getDocs, serverTimestamp } from 'firebase/firestore';
+import { collection, setDoc, doc, getDoc, getDocs, serverTimestamp } from 'firebase/firestore';
 import { trackFirestoreRead, trackFirestoreWrite } from './firestoreTracker';
 import { safeShowNotification } from './notificationHelper';
 
@@ -20,11 +20,13 @@ export interface PushNotificationPayload {
   studentName?: string;
   category?: 'grades' | 'notes' | 'attendance' | 'announcement' | 'direct' | 'general' | 'behavior' | 'finance';
   url?: string;
+  skipFirestoreRecord?: boolean;
+  targetReceiverId?: string;
 }
 
 /**
  * Dispatches a push notification to a parent's registered device via FCM & Firestore
- * 100% Free - operates under standard Spark (Free) plan without requiring Cloud Functions or Blaze plan.
+ * Strictly sends at most ONE notification and ensures deterministic document identification.
  */
 export async function sendParentPushNotification(
   parentId: string,
@@ -38,52 +40,41 @@ export async function sendParentPushNotification(
 
   let success = false;
 
-  // 1. Add record to Firestore 'notifications' collection so all listening parent devices receive it in real-time
-  try {
-    if (db) {
-      await addDoc(collection(db, 'notifications'), {
-        id: msgId,
-        receiverId: parentId,
-        receiverRole: 'parent',
-        title: title,
-        content: payload.fullContent || body,
-        body: body,
-        senderId: payload.senderId || 'school',
-        senderName: payload.senderName || 'المدرسة الدولية الخاصة 🏫',
-        senderRole: payload.senderRole || 'teacher',
-        studentId: payload.studentId || null,
-        studentName: payload.studentName || null,
-        category: payload.category || 'grades',
-        timestamp: serverTimestamp(),
-        date: new Date().toISOString(),
-        read: false,
-        status: 'unread'
-      });
-      trackFirestoreWrite(1);
-      success = true;
-      console.log(`[PushDispatcher] Saved notification to Firestore for parent: ${parentId} (ID: ${msgId})`);
+  // 1. Add/set record to Firestore 'notifications' collection using msgId as the document ID
+  // Using setDoc ensures that multiple dispatches for the same msgId do not create duplicate documents.
+  if (!payload.skipFirestoreRecord) {
+    try {
+      if (db) {
+        await setDoc(doc(db, 'notifications', msgId), {
+          id: msgId,
+          receiverId: parentId,
+          receiverRole: 'parent',
+          title: title,
+          content: payload.fullContent || body,
+          body: body,
+          senderId: payload.senderId || 'school',
+          senderName: payload.senderName || 'المدرسة الدولية الخاصة 🏫',
+          senderRole: payload.senderRole || 'teacher',
+          studentId: payload.studentId || null,
+          studentName: payload.studentName || null,
+          category: payload.category || 'grades',
+          timestamp: serverTimestamp(),
+          date: new Date().toISOString(),
+          read: false,
+          status: 'unread'
+        });
+        trackFirestoreWrite(1);
+        success = true;
+        console.log(`[PushDispatcher] Saved notification to Firestore for parent: ${parentId} (ID: ${msgId})`);
+      }
+    } catch (err) {
+      console.warn('[PushDispatcher] Could not record notification to Firestore:', err);
     }
-  } catch (err) {
-    console.warn('[PushDispatcher] Could not record notification to Firestore:', err);
+  } else {
+    success = true;
   }
 
-  // 2. Dispatch to Service Worker channel if active on this device
-  try {
-    if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator && navigator.serviceWorker.controller) {
-      navigator.serviceWorker.controller.postMessage({
-        type: 'DISPATCH_PUSH_NOTIFICATION',
-        title,
-        body,
-        parentId,
-        msgId,
-        payload: { ...payload, msgId }
-      });
-    }
-  } catch (swErr) {
-    // Ignore SW postMessage errors
-  }
-
-  // 3. Look up parent's registered FCM/Web Push device token
+  // 2. Look up parent's registered FCM/Web Push device token for external background push
   try {
     if (db) {
       const tokenDocRef = doc(db, 'fcm_tokens', parentId);
@@ -97,7 +88,6 @@ export async function sendParentPushNotification(
         if (fcmToken) {
           console.log(`[PushDispatcher] Found active FCM device token for parent ${parentId}. Device: ${tokenData?.deviceInfo || 'Unknown'}`);
 
-          // Read custom VAPID/Server config if configured in school settings (localStorage or Firestore)
           let serverKey = '';
           const savedFcmConfig = localStorage.getItem('school_fcm_config');
           if (savedFcmConfig) {
@@ -163,19 +153,24 @@ export async function sendParentPushNotification(
     console.warn('[PushDispatcher] Error querying FCM device token:', tokenErr);
   }
 
-  // 4. Fallback: If on this active browser Notification permission is granted and active parent matches, trigger system notification immediately
+  // 3. Fallback: ONLY trigger immediate system notification if the current active browser tab is actively logged in AS THIS SPECIFIC PARENT.
+  // Never show to the Director or Teacher who sent the message!
   try {
-    const activeParentId = localStorage.getItem('school_active_parent_id') || '';
-    if (activeParentId === parentId || !activeParentId) {
-      safeShowNotification(title, {
-        body: body,
-        icon: '/icon.png',
-        tag: `notif_${msgId}`,
-        data: {
-          msgId,
-          url: `/?portal=parent&tab=messages&msgId=${msgId}`
-        }
-      });
+    if (typeof window !== 'undefined') {
+      const activeParentId = localStorage.getItem('parent_portal_student_id') || localStorage.getItem('school_active_parent_id') || '';
+      const isParentPortalActive = window.location.search.includes('portal=parent') || localStorage.getItem('school_active_portal') === 'parent';
+      
+      if (isParentPortalActive && activeParentId && activeParentId === parentId) {
+        safeShowNotification(title, {
+          body: body,
+          icon: '/icon.png',
+          tag: `notif_${msgId}`,
+          data: {
+            msgId,
+            url: `/?portal=parent&tab=messages&msgId=${msgId}`
+          }
+        });
+      }
     }
   } catch {
     // ignore
@@ -186,6 +181,7 @@ export async function sendParentPushNotification(
 
 /**
  * Dispatches a push notification to multiple parents (e.g. for cohort or class announcements)
+ * Saves exactly ONE broadcast record to Firestore, preventing 100+ duplicated documents.
  */
 export async function sendBroadcastPushNotification(
   parentIds: string[],
@@ -196,11 +192,45 @@ export async function sendBroadcastPushNotification(
   }
 
   const uniqueParentIds = Array.from(new Set(parentIds.filter(Boolean)));
-  let sentCount = 0;
+  const title = payload.title || '📢 تعميم مدرسي رسمي';
+  const body = payload.body || 'لديك تعميم جديد من إدارة المدرسة.';
+  const msgId = payload.msgId || `m_broadcast_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
 
+  // 1. Create exactly ONE broadcast document in Firestore
+  if (!payload.skipFirestoreRecord && db) {
+    try {
+      const broadcastReceiverId = payload.targetReceiverId || 'all_cohort_parents';
+      await setDoc(doc(db, 'notifications', msgId), {
+        id: msgId,
+        receiverId: broadcastReceiverId,
+        receiverRole: 'parent',
+        title: title,
+        content: payload.fullContent || body,
+        body: body,
+        senderId: payload.senderId || 'director',
+        senderName: payload.senderName || 'إدارة المدرسة (المدير)',
+        senderRole: 'director',
+        category: 'announcement',
+        timestamp: serverTimestamp(),
+        date: new Date().toISOString(),
+        read: false,
+        status: 'unread'
+      });
+      trackFirestoreWrite(1);
+    } catch (err) {
+      console.warn('[PushDispatcher] Could not record broadcast to Firestore:', err);
+    }
+  }
+
+  // 2. Dispatch FCM external push notifications to each parent without duplicating Firestore documents
+  let sentCount = 0;
   for (const pId of uniqueParentIds) {
     try {
-      const res = await sendParentPushNotification(pId, payload);
+      const res = await sendParentPushNotification(pId, {
+        ...payload,
+        msgId: `${msgId}_${pId}`,
+        skipFirestoreRecord: true // Do not create a duplicate document for each parent in Firestore!
+      });
       if (res) sentCount++;
     } catch (e) {
       console.warn(`[PushDispatcher] Failed to send to parent ${pId}:`, e);

@@ -77,7 +77,7 @@ import { SealAndSignaturesModal } from './SealAndSignaturesModal';
 import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
 import { db } from '../lib/firebase';
-import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, addDoc, setDoc, deleteDoc, doc, serverTimestamp, writeBatch, getDocs } from 'firebase/firestore';
 import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead } from '../lib/firestoreTracker';
 import { forceRefreshDataFromFirestore } from '../lib/firebaseSync';
 import { getStoredWelcomeMessages, saveWelcomeMessages, DEFAULT_WELCOME_MESSAGES, WelcomeMessagesConfig } from '../lib/welcomeMessages';
@@ -147,7 +147,7 @@ interface DirectorPortalProps {
   setExcuses: React.Dispatch<React.SetStateAction<AbsenceExcuse[]>>;
   addTeacher: (teacher: Omit<Teacher, 'id' | 'joinDate'>) => void;
   addStudent: (student: Omit<Student, 'id'>, parent: Omit<Parent, 'id' | 'childrenIds'>) => void;
-  addAnnouncement: (announcement: Omit<Announcement, 'id' | 'date' | 'authorName'>) => void;
+  addAnnouncement: (announcement: Omit<Announcement, 'id' | 'date' | 'authorName'> & { skipPushNotification?: boolean }) => void;
   updateExcuseStatus: (id: string, status: 'approved' | 'rejected', notes?: string) => void;
   directorPassword?: string;
   changeDirectorPassword?: (newPass: string) => void;
@@ -430,7 +430,7 @@ export default function DirectorPortal({
         throw new Error('Offline');
       }
 
-      await addDoc(collection(db, 'notifications'), {
+      await setDoc(doc(db, 'notifications', newMsg.id), {
         ...newMsg,
         timestamp: serverTimestamp(),
         status: 'unread'
@@ -457,7 +457,10 @@ export default function DirectorPortal({
           sendBroadcastPushNotification(classParentIds, {
             title: newMsg.senderName || '📢 تعميم مدرسي',
             body: newMsg.content.slice(0, 150),
-            category: 'announcement'
+            category: 'announcement',
+            msgId: newMsg.id,
+            skipFirestoreRecord: true,
+            targetReceiverId: newMsg.receiverId
           });
         } else if (newMsg.receiverId === 'all_cohort_parents' || newMsg.receiverId === 'all_everyone') {
           const cohortParentIds = Array.from(new Set(
@@ -469,13 +472,18 @@ export default function DirectorPortal({
           sendBroadcastPushNotification(cohortParentIds, {
             title: newMsg.senderName || '📢 تعميم مدرسي رسمي',
             body: newMsg.content.slice(0, 150),
-            category: 'announcement'
+            category: 'announcement',
+            msgId: newMsg.id,
+            skipFirestoreRecord: true,
+            targetReceiverId: newMsg.receiverId
           });
         } else {
           sendParentPushNotification(newMsg.receiverId, {
             title: newMsg.senderName || '📩 رسالة من الإدارة',
             body: newMsg.content.slice(0, 150),
-            category: 'direct'
+            category: 'direct',
+            msgId: newMsg.id,
+            skipFirestoreRecord: true
           });
         }
       }
@@ -1703,45 +1711,6 @@ ${directivesFormatted}
 
     const payloads = Object.keys(localAttendanceForDir).map(studentId => {
       const record = localAttendanceForDir[studentId];
-      
-      // Auto-notify Parent
-      const student = students.find(s => s.id === studentId);
-      const studentParent = parents.find(p => p.childrenIds.includes(studentId));
-      if (student && studentParent) {
-        let statusText = '';
-        if (record.status === 'present') statusText = 'حاضر';
-        else if (record.status === 'absent') statusText = 'غائب ⚠️';
-        else if (record.status === 'late') statusText = 'متأخر ⏰';
-        else if (record.status === 'excused') statusText = 'غائب بعذر مقبول';
-
-        const messageContent = `📢 [تصنيف الإشعار: حضور وغياب]\nتم تسجيل حالة الحضور والغياب للطالب (${student.name}) لتاريخ اليوم (${attendanceDateForDir}) بواسطة إدارة المدرسة.\nالحالة الموثقة: ${statusText}${record.notes ? `\nملاحظات الإدارة: ${record.notes}` : ''}`;
-        
-        const newMsg: Message = {
-          id: 'msg_att_dir_' + Date.now() + Math.random().toString(36).substring(2, 7),
-          senderId: 'director_admin',
-          senderName: 'إدارة المدرسة (المدير)',
-          senderRole: 'director',
-          receiverId: studentParent.id,
-          receiverName: studentParent.name,
-          receiverRole: 'parent',
-          content: messageContent,
-          date: new Date().toISOString().split('T')[0] + ' ' + new Date().toTimeString().split(' ')[0].substring(0, 5),
-          read: false,
-          studentId: student.id
-        };
-        
-        setMessages(prev => [newMsg, ...prev]);
-
-        // Send External Push Notification
-        sendParentPushNotification(studentParent.id, {
-          title: `حالة حضور وغياب: ${student.name}`,
-          body: `الحالة الموثقة: ${statusText}`,
-          category: 'attendance',
-          studentId: student.id,
-          studentName: student.name
-        });
-      }
-
       return {
         studentId,
         date: attendanceDateForDir,
@@ -4690,6 +4659,9 @@ ${directivesFormatted}
           const updated = messages.filter(m => m.id !== itemId);
           setMessages(updated);
           localStorage.setItem('school_messages', JSON.stringify(updated));
+          if (db) {
+            deleteDoc(doc(db, 'notifications', itemId)).catch(() => {});
+          }
           alert(`✅ تم حذف الرسالة بنجاح.`);
         }
       );
@@ -4816,6 +4788,21 @@ ${directivesFormatted}
           setMessages(remaining);
           localStorage.setItem('school_messages', JSON.stringify(remaining));
           window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_messages', value: JSON.stringify(remaining) } }));
+          if (db) {
+            getDocs(collection(db, 'notifications')).then(snap => {
+              let b = writeBatch(db);
+              let c = 0;
+              snap.forEach(d => {
+                b.delete(d.ref);
+                c++;
+                if (c % 400 === 0) {
+                  b.commit();
+                  b = writeBatch(db);
+                }
+              });
+              if (c % 400 !== 0) b.commit();
+            }).catch(() => {});
+          }
         } else if (category === 'excuses') {
           const remaining = excuses.filter(e => !matchesCohort(e));
           setExcuses(remaining);
@@ -11086,58 +11073,86 @@ ${sampleEval}
                           </div>
                         </div>
 
-                        {/* Save & Send notification button */}
-                        <button
-                          onClick={() => {
-                            if (!editingStudentTuition) return;
-                            const student = editingStudentTuition;
-                            const finalTotal = tuitionTotal === '' ? 0 : Number(tuitionTotal);
+                        {/* Save Buttons: Option to save only or save with notification */}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!editingStudentTuition) return;
+                              const student = editingStudentTuition;
+                              const finalTotal = tuitionTotal === '' ? 0 : Number(tuitionTotal);
 
-                            // Update local tuitions state
-                            const updatedTuitions = {
-                              ...tuitions,
-                              [student.id]: {
-                                studentId: student.id,
-                                totalAmount: finalTotal,
-                                installments: installments
-                              }
-                            };
-                            setTuitions(updatedTuitions);
-                            localStorage.setItem('school_tuitions', JSON.stringify(updatedTuitions));
+                              const updatedTuitions = {
+                                ...tuitions,
+                                [student.id]: {
+                                  studentId: student.id,
+                                  totalAmount: finalTotal,
+                                  installments: installments
+                                }
+                              };
+                              setTuitions(updatedTuitions);
+                              localStorage.setItem('school_tuitions', JSON.stringify(updatedTuitions));
+                              window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_tuitions', value: JSON.stringify(updatedTuitions) } }));
+                              alert(`✅ تم حفظ كشف الأقساط للطالب (${student.name}) بنجاح دون إرسال أي إشعار.`);
+                            }}
+                            className="w-full bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs py-3 rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5 shadow-sm"
+                          >
+                            <Save className="w-4 h-4 text-slate-300" />
+                            <span>حفظ الأقساط فقط 💾</span>
+                          </button>
 
-                            // Find parent
-                            const parent = parents.find(p => p.id === student.parentId) || {
-                              id: student.parentId || 'p1',
-                              name: student.parentName,
-                              email: '',
-                              phone: ''
-                            };
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!editingStudentTuition) return;
+                              const student = editingStudentTuition;
+                              const finalTotal = tuitionTotal === '' ? 0 : Number(tuitionTotal);
 
-                            const totalPaid = installments.reduce((sum, inst) => sum + inst.amount, 0);
-                            const rem = Math.max(0, finalTotal - totalPaid);
-                            
-                            // Generate descriptive report text
-                            const installmentsText = installments.length === 0 
-                              ? '- لا توجد دفعات مسجلة بعد'
-                              : installments.map((inst, i) => `  ${i+1}. الدفعة: ${inst.amount} $ - بتاريخ ${inst.date} (${inst.note})`).join('\n');
+                              const updatedTuitions = {
+                                ...tuitions,
+                                [student.id]: {
+                                  studentId: student.id,
+                                  totalAmount: finalTotal,
+                                  installments: installments
+                                }
+                              };
+                              setTuitions(updatedTuitions);
+                              localStorage.setItem('school_tuitions', JSON.stringify(updatedTuitions));
+                              window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_tuitions', value: JSON.stringify(updatedTuitions) } }));
 
-                            const msgContent = `إشعار مالي رسمي وتفصيلي 💳🇺🇸: نود إحاطتكم علماً بأنه قد تم تحديث كشف سجل الأقساط والرسوم الدراسية الخاصة بابنكم/ابنتكم (${student.name}) بالدولار الأمريكي ($). التفاصيل الحالية والكاملة كما يلي:\n\n- الرسوم السنوية الإجمالية المطلوبة: ${finalTotal.toLocaleString()} $\n- إجمالي المبالغ المدفوعة والمستلمة: ${totalPaid.toLocaleString()} $\n- المبالغ المتبقية المستحقة: ${rem.toLocaleString()} $\n\n📌 كشف الدفعات المسجلة للوصول والتحصيل:\n${installmentsText}\n\nنشكر لكم تعاونكم الدائم والتزامكم بدعم المسيرة التعليمية لأبنائنا الطلاب.`;
-                            
-                            addNotification({
-                              receiverId: parent.id,
-                              receiverName: parent.name,
-                              receiverRole: 'parent',
-                              content: msgContent,
-                              studentId: student.id
-                            }).then(() => {
-                              alert(`تم حفظ كشف السجل المالي للطالب (${student.name}) بنجاح بالدولار الأمريكي! 💾🇺🇸\nوتم إرسال كشف الأقساط والدفعات الكامل لولي الأمر (${parent.name}) كإشعار ورسالة فورية في حسابه الخاص بنجاح. ✉️💵`);
-                            });
-                          }}
-                          className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs py-3 rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5 shadow-md shadow-indigo-100"
-                        >
-                          <Check className="w-4 h-4" />
-                          <span>حفظ كشف الأقساط بالدولار وإرسال إشعار 📤</span>
-                        </button>
+                              // Find parent
+                              const parent = parents.find(p => p.id === student.parentId) || {
+                                id: student.parentId || 'p1',
+                                name: student.parentName,
+                                email: '',
+                                phone: ''
+                              };
+
+                              const totalPaid = installments.reduce((sum, inst) => sum + inst.amount, 0);
+                              const rem = Math.max(0, finalTotal - totalPaid);
+                              
+                              const installmentsText = installments.length === 0 
+                                ? '- لا توجد دفعات مسجلة بعد'
+                                : installments.map((inst, i) => `  ${i+1}. الدفعة: ${inst.amount} $ - بتاريخ ${inst.date} (${inst.note})`).join('\n');
+
+                              const msgContent = `إشعار مالي رسمي وتفصيلي 💳🇺🇸: نود إحاطتكم علماً بأنه قد تم تحديث كشف سجل الأقساط والرسوم الدراسية الخاصة بابنكم/ابنتكم (${student.name}) بالدولار الأمريكي ($). التفاصيل الحالية والكاملة كما يلي:\n\n- الرسوم السنوية الإجمالية المطلوبة: ${finalTotal.toLocaleString()} $\n- إجمالي المبالغ المدفوعة والمستلمة: ${totalPaid.toLocaleString()} $\n- المبالغ المتبقية المستحقة: ${rem.toLocaleString()} $\n\n📌 كشف الدفعات المسجلة للوصول والتحصيل:\n${installmentsText}\n\nنشكر لكم تعاونكم الدائم والتزامكم بدعم المسيرة التعليمية لأبنائنا الطلاب.`;
+                              
+                              addNotification({
+                                receiverId: parent.id,
+                                receiverName: parent.name,
+                                receiverRole: 'parent',
+                                content: msgContent,
+                                studentId: student.id
+                              }).then(() => {
+                                alert(`تم حفظ كشف السجل المالي للطالب (${student.name}) بنجاح بالدولار الأمريكي! 💾🇺🇸\nوتم إرسال كشف الأقساط والدفعات لولي الأمر (${parent.name}) كإشعار ورسالة في حسابه الخاص. ✉️💵`);
+                              });
+                            }}
+                            className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs py-3 rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5 shadow-md shadow-indigo-100"
+                          >
+                            <Send className="w-4 h-4" />
+                            <span>حفظ وإرسال إشعار 📤</span>
+                          </button>
+                        </div>
                       </div>
                     </motion.div>
                   ) : (
@@ -11530,7 +11545,8 @@ ${sampleEval}
                                     content: directorMessageText.trim(),
                                     target: shouldTargetParents && shouldTargetTeachers ? 'all' : shouldTargetTeachers ? 'teachers' : 'parents',
                                     authorRole: 'director',
-                                    shift: activeCohort === 'evening' ? 'evening' : 'morning'
+                                    shift: activeCohort === 'evening' ? 'evening' : 'morning',
+                                    skipPushNotification: true
                                   });
                                 } catch (err) {
                                   console.warn("Could not save to announcements:", err);

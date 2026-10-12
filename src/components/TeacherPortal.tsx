@@ -822,26 +822,6 @@ export default function TeacherPortal({
         authorRole: 'teacher'
       });
 
-      // Dispatch push notifications to affected parents
-      if (announceTarget === 'parents' || announceTarget === 'all') {
-        const teacherClassIds = activeTeacher?.classes || [];
-        const targetStudents = students.filter(s => teacherClassIds.length === 0 || teacherClassIds.includes(s.classId));
-        const targetParentIds = Array.from(new Set(
-          targetStudents.map(s => {
-            const p = parents.find(parent => parent.childrenIds.includes(s.id) || s.parentId === parent.id);
-            return p?.id;
-          }).filter(Boolean) as string[]
-        ));
-
-        targetParentIds.forEach(pId => {
-          sendParentPushNotification(pId, {
-            title: `📢 إعلان من المعلم: ${announceTitle}`,
-            body: announceContent.slice(0, 150),
-            category: 'announcement'
-          });
-        });
-      }
-
       alert('🎉 تم نشر التعميم والإعلان بنجاح، وسيظهر فوراً لأولياء الأمور المعنيين!');
       setAnnounceTitle('');
       setAnnounceContent('');

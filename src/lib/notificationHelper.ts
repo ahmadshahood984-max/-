@@ -9,12 +9,39 @@
  * "TypeError: Failed to construct 'Notification': Illegal constructor. Use ServiceWorkerRegistration.showNotification() instead."
  * This helper tries Service Worker showNotification first, then Notification constructor inside try-catch.
  */
+// In-memory cache to strictly prevent duplicate notifications from being fired
+const recentNotificationsCache = new Map<string, number>();
+const DEDUP_COOLDOWN_MS = 15000; // 15 seconds cooldown for duplicate alerts
+
+/**
+ * Safely triggers a system/browser notification across desktop, mobile (Android Chrome), and PWA.
+ * Strictly guarantees that at most ONE notification is delivered per message/alert.
+ */
 export const safeShowNotification = async (
   title: string,
-  options?: NotificationOptions
+  options?: NotificationOptions & { renotify?: boolean; vibrate?: number[] }
 ): Promise<boolean> => {
   if (typeof window === 'undefined' || !('Notification' in window)) {
     return false;
+  }
+
+  // Deduplication check: key based on tag or title+body
+  const dedupeKey = options?.tag || `${title}_${options?.body || ''}`;
+  const now = Date.now();
+  const lastTime = recentNotificationsCache.get(dedupeKey);
+  if (lastTime && now - lastTime < DEDUP_COOLDOWN_MS) {
+    console.log(`[NotificationHelper] Deduplicated notification for key: ${dedupeKey}`);
+    return false;
+  }
+  recentNotificationsCache.set(dedupeKey, now);
+
+  // Clean old entries in cache
+  if (recentNotificationsCache.size > 200) {
+    for (const [k, t] of recentNotificationsCache.entries()) {
+      if (now - t > 60000) {
+        recentNotificationsCache.delete(k);
+      }
+    }
   }
 
   try {
@@ -31,9 +58,9 @@ export const safeShowNotification = async (
       icon: iconUrl,
       dir: 'rtl',
       lang: 'ar',
-      renotify: true,
+      renotify: false, // Do not repeat buzz for existing tag
       requireInteraction: false,
-      vibrate: [300, 150, 300, 150, 400],
+      vibrate: [250, 100, 250],
       ...options
     };
     if (!mergedOptions.icon) mergedOptions.icon = iconUrl;
@@ -71,16 +98,33 @@ export const safeShowNotification = async (
  * Automatically closes both ServiceWorker active notifications and matching tags.
  */
 export const dismissNotification = async (tagOrId: string): Promise<boolean> => {
-  if (typeof window === 'undefined') return false;
+  if (typeof window === 'undefined' || !tagOrId) return false;
 
   const targetTags = [
     tagOrId,
     `notif_${tagOrId}`,
     `msg-${tagOrId}`,
-    `notif_msg-${tagOrId}`
+    `notif_msg-${tagOrId}`,
+    `grade_${tagOrId}`,
+    `ann_${tagOrId}`,
+    `att_${tagOrId}`
   ];
 
   try {
+    // 1. Dispatch dismiss event to ServiceWorker controller
+    if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+      try {
+        navigator.serviceWorker.controller.postMessage({
+          type: 'DISMISS_NOTIFICATION',
+          msgId: tagOrId,
+          tag: `notif_${tagOrId}`
+        });
+      } catch {
+        // ignore
+      }
+    }
+
+    // 2. Close active notifications via registration
     if ('serviceWorker' in navigator) {
       const reg = (await navigator.serviceWorker.getRegistration()) || (await navigator.serviceWorker.ready);
       if (reg && typeof reg.getNotifications === 'function') {
@@ -114,6 +158,17 @@ export const dismissAllNotifications = async (): Promise<boolean> => {
   if (typeof window === 'undefined') return false;
 
   try {
+    // Post message to controller
+    if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+      try {
+        navigator.serviceWorker.controller.postMessage({
+          type: 'DISMISS_ALL_NOTIFICATIONS'
+        });
+      } catch {
+        // ignore
+      }
+    }
+
     if ('serviceWorker' in navigator) {
       const reg = (await navigator.serviceWorker.getRegistration()) || (await navigator.serviceWorker.ready);
       if (reg && typeof reg.getNotifications === 'function') {

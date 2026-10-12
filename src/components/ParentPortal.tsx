@@ -612,7 +612,7 @@ export default function ParentPortal({
             icon: '/icon.png',
             badge: '/badge.png',
             tag: `notif_${m.id}`,
-            renotify: true,
+            renotify: false,
             data: { msgId: m.id, url: `/?portal=parent&tab=messages&msgId=${m.id}` }
           });
         }
@@ -996,7 +996,7 @@ export default function ParentPortal({
                     icon: '/icon.png',
                     tag: `notif_${newMsg.id}`,
                     // @ts-ignore
-                    renotify: true,
+                    renotify: false,
                     data: {
                       msgId: newMsg.id,
                       url: `/?portal=parent&tab=messages&msgId=${newMsg.id}`
@@ -1138,16 +1138,47 @@ export default function ParentPortal({
 
     // Dismiss external push/system notification immediately so it vanishes from status bar
     await dismissNotification(msgId);
+    await dismissNotification(`notif_${msgId}`);
 
     // Update in Firestore notifications collection
     try {
-      const { doc, updateDoc } = await import('firebase/firestore');
+      const { doc, updateDoc, collection, query, where, getDocs } = await import('firebase/firestore');
       const { db } = await import('../lib/firebase');
       if (db) {
-        await updateDoc(doc(db, 'notifications', msgId), {
+        // Direct document update
+        updateDoc(doc(db, 'notifications', msgId), {
           read: true,
           status: 'read'
-        });
+        }).catch(() => {});
+
+        // Query documents where id field matches
+        const q = query(collection(db, 'notifications'), where('id', '==', msgId));
+        getDocs(q).then(snap => {
+          snap.forEach(d => {
+            updateDoc(doc(db, 'notifications', d.id), {
+              read: true,
+              status: 'read'
+            }).catch(() => {});
+          });
+        }).catch(() => {});
+      }
+    } catch {
+      // ignore
+    }
+
+    // If all messages targeting this parent are read, dismiss all notifications completely
+    try {
+      const remainingUnread = messages.filter(m => {
+        const isTarget = m.receiverId === selectedParentId || 
+          m.receiverId === selectedChildId || 
+          m.receiverRole === 'parent' || 
+          m.receiverId === 'all' || 
+          m.receiverId === 'all_cohort_parents' || 
+          (m.receiverId?.startsWith('all_class_') && activeChild?.classId === m.receiverId.replace('all_class_', ''));
+        return isTarget && !m.read && m.id !== msgId;
+      });
+      if (remainingUnread.length === 0) {
+        await dismissAllNotifications();
       }
     } catch {
       // ignore
@@ -1194,6 +1225,20 @@ export default function ParentPortal({
   const handleOpenMessage = (msg: Message) => {
     markAsRead(msg.id);
     setOpenedMessageDetail(msg);
+  };
+
+  const handleOpenAnnouncement = (ann: Announcement) => {
+    if (!readAnnouncementIds.includes(ann.id)) {
+      const updated = [...readAnnouncementIds, ann.id];
+      setReadAnnouncementIds(updated);
+      try {
+        localStorage.setItem(`read_announcements_${selectedParentId}`, JSON.stringify(updated));
+      } catch {
+        // ignore
+      }
+    }
+    dismissNotification(ann.id);
+    dismissNotification(`ann_${ann.id}`);
   };
 
   const handleDeleteParentMessage = (msgId: string) => {
@@ -3424,7 +3469,8 @@ export default function ParentPortal({
                       return (
                         <div 
                           key={ann.id} 
-                          className={`p-5 rounded-2xl border-y border-l shadow-sm flex flex-col justify-between hover:shadow-md transition ${
+                          onClick={() => handleOpenAnnouncement(ann)}
+                          className={`p-5 rounded-2xl border-y border-l shadow-sm flex flex-col justify-between hover:shadow-md transition cursor-pointer ${
                             isAnnUnread 
                               ? 'bg-rose-50 border-r-4 border-red-500 border-red-200 shadow-xs ring-1 ring-red-200/50' 
                               : 'bg-white border-r-4 border-indigo-600 border-slate-100'
@@ -3435,8 +3481,8 @@ export default function ParentPortal({
                               <div className="flex items-center gap-2">
                                 <h4 className="font-bold text-slate-800 text-sm">{ann.title}</h4>
                                 {isAnnUnread && (
-                                  <span className="bg-red-500 text-white text-[9px] px-1.5 py-0.5 rounded font-bold animate-pulse">
-                                    جديد 🆕
+                                  <span className="bg-red-500 hover:bg-red-600 text-white text-[9px] px-2 py-0.5 rounded font-bold animate-pulse transition">
+                                    جديد 🆕 (انقر للمعاينة والإخفاء)
                                   </span>
                                 )}
                               </div>
