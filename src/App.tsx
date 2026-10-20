@@ -33,6 +33,7 @@ import PortalDesignerBadge from './components/PortalDesignerBadge';
 import { sanitizeAndDeduplicateStudents } from './lib/studentDeduplicator';
 import { safeShowNotification } from './lib/notificationHelper';
 import { sendParentPushNotification, sendBroadcastPushNotification } from './lib/pushDispatcher';
+import { persistDirectToFirestore } from './lib/firebaseSync';
 import { 
   Building, 
   Users, 
@@ -828,7 +829,12 @@ export default function App() {
     const date = new Date().toISOString().split('T')[0];
     const newGrade: Grade = { ...gradeData, id, date };
 
-    setGrades(prev => [newGrade, ...prev]);
+    setGrades(prev => {
+      const updated = [newGrade, ...prev];
+      localStorage.setItem('school_grades', JSON.stringify(updated));
+      persistDirectToFirestore('school_grades', updated);
+      return updated;
+    });
     const student = students.find(s => s.id === gradeData.studentId);
     logEvent(`المعلم رصد درجة الطالب ${student?.name || ''} بمادة ${gradeData.subject}: ${gradeData.score}/${gradeData.maxScore}`, 'success');
 
@@ -849,9 +855,15 @@ export default function App() {
         content: notifBody,
         date: new Date().toISOString(),
         read: false,
-        studentId: student.id
+        studentId: student.id,
+        category: 'grades'
       };
-      setMessages(prev => [newMsg, ...prev]);
+      setMessages(prev => {
+        const updated = [newMsg, ...prev];
+        localStorage.setItem('school_messages', JSON.stringify(updated));
+        persistDirectToFirestore('school_messages', updated);
+        return updated;
+      });
 
       // External Push Notification to parent's device
       sendParentPushNotification(studentParent.id, {
@@ -871,7 +883,12 @@ export default function App() {
     const date = new Date().toISOString();
     const newMsg: Message = { ...msgData, id, date, read: false };
 
-    setMessages(prev => [...prev, newMsg]);
+    setMessages(prev => {
+      const updated = [...prev, newMsg];
+      localStorage.setItem('school_messages', JSON.stringify(updated));
+      persistDirectToFirestore('school_messages', updated);
+      return updated;
+    });
     logEvent(`رسالة جديدة من المعلم ${msgData.senderName} إلى ولي الأمر ${msgData.receiverName}`, 'primary');
 
     // Dispatch external push if recipient is a parent
@@ -928,7 +945,12 @@ export default function App() {
       parentName: parent?.name || 'ولي أمر'
     };
 
-    setExcuses(prev => [...prev, newExc]);
+    setExcuses(prev => {
+      const updated = [...prev, newExc];
+      localStorage.setItem('school_excuses', JSON.stringify(updated));
+      persistDirectToFirestore('school_excuses', updated);
+      return updated;
+    });
     logEvent(`ولي الأمر ${newExc.parentName} أرسل طلب غياب بعذر للطالب ${newExc.studentName} للتاريخ ${newExc.date}`, 'warning');
   };
 
@@ -938,7 +960,12 @@ export default function App() {
     const date = new Date().toISOString();
     const newMsg: Message = { ...msgData, id, date, read: false };
 
-    setMessages(prev => [...prev, newMsg]);
+    setMessages(prev => {
+      const updated = [...prev, newMsg];
+      localStorage.setItem('school_messages', JSON.stringify(updated));
+      persistDirectToFirestore('school_messages', updated);
+      return updated;
+    });
     logEvent(`رسالة من ولي الأمر ${msgData.senderName} إلى المعلم ${msgData.receiverName}`, 'primary');
   };
 

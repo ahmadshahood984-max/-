@@ -45,7 +45,7 @@ import {
   AlertTriangle
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
-import { Parent, Student, Attendance, Grade, Announcement, Message, AbsenceExcuse, Teacher, Class } from '../types';
+import { Parent, Student, Attendance, Grade, Announcement, Message, AbsenceExcuse, Teacher, Class, SentGradeSheet } from '../types';
 import { PortalDesignerBadge } from './PortalDesignerBadge';
 import { GradeSheetSignatures } from './GradeSheetSignatures';
 import { printElementById, downloadElementAsImage, exportElementAsPdf } from '../lib/printUtils';
@@ -248,13 +248,30 @@ export default function ParentPortal({
     XLSX.writeFile(workbook, `أسماء_طلاب_فوج_${(activeChild?.name || '').replace(/\s+/g, '_')}.xlsx`);
   };
 
+  // Sent Grade Sheets Archive State (كشوف الدرجات المرسلة والمحفوظة)
+  const [sentGradeSheets, setSentGradeSheets] = useState<SentGradeSheet[]>(() => {
+    try {
+      const saved = localStorage.getItem('school_sent_grade_sheets');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
   React.useEffect(() => {
-    const handleStorageUpdate = () => {
+    const handleStorageUpdate = (e?: any) => {
       const savedIcon = localStorage.getItem('school_app_icon');
       if (savedIcon !== null) {
         setSchoolAppIcon(savedIcon);
       }
       setWelcomeMsgs(getStoredWelcomeMessages());
+
+      const savedSent = localStorage.getItem('school_sent_grade_sheets');
+      if (savedSent) {
+        try {
+          setSentGradeSheets(JSON.parse(savedSent));
+        } catch {}
+      }
     };
     window.addEventListener('school_storage_update', handleStorageUpdate);
     return () => window.removeEventListener('school_storage_update', handleStorageUpdate);
@@ -1304,9 +1321,11 @@ export default function ParentPortal({
   });
 
   const isTeacherGradeMessage = (m: Message) => {
-    if (m.senderRole !== 'teacher') return false;
-    const contentLower = m.content.toLowerCase();
+    if (m.senderRole !== 'teacher' && m.senderRole !== 'director') return false;
+    const contentLower = (m.content || '').toLowerCase();
     return (
+      m.category === 'grades' ||
+      m.category === 'grade_report' ||
       contentLower.includes('درج') ||
       contentLower.includes('رصد') ||
       contentLower.includes('كشف') ||
@@ -1957,7 +1976,7 @@ export default function ParentPortal({
                   </div>
                   <h5 className="font-bold text-slate-700 text-xs">لا توجد إشعارات درجات مرصودة حالياً</h5>
                   <p className="text-[11px] text-slate-400 max-w-sm mx-auto leading-relaxed">
-                    عندما يقوم المعلم برصد درجات جديدة أو إرسال كشف تقييم للطالب {activeChild?.name || 'الطالب'}، ستظهر هنا فورياً وموثقة.
+                    عندما تقوم الإدارة المدرسية أو المعلم برصد درجات جديدة أو إرسال كشف تقييم للطالب {activeChild?.name || 'الطالب'}، ستظهر هنا فورياً وموثقة.
                   </p>
                 </div>
               ) : (
@@ -1977,7 +1996,9 @@ export default function ParentPortal({
                       <div className="flex justify-between items-center text-[10px] font-bold text-slate-500 border-b border-slate-100 pb-2">
                         <div className="flex items-center gap-1.5">
                           <span className="w-2 h-2 rounded-full bg-indigo-600"></span>
-                          <span className="text-slate-800 font-extrabold text-[11px]">المعلم: {msg.senderName}</span>
+                          <span className="text-slate-800 font-extrabold text-[11px]">
+                            {msg.senderRole === 'director' ? 'إدارة المدرسة: ' : 'المعلم: '}{msg.senderName}
+                          </span>
                           {isIncomingUnread && (
                             <span className="bg-amber-500 text-white text-[8px] px-1.5 py-0.2 rounded font-extrabold animate-bounce mr-1">
                               إشعار جديد ✉️
@@ -2732,6 +2753,61 @@ export default function ParentPortal({
                       <p className="text-slate-500 text-xs mt-0.5">كشوف التقارير والتقييمات الشهريّة المعتمدة والموقعة إلكترونياً من إدارة المدرسة.</p>
                     </div>
                   </div>
+
+                  {/* Certified Saved Grade Sheets Archive for Child */}
+                  {(() => {
+                    const childSentSheets = sentGradeSheets.filter(sheet => 
+                      sheet.studentsSummary?.some(s => s.studentId === selectedChildId)
+                    );
+
+                    if (childSentSheets.length === 0) return null;
+
+                    return (
+                      <div className="bg-gradient-to-l from-indigo-50/90 to-amber-50/80 p-4 rounded-2xl border border-indigo-200/80 shadow-2xs space-y-3">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className="text-base">📜</span>
+                            <h4 className="font-extrabold text-xs text-indigo-950">كشوفات وتقارير الدرجات المعتمدة المستلمة من إدارة المدرسة ({childSentSheets.length})</h4>
+                          </div>
+                          <span className="text-[10px] bg-emerald-600 text-white font-bold px-2 py-0.5 rounded-full shadow-2xs">
+                            محفوظة وموثقة دائماً 🔒
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5">
+                          {childSentSheets.map(sheet => {
+                            const myStudentSummary = sheet.studentsSummary.find(s => s.studentId === selectedChildId);
+                            const isSelected = (parentSelectedMonth || currentEvaluationMonth) === sheet.month;
+                            return (
+                              <div
+                                key={sheet.id}
+                                onClick={() => setParentSelectedMonth(sheet.month)}
+                                className={`p-3 rounded-xl border text-xs transition cursor-pointer flex flex-col justify-between gap-2 ${
+                                  isSelected
+                                    ? 'bg-white border-indigo-500 ring-2 ring-indigo-200 shadow-xs'
+                                    : 'bg-white/90 border-slate-200 hover:border-indigo-300 shadow-3xs'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between">
+                                  <span className="font-extrabold text-slate-800 text-[11px]">{sheet.month}</span>
+                                  <span className="text-[10px] text-slate-400 font-mono">
+                                    {new Date(sheet.dateSent).toLocaleDateString('ar-EG', { month: 'short', day: 'numeric' })}
+                                  </span>
+                                </div>
+                                <div className="flex items-center justify-between text-[11px]">
+                                  <span className="text-slate-500">المعدل: <strong className="text-indigo-600 font-mono">{myStudentSummary?.average || '---'}</strong></span>
+                                  <span className="font-bold text-emerald-700">{myStudentSummary?.estimation || 'معتمد'}</span>
+                                </div>
+                                <div className="pt-1 border-t border-slate-100 flex items-center justify-between text-[10px] text-indigo-600 font-bold">
+                                  <span>{isSelected ? 'الكشف المعروض حالياً 👁️' : 'اضغط لعرض الكشف 📄'}</span>
+                                  <span>بواسطة: {sheet.sentBy}</span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })()}
 
                   {blockedGrades[selectedChildId]?.blocked ? (
                     <div className="bg-rose-50 border border-rose-100 p-8 rounded-3xl shadow-xs text-center space-y-4 max-w-2xl mx-auto">

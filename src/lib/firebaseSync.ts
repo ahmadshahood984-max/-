@@ -30,7 +30,10 @@ const SYNC_KEYS = [
   'school_fcm_config',
   'school_app_icon',
   'school_welcome_messages',
-  'school_seal_and_signatures_config'
+  'school_seal_and_signatures_config',
+  'school_sent_grade_sheets',
+  'school_saved_evaluation_months',
+  'school_whatsapp_monthly_template'
 ];
 
 let isRemoteSyncing = false;
@@ -42,6 +45,34 @@ export const STORAGE_UPDATE_EVENT = 'school_storage_update';
 // Keep reference to original methods
 const originalSetItem = localStorage.setItem.bind(localStorage);
 const originalRemoveItem = localStorage.removeItem.bind(localStorage);
+
+/**
+ * Directly writes and persists data to both Firestore and localStorage immediately
+ * Guarantees data remains saved even after closing the application.
+ */
+export async function persistDirectToFirestore(key: string, data: any): Promise<boolean> {
+  try {
+    const valueString = typeof data === 'object' ? JSON.stringify(data) : String(data);
+    originalSetItem(key, valueString);
+    
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent(STORAGE_UPDATE_EVENT, {
+        detail: { key, value: valueString }
+      }));
+    }
+
+    if (db) {
+      const docRef = doc(db, 'school_live_data', key);
+      await setDoc(docRef, { data, updatedAt: Date.now() }, { merge: true });
+      trackFirestoreWrite(1);
+      initialLoadCompletedKeys.add(key);
+    }
+    return true;
+  } catch (err) {
+    console.error(`Error directly persisting key ${key} to Firestore:`, err);
+    return false;
+  }
+}
 
 export async function forceRefreshDataFromFirestore(): Promise<boolean> {
   if (!db) return false;

@@ -118,6 +118,8 @@ export interface Message {
   read: boolean;
   studentId?: string; // If message is related to a specific student
   shift?: 'morning' | 'evening';
+  category?: string;
+  gradeReportData?: any;
 }
 
 export interface AbsenceExcuse {
@@ -131,4 +133,32 @@ export interface AbsenceExcuse {
   status: 'pending' | 'approved' | 'rejected';
   notes?: string;
   shift?: 'morning' | 'evening';
+}
+
+export interface SentGradeSheetStudentSummary {
+  studentId: string;
+  studentName: string;
+  unifiedNo?: string;
+  rollNo?: string;
+  parentId: string;
+  parentName: string;
+  parentPhone?: string;
+  average: string;
+  estimation: string;
+  scores: { subject: string; score: number | null; maxScore: number }[];
+  teacherNotes?: string;
+  directorNotes?: string;
+}
+
+export interface SentGradeSheet {
+  id: string;
+  title: string;
+  month: string;
+  classId: string;
+  className: string;
+  cohort?: string;
+  dateSent: string;
+  sentBy: string;
+  studentCount: number;
+  studentsSummary: SentGradeSheetStudentSummary[];
 }

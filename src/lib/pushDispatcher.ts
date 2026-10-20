@@ -20,6 +20,7 @@ export interface PushNotificationPayload {
   studentName?: string;
   category?: 'grades' | 'notes' | 'attendance' | 'announcement' | 'direct' | 'general' | 'behavior' | 'finance';
   url?: string;
+  tag?: string;
   skipFirestoreRecord?: boolean;
   targetReceiverId?: string;
 }

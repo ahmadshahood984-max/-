@@ -70,7 +70,7 @@ import { buildWhatsAppUrl, openWhatsAppDirectly, getWhatsAppSentRecords, recordW
 import { generateEvaluationCardImage, shareOrDownloadEvaluationImage } from '../lib/generateCardImage';
 import { WhatsAppMessageCustomizerModal } from './WhatsAppMessageCustomizerModal';
 import { PortalDesignerBadge } from './PortalDesignerBadge';
-import { Teacher, Student, Parent, Class, AbsenceExcuse, Announcement, Grade, Attendance, Message } from '../types';
+import { Teacher, Student, Parent, Class, AbsenceExcuse, Announcement, Grade, Attendance, Message, SentGradeSheet } from '../types';
 import { sanitizeAndDeduplicateStudents, getSafeStudentKey } from '../lib/studentDeduplicator';
 import { GradeSheetSignatures } from './GradeSheetSignatures';
 import { SealAndSignaturesModal } from './SealAndSignaturesModal';
@@ -79,7 +79,7 @@ import * as XLSX from 'xlsx';
 import { db } from '../lib/firebase';
 import { collection, addDoc, setDoc, deleteDoc, doc, serverTimestamp, writeBatch, getDocs } from 'firebase/firestore';
 import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead } from '../lib/firestoreTracker';
-import { forceRefreshDataFromFirestore } from '../lib/firebaseSync';
+import { forceRefreshDataFromFirestore, persistDirectToFirestore } from '../lib/firebaseSync';
 import { getStoredWelcomeMessages, saveWelcomeMessages, DEFAULT_WELCOME_MESSAGES, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { Bell, Activity, Info, Smartphone } from 'lucide-react';
 import { sendParentPushNotification, sendBroadcastPushNotification, getRegisteredPushDevicesCount } from '../lib/pushDispatcher';
@@ -1068,6 +1068,30 @@ export default function DirectorPortal({
 
   // Seal & Signatures Customizer Modal State
   const [isSealModalOpen, setIsSealModalOpen] = useState(false);
+
+  // Sent Grade Sheets Archive State (كشوف الدرجات المرسلة والمحفوظة)
+  const [sentGradeSheets, setSentGradeSheets] = useState<SentGradeSheet[]>(() => {
+    try {
+      const saved = localStorage.getItem('school_sent_grade_sheets');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [isSentSheetsModalOpen, setIsSentSheetsModalOpen] = useState(false);
+  const [selectedSentSheetToView, setSelectedSentSheetToView] = useState<SentGradeSheet | null>(null);
+
+  useEffect(() => {
+    const handleStorage = (e: any) => {
+      if (e?.detail?.key === 'school_sent_grade_sheets') {
+        try {
+          setSentGradeSheets(JSON.parse(e.detail.value));
+        } catch {}
+      }
+    };
+    window.addEventListener('school_storage_update', handleStorage);
+    return () => window.removeEventListener('school_storage_update', handleStorage);
+  }, []);
 
   const handleSendMonthlyWhatsApp = (
     student: Student,
@@ -4366,29 +4390,214 @@ ${directivesFormatted}
     setIsAddingNewMonth(false);
   };
 
-  const handleSaveAndSendGradesToParents = (cohortMode: boolean = false) => {
-    // Save grades explicitly to local storage
-    localStorage.setItem('school_grades', JSON.stringify(grades));
+  const handleSaveAndSendGradesToParents = async (cohortMode: boolean = false) => {
+    // 1. Target students
+    let targetStudents: Student[] = [];
+    let scopeTitle = '';
+    let targetClassId = '';
 
     if (cohortMode) {
-      alert(`🚀 تم بنجاح حفظ وتوثيق كشف الدرجات لكامل الفوج الدراسي لشهر (${currentEvaluationMonth})!\n\nيمكن لكافة أولياء أمور الفوج الآن الاطلاع على كشف الدرجات والشهادة الأكاديمية الرسمية مباشرة من حساباتهم دون إرسال إشعارات تشويشية. ✅`);
+      const cohortClasses = classes.filter(matchesCohort);
+      targetStudents = students.filter(s => cohortClasses.some(c => c.id === s.classId));
+      if (targetStudents.length === 0) {
+        targetStudents = students.filter(matchesCohort);
+      }
+      scopeTitle = `كامل الفوج (${activeCohort === 'evening' ? 'المسائي' : 'الصباحي'})`;
+      targetClassId = 'cohort';
+    } else {
+      if (!selectedClassForGrades) {
+        alert('الرجاء اختيار الصف الدراسي أولاً، أو استخدام حفظ وإرسال لكامل الفوج.');
+        return;
+      }
+      const cls = classes.find(c => c.id === selectedClassForGrades);
+      if (!cls) return;
+      targetStudents = students.filter(s => s.classId === selectedClassForGrades);
+      scopeTitle = cls.name;
+      targetClassId = cls.id;
+    }
+
+    if (targetStudents.length === 0) {
+      alert('لا يوجد طلاب مسجلون في هذا النطاق لحفظ نتائجهم وإرسالها.');
       return;
     }
 
-    if (!selectedClassForGrades) {
-      alert('الرجاء اختيار الصف الدراسي أولاً، أو استخدام حفظ وإرسال لكامل الفوج.');
-      return;
-    }
-    const cls = classes.find(c => c.id === selectedClassForGrades);
-    if (!cls) return;
+    const uniqueSubjects = customSubjects && customSubjects.length > 0 
+      ? customSubjects 
+      : ['الرياضيات', 'العلوم', 'اللغة العربية', 'التربية الإسلامية', 'اللغة الإنجليزية', 'الاجتماعيات'];
 
-    const classStudents = students.filter(s => s.classId === selectedClassForGrades);
-    if (classStudents.length === 0) {
-      alert('لا يوجد طلاب في هذا الصف لحفظ نتائجهم.');
-      return;
+    const newMessagesList: Message[] = [];
+    const studentsSummary: any[] = [];
+    const nowIso = new Date().toISOString();
+
+    for (const student of targetStudents) {
+      const studentClass = classes.find(c => c.id === student.classId)?.name || scopeTitle;
+      const studentGrades = grades.filter(g => g.studentId === student.id && (g.examName === currentEvaluationMonth || !g.examName));
+
+      let studentTotalScore = 0;
+      let studentScoredCount = 0;
+      const studentScoresList = uniqueSubjects.map(sub => {
+        const g = studentGrades.find(x => x.subject && x.subject.trim() === sub.trim());
+        const hasScore = g !== undefined && g.score !== undefined && g.score !== null;
+        if (hasScore) {
+          studentTotalScore += Number(g.score);
+          studentScoredCount++;
+        }
+        return {
+          subject: sub,
+          score: hasScore ? Number(g.score) : null,
+          maxScore: Number(g?.maxScore || numericMaxGrade || 100)
+        };
+      });
+
+      const avg = studentScoredCount > 0 ? (studentTotalScore / studentScoredCount).toFixed(1) : '---';
+      const avgFormatted = avg !== '---' ? `${avg}%` : '---';
+      let estimation = '---';
+      if (studentScoredCount > 0) {
+        const avgNum = Number(avg);
+        if (avgNum >= 90) estimation = 'ممتاز 🌟';
+        else if (avgNum >= 80) estimation = 'جيد جداً ✨';
+        else if (avgNum >= 70) estimation = 'جيد 👍';
+        else if (avgNum >= 60) estimation = 'مقبول 🟢';
+        else estimation = 'يحتاج متابعة ⚠️';
+      }
+
+      // Attendance stats for student
+      const studentAtt = attendance.filter(a => a.studentId === student.id);
+      const presentDays = studentAtt.filter(a => a.status === 'present').length;
+      const absentDays = studentAtt.filter(a => a.status === 'absent').length;
+      const lateDays = studentAtt.filter(a => a.status === 'late').length;
+      const totalDays = studentAtt.length;
+
+      // Evaluation directives
+      const evalForStudentMonth = monthlyEvaluations[`${student.id}_${currentEvaluationMonth}`] || 
+        monthlyEvaluations[`${student.unifiedNo}_${currentEvaluationMonth}`] ||
+        (monthlyEvaluations[student.id]?.month === currentEvaluationMonth ? monthlyEvaluations[student.id] : null) ||
+        monthlyEvaluations[student.id];
+
+      const teacherDirectiveText = evalForStudentMonth?.teacherText || evalForStudentMonth?.text || '';
+      const directorDirectiveText = evalForStudentMonth?.directorText || '';
+
+      let directivesFormatted = '';
+      if (teacherDirectiveText && directorDirectiveText) {
+        directivesFormatted = `👨‍🏫 توجيهات المعلم: ❪ ${teacherDirectiveText} ❫\n🏫 توجيهات الإدارة: ❪ ${directorDirectiveText} ❫`;
+      } else if (teacherDirectiveText) {
+        directivesFormatted = `👨‍🏫 توجيهات المعلم: ❪ ${teacherDirectiveText} ❫`;
+      } else if (directorDirectiveText) {
+        directivesFormatted = `🏫 توجيهات الإدارة: ❪ ${directorDirectiveText} ❫`;
+      } else {
+        directivesFormatted = '🌟 طالب متميز ومواظب ونتمنى له دوام التوفيق والنجاح.';
+      }
+
+      const subjectsDetails = studentScoresList.map(s => {
+        const scoreVal = s.score !== null ? `${s.score} / ${s.maxScore}` : 'قيد الرصد ⏳';
+        return `• 📘 ${s.subject}: ❪ ${scoreVal} ❫`;
+      }).join('\n');
+
+      const formattedMessage = `💚 المدرسة الدولية الخاصة 💚
+📜 كشف رصد وتقرير درجات معتمد وموثق
+─────────────────────────
+🌹 السلام عليكم ورحمة الله وبركاته
+إلى ولي أمر الطالب/ة المحترم:
+
+👤 الطالب: ${student.name} | 🏫 الصف: ${studentClass} | 📅 الشهر: [${currentEvaluationMonth}]
+
+📚 كشف نتائج ودرجات المواد الدراسية:
+${subjectsDetails}
+
+📊 المعدل العام: ❪ ${avgFormatted} ❫ | 🌟 التقدير العام: ${estimation}
+
+📌 سجل المواظبة والحضور:
+• 🟢 حضور: ❪ ${presentDays} يوم ❫ | 🔴 غياب: ❪ ${absentDays} يوم ❫ | 📊 إجمالي: ❪ ${totalDays} يوم ❫
+
+📝 توجيهات وتقارير المتابعة:
+${directivesFormatted}
+─────────────────────────
+🏛️ كشف معتمد وموثق إلكترونياً من الإدارة العامة للمدرسة`;
+
+      const studentParent = parents.find(p => p.childrenIds.includes(student.id) || p.id === student.parentId);
+      const receiverParentId = studentParent?.id || student.parentId || 'parent';
+      const receiverParentName = studentParent?.name || student.parentName || 'ولي الأمر';
+
+      const msgId = 'm_grades_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
+      const gradeMsg: Message = {
+        id: msgId,
+        senderId: 'director',
+        senderName: 'المدير العام (إدارة المدرسة)',
+        senderRole: 'director',
+        receiverId: receiverParentId,
+        receiverName: receiverParentName,
+        receiverRole: 'parent',
+        content: formattedMessage,
+        date: nowIso,
+        read: false,
+        studentId: student.id,
+        category: 'grade_report',
+        shift: student.shift
+      };
+
+      newMessagesList.push(gradeMsg);
+
+      // Send clean Push Notification to parent
+      if (studentParent?.id) {
+        sendParentPushNotification(studentParent.id, {
+          title: `📊 كشف درجات معتمد: ${student.name} - ${currentEvaluationMonth}`,
+          body: `أرسلت إدارة المدرسة كشف الدرجات المعتمد لشهر (${currentEvaluationMonth}) بمعدل (${avgFormatted}) وتقدير (${estimation}). اضغط للمعاينة.`,
+          tag: `grades_${student.id}_${currentEvaluationMonth}`,
+          url: '/?portal=parent&tab=grades',
+          msgId: msgId,
+          studentId: student.id,
+          studentName: student.name,
+          category: 'grades'
+        });
+      }
+
+      studentsSummary.push({
+        studentId: student.id,
+        studentName: student.name,
+        unifiedNo: student.unifiedNo || student.rollNo,
+        rollNo: student.rollNo,
+        parentId: receiverParentId,
+        parentName: receiverParentName,
+        parentPhone: studentParent?.phone || student.parentPhone || '',
+        average: avgFormatted,
+        estimation: estimation,
+        scores: studentScoresList,
+        teacherNotes: teacherDirectiveText,
+        directorNotes: directorDirectiveText
+      });
     }
 
-    alert(`🚀 تم حفظ وتوثيق كشف الدرجات لطلاب [${cls.name}] لشهر (${currentEvaluationMonth}) بنجاح! يمكن لأولياء الأمور الاطلاع على كشف الدرجات والشهادة الأكاديمية فورياً. ✅`);
+    // 2. Build SentGradeSheet record
+    const sheetRecord: SentGradeSheet = {
+      id: 'gs_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
+      title: `كشف درجات ${scopeTitle} - شهر ${currentEvaluationMonth}`,
+      month: currentEvaluationMonth,
+      classId: targetClassId,
+      className: scopeTitle,
+      cohort: activeCohort,
+      dateSent: nowIso,
+      sentBy: 'المدير العام (إدارة المدرسة)',
+      studentCount: targetStudents.length,
+      studentsSummary
+    };
+
+    // 3. Update States
+    const updatedMessages = [...newMessagesList, ...messages];
+    setMessages(updatedMessages);
+
+    const updatedSentSheets = [sheetRecord, ...sentGradeSheets];
+    setSentGradeSheets(updatedSentSheets);
+
+    // 4. Persist immediately to localStorage & Firestore so it remains saved even after closing the app
+    await Promise.all([
+      persistDirectToFirestore('school_grades', grades),
+      persistDirectToFirestore('school_messages', updatedMessages),
+      persistDirectToFirestore('school_sent_grade_sheets', updatedSentSheets),
+      persistDirectToFirestore('school_monthly_evaluations', monthlyEvaluations),
+      persistDirectToFirestore('school_evaluation_current_month', currentEvaluationMonth)
+    ]);
+
+    alert(`🎉 تم بنجاح حفظ واعتماد وإرسال كشف الدرجات لشهر (${currentEvaluationMonth}) إلى أولياء الأمور!\n\n📊 إجمالي الطلاب المستلمين: ${targetStudents.length} طالب وطالبة\n🏫 النطاق: ${scopeTitle}\n\n✅ تم توثيق الكشف وحفظه بشكل دائم في سجل الإدارة وبوابات أولياء الأمور، وسيبقى محفوظاً ومتاحاً دائماً حتى بعد إغلاق التطبيق.`);
   };
 
   const handleExportGradesExcel = (cohortMode: boolean = false) => {
@@ -9733,6 +9942,16 @@ if __name__ == "__main__":
                     >
                       <Send className="w-3.5 h-3.5 text-purple-200" />
                       <span>🚀 حفظ وإرسال لكامل الفوج</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setIsSentSheetsModalOpen(true)}
+                      className="text-xs font-bold py-2 px-3.5 rounded-xl border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900 transition cursor-pointer flex items-center justify-center gap-1.5 shadow-xs"
+                      title="سجل وأرشيف كشوف الدرجات المرسلة والمحفوظة"
+                    >
+                      <ClipboardList className="w-3.5 h-3.5 text-amber-700" />
+                      <span>📁 سجل الكشوفات المحفوظة ({sentGradeSheets.length})</span>
                     </button>
 
                     <button
@@ -15787,6 +16006,250 @@ ${sampleEval}
 
                   <div className="text-xs text-slate-500 font-bold">
                     💡 يمكنك الضغط على "إرسال واتساب" لكل ولي أمر لفتح محادثته مباشرة مع نص التعميم.
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* Sent Grade Sheets Archive Modal (سجل وأرشيف كشوف الدرجات المرسلة والمحفوظة) */}
+        <AnimatePresence>
+          {isSentSheetsModalOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 bg-slate-900/60 backdrop-blur-xs overflow-y-auto">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="bg-white rounded-3xl shadow-2xl border border-slate-200 w-full max-w-5xl max-h-[92vh] flex flex-col overflow-hidden text-right"
+                style={{ direction: 'rtl' }}
+              >
+                {/* Header */}
+                <div className="bg-gradient-to-l from-indigo-700 via-indigo-800 to-slate-900 text-white p-5 flex items-center justify-between shrink-0">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-2xl bg-white/10 flex items-center justify-center text-lg shadow-inner">
+                      📁
+                    </div>
+                    <div>
+                      <h3 className="font-extrabold text-base sm:text-lg">سجل وأرشيف كشوف الدرجات المرسلة والمحفوظة</h3>
+                      <p className="text-xs text-indigo-200 mt-0.5">
+                        كافة الكشوفات التي تم حفظها واعتمادها وإرسالها لأولياء الأمور تبقى محفوظة دائماً حتى بعد إغلاق التطبيق
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsSentSheetsModalOpen(false);
+                      setSelectedSentSheetToView(null);
+                    }}
+                    className="w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center text-white transition cursor-pointer text-sm font-bold"
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                {/* Body Content */}
+                <div className="p-5 overflow-y-auto flex-1 space-y-4">
+                  {selectedSentSheetToView ? (
+                    // Detail Preview of Selected Sent Sheet
+                    <div className="space-y-4">
+                      <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-200">
+                        <div>
+                          <button
+                            type="button"
+                            onClick={() => setSelectedSentSheetToView(null)}
+                            className="text-xs font-bold text-indigo-600 hover:text-indigo-800 flex items-center gap-1.5 transition cursor-pointer mb-2"
+                          >
+                            <span>← العودة لقائمة الكشوفات المرسلة</span>
+                          </button>
+                          <h4 className="font-extrabold text-slate-800 text-base">{selectedSentSheetToView.title}</h4>
+                          <p className="text-xs text-slate-500 mt-0.5">
+                            تاريخ الإرسال: {new Date(selectedSentSheetToView.dateSent).toLocaleString('ar-EG')} | عدد الطلاب: {selectedSentSheetToView.studentCount} طالب/ة | بواسطة: {selectedSentSheetToView.sentBy}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => printElementById('sent-sheet-detail-print', selectedSentSheetToView.title)}
+                            className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-xs"
+                          >
+                            <Printer className="w-3.5 h-3.5 text-emerald-400" />
+                            <span>طباعة الكشف 🖨️</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const exportData = selectedSentSheetToView.studentsSummary.map((s, idx) => {
+                                const row: any = {
+                                  'م': idx + 1,
+                                  'الرقم الموحد': s.unifiedNo || s.rollNo || '',
+                                  'اسم الطالب': s.studentName,
+                                  'ولي الأمر': s.parentName,
+                                  'رقم الهاتف': s.parentPhone || '',
+                                  'المعدل العام': s.average,
+                                  'التقدير': s.estimation,
+                                };
+                                s.scores.forEach(sc => {
+                                  row[sc.subject] = sc.score !== null ? sc.score : 'لم يرصد';
+                                });
+                                row['توجيهات المعلم'] = s.teacherNotes || '';
+                                row['توجيهات الإدارة'] = s.directorNotes || '';
+                                return row;
+                              });
+                              const ws = XLSX.utils.json_to_sheet(exportData);
+                              const wb = XLSX.utils.book_new();
+                              XLSX.utils.book_append_sheet(wb, ws, 'كشف الدرجات المرسل');
+                              XLSX.writeFile(wb, `${selectedSentSheetToView.title.replace(/\s+/g, '_')}.xlsx`);
+                            }}
+                            className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-xs"
+                          >
+                            <FileSpreadsheet className="w-3.5 h-3.5" />
+                            <span>تصدير Excel 📥</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Printable Container */}
+                      <div id="sent-sheet-detail-print" className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs space-y-4">
+                        <div className="text-center pb-4 border-b border-slate-150 space-y-1">
+                          <h3 className="font-black text-slate-800 text-lg">المدرسة الدولية الخاصة</h3>
+                          <h4 className="font-bold text-indigo-700 text-sm">{selectedSentSheetToView.title}</h4>
+                          <p className="text-xs text-slate-400">
+                            تاريخ الاعتماد والإرسال: {new Date(selectedSentSheetToView.dateSent).toLocaleDateString('ar-EG', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+                          </p>
+                        </div>
+
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-right border-collapse text-xs">
+                            <thead>
+                              <tr className="bg-slate-100 text-slate-700 border-b border-slate-200 font-bold">
+                                <th className="p-2.5 text-center">#</th>
+                                <th className="p-2.5">الرقم الموحد</th>
+                                <th className="p-2.5">اسم الطالب</th>
+                                <th className="p-2.5">ولي الأمر</th>
+                                <th className="p-2.5 text-center">المعدل</th>
+                                <th className="p-2.5 text-center">التقدير</th>
+                                <th className="p-2.5">الدرجات المرصودة</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                              {selectedSentSheetToView.studentsSummary.map((st, idx) => (
+                                <tr key={st.studentId || idx} className="hover:bg-slate-50/80">
+                                  <td className="p-2.5 text-center font-bold text-slate-400">{idx + 1}</td>
+                                  <td className="p-2.5 font-mono text-slate-600 font-bold">{st.unifiedNo || st.rollNo || '---'}</td>
+                                  <td className="p-2.5 font-bold text-slate-800">{st.studentName}</td>
+                                  <td className="p-2.5 text-slate-600">{st.parentName}</td>
+                                  <td className="p-2.5 text-center font-bold font-mono text-indigo-700 bg-indigo-50/30">{st.average}</td>
+                                  <td className="p-2.5 text-center font-semibold text-emerald-700">{st.estimation}</td>
+                                  <td className="p-2.5 text-slate-600">
+                                    <div className="flex flex-wrap gap-1 text-[11px]">
+                                      {st.scores.map(sc => (
+                                        <span key={sc.subject} className="bg-slate-100 px-2 py-0.5 rounded border border-slate-200">
+                                          {sc.subject}: <strong>{sc.score !== null ? sc.score : '---'}</strong>
+                                        </span>
+                                      ))}
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+
+                        <div className="pt-4 border-t border-slate-150">
+                          <GradeSheetSignatures
+                            subtitle={selectedSentSheetToView.title}
+                            onOpenEditModal={() => setIsSealModalOpen(true)}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    // List of All Sent Grade Sheets
+                    <div className="space-y-3">
+                      {sentGradeSheets.length === 0 ? (
+                        <div className="text-center py-16 px-4 bg-slate-50/80 rounded-3xl border border-dashed border-slate-200 space-y-3">
+                          <div className="w-14 h-14 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center mx-auto text-2xl shadow-xs">
+                            📊
+                          </div>
+                          <h4 className="font-bold text-slate-700 text-sm">لا توجد كشوفات درجات محفوظة بعد</h4>
+                          <p className="text-xs text-slate-400 max-w-md mx-auto leading-relaxed">
+                            عند الضغط على "إرسال درجات الصف" أو "حفظ وإرسال لكامل الفوج"، سيتم إرسال الكشف لأولياء الأمور كرسائل وتقارير رسمية وتوثيق نسخة دائمة هنا في سجل الإدارة لتبقى محفوظة دائماً.
+                          </p>
+                        </div>
+                      ) : (
+                        sentGradeSheets.map((sheet, index) => (
+                          <div
+                            key={sheet.id || index}
+                            className="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-2xs hover:border-indigo-300 transition-all flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4"
+                          >
+                            <div className="flex items-start gap-3.5">
+                              <div className="w-11 h-11 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 font-bold shrink-0 text-lg shadow-2xs">
+                                📜
+                              </div>
+                              <div className="space-y-1">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <h4 className="font-extrabold text-slate-800 text-sm">{sheet.title}</h4>
+                                  <span className="bg-emerald-50 text-emerald-700 text-[11px] font-bold px-2 py-0.5 rounded-full border border-emerald-200">
+                                    معتمد وموثق ✅
+                                  </span>
+                                </div>
+                                <div className="text-xs text-slate-400 flex flex-wrap items-center gap-x-3 gap-y-1">
+                                  <span>📅 شهر: <strong className="text-slate-600">{sheet.month}</strong></span>
+                                  <span>🏫 النطاق: <strong className="text-slate-600">{sheet.className}</strong></span>
+                                  <span>👥 عدد الطلاب: <strong className="text-slate-600">{sheet.studentCount} طالب/ة</strong></span>
+                                  <span>🕒 تاريخ الإرسال: <strong className="text-slate-600 font-mono">{new Date(sheet.dateSent).toLocaleDateString('ar-EG', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</strong></span>
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                              <button
+                                type="button"
+                                onClick={() => setSelectedSentSheetToView(sheet)}
+                                className="px-3 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl text-xs font-bold flex items-center gap-1 transition cursor-pointer border border-indigo-200 shadow-2xs"
+                                title="معاينة وتدقيق الكشف بالكامل"
+                              >
+                                <Eye className="w-3.5 h-3.5" />
+                                <span>معاينة وتدقيق 👁️</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  if (window.confirm(`هل أنت متأكد من حذف (${sheet.title}) من سجل الكشوفات؟`)) {
+                                    const next = sentGradeSheets.filter(s => s.id !== sheet.id);
+                                    setSentGradeSheets(next);
+                                    await persistDirectToFirestore('school_sent_grade_sheets', next);
+                                  }
+                                }}
+                                className="w-8 h-8 rounded-xl bg-slate-100 hover:bg-rose-50 text-slate-400 hover:text-rose-600 flex items-center justify-center transition cursor-pointer border border-slate-200"
+                                title="حذف من السجل"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* Footer */}
+                <div className="bg-slate-50 p-4 border-t border-slate-200 flex items-center justify-between gap-3 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsSentSheetsModalOpen(false);
+                      setSelectedSentSheetToView(null);
+                    }}
+                    className="bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 text-xs font-bold px-5 py-2.5 rounded-xl transition cursor-pointer shadow-2xs"
+                  >
+                    إغلاق النافذة ✕
+                  </button>
+                  <div className="text-xs text-slate-500 font-bold">
+                    🔒 جميع كشوفات الدرجات المحفوظة مشفرة ومؤمنة ويتم مزامنتها تلقائياً مع السحابة.
                   </div>
                 </div>
               </motion.div>
