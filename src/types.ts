@@ -162,3 +162,36 @@ export interface SentGradeSheet {
   studentCount: number;
   studentsSummary: SentGradeSheetStudentSummary[];
 }
+
+export interface ExamHeaderConfig {
+  ministryText?: string;
+  schoolName?: string;
+  examTitle: string;
+  academicYear?: string;
+  subject: string;
+  className: string;
+  examDate?: string;
+  duration?: string;
+  totalMarks?: string;
+  teacherName: string;
+  instructions?: string;
+  customFields?: { label: string; value: string }[];
+}
+
+export interface ExamQuestionPaper {
+  id: string;
+  title: string;
+  teacherId: string;
+  teacherName: string;
+  subject: string;
+  classId: string;
+  className: string;
+  dateCreated: string;
+  dateUpdated?: string;
+  headerConfig: ExamHeaderConfig;
+  contentHtml: string;
+  status: 'draft' | 'submitted' | 'approved' | 'revision_requested';
+  directorNotes?: string;
+  shift?: 'morning' | 'evening';
+}
+

@@ -33,7 +33,8 @@ const SYNC_KEYS = [
   'school_seal_and_signatures_config',
   'school_sent_grade_sheets',
   'school_saved_evaluation_months',
-  'school_whatsapp_monthly_template'
+  'school_whatsapp_monthly_template',
+  'school_exam_questions'
 ];
 
 let isRemoteSyncing = false;

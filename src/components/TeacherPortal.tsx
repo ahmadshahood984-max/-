@@ -35,13 +35,15 @@ import {
   Megaphone,
   Phone,
   ArrowLeft,
-  CheckCircle2
+  CheckCircle2,
+  FileText
 } from 'lucide-react';
 import { buildWhatsAppUrl, openWhatsAppDirectly, getWhatsAppSentRecords, recordWhatsAppSent, WhatsAppSentRecord } from '../lib/whatsapp';
 import { sendParentPushNotification } from '../lib/pushDispatcher';
 import { WhatsAppMessageCustomizerModal } from './WhatsAppMessageCustomizerModal';
 import { PortalDesignerBadge } from './PortalDesignerBadge';
-import { Teacher, Student, Class, Attendance, Grade, Parent, Message, Announcement } from '../types';
+import { Teacher, Student, Class, Attendance, Grade, Parent, Message, Announcement, ExamQuestionPaper } from '../types';
+import { ExamQuestionsManager } from './ExamQuestionsManager';
 import { sanitizeAndDeduplicateStudents, getSafeStudentKey } from '../lib/studentDeduplicator';
 import { getStoredWelcomeMessages, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { motion, AnimatePresence } from 'motion/react';
@@ -61,6 +63,9 @@ interface TeacherPortalProps {
   setMessages?: React.Dispatch<React.SetStateAction<Message[]>>;
   setGrades?: React.Dispatch<React.SetStateAction<Grade[]>>;
   addAnnouncement?: (announceData: Omit<Announcement, 'id' | 'date'> & { authorName?: string; authorRole?: 'director' | 'teacher' }) => void;
+  examQuestions?: ExamQuestionPaper[];
+  saveExamQuestionPaper?: (paper: ExamQuestionPaper) => void;
+  deleteExamQuestionPaper?: (id: string) => void;
 }
 
 export default function TeacherPortal({
@@ -77,7 +82,10 @@ export default function TeacherPortal({
   sendMessage,
   setMessages,
   setGrades,
-  addAnnouncement
+  addAnnouncement,
+  examQuestions = [],
+  saveExamQuestionPaper,
+  deleteExamQuestionPaper
 }: TeacherPortalProps) {
   // Simulator: active logged in teacher
   const [selectedTeacherId, setSelectedTeacherId] = useState<string>(teachers[0]?.id || 't1');
@@ -231,7 +239,7 @@ export default function TeacherPortal({
   }, [teachers]);
 
   // Tabs
-  const [activeTab, setActiveTab] = useState<'grades' | 'students' | 'messages' | 'announcements'>('grades');
+  const [activeTab, setActiveTab] = useState<'grades' | 'students' | 'messages' | 'announcements' | 'questions'>('grades');
   const [gradingMode, setGradingMode] = useState<'single' | 'all'>('single');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
@@ -1046,6 +1054,26 @@ export default function TeacherPortal({
               >
                 <Megaphone className="w-4 h-4 shrink-0" />
                 <span>نشر تعميم وإعلان</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  setActiveTab('questions');
+                  setIsMobileMenuOpen(false);
+                }}
+                className={`w-full flex items-center gap-2 px-3 py-2 rounded-xl text-right text-[11px] font-bold transition-all duration-200 cursor-pointer ${
+                  activeTab === 'questions' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-900 hover:bg-white hover:text-indigo-900'
+                }`}
+              >
+                <FileText className="w-4 h-4 shrink-0 text-amber-600" />
+                <span>الأسئلة (كتابة المذاكرة)</span>
+                {examQuestions.filter(q => q.teacherId === selectedTeacherId || q.teacherName === activeTeacher?.name).length > 0 && (
+                  <span className={`mr-auto px-1.5 py-0.5 rounded-full text-[8px] font-bold ${
+                    activeTab === 'questions' ? 'bg-indigo-500/40 text-white' : 'bg-amber-100 text-amber-800 border border-amber-200'
+                  }`}>
+                    {examQuestions.filter(q => q.teacherId === selectedTeacherId || q.teacherName === activeTeacher?.name).length} نماذج
+                  </span>
+                )}
               </button>
             </nav>
           </div>
@@ -2214,6 +2242,30 @@ export default function TeacherPortal({
                   </div>
                 </div>
               </div>
+            </motion.div>
+          )}
+
+          {/* Questions & Exam Papers Tab */}
+          {activeTab === 'questions' && (
+            <motion.div
+              key="questions"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              className="space-y-6"
+            >
+              <ExamQuestionsManager
+                currentUserRole="teacher"
+                currentTeacher={activeTeacher}
+                classes={classes}
+                examQuestions={examQuestions}
+                onSavePaper={(paper) => {
+                  if (saveExamQuestionPaper) saveExamQuestionPaper(paper);
+                }}
+                onDeletePaper={(id) => {
+                  if (deleteExamQuestionPaper) deleteExamQuestionPaper(id);
+                }}
+              />
             </motion.div>
           )}
         </AnimatePresence>

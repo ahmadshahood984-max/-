@@ -70,7 +70,8 @@ import { buildWhatsAppUrl, openWhatsAppDirectly, getWhatsAppSentRecords, recordW
 import { generateEvaluationCardImage, shareOrDownloadEvaluationImage } from '../lib/generateCardImage';
 import { WhatsAppMessageCustomizerModal } from './WhatsAppMessageCustomizerModal';
 import { PortalDesignerBadge } from './PortalDesignerBadge';
-import { Teacher, Student, Parent, Class, AbsenceExcuse, Announcement, Grade, Attendance, Message, SentGradeSheet } from '../types';
+import { Teacher, Student, Parent, Class, AbsenceExcuse, Announcement, Grade, Attendance, Message, SentGradeSheet, ExamQuestionPaper } from '../types';
+import { ExamQuestionsManager } from './ExamQuestionsManager';
 import { sanitizeAndDeduplicateStudents, getSafeStudentKey } from '../lib/studentDeduplicator';
 import { GradeSheetSignatures } from './GradeSheetSignatures';
 import { SealAndSignaturesModal } from './SealAndSignaturesModal';
@@ -152,6 +153,9 @@ interface DirectorPortalProps {
   directorPassword?: string;
   changeDirectorPassword?: (newPass: string) => void;
   updateTeacherPassword?: (teacherId: string, newPass: string) => void;
+  examQuestions?: ExamQuestionPaper[];
+  saveExamQuestionPaper?: (paper: ExamQuestionPaper) => void;
+  deleteExamQuestionPaper?: (id: string) => void;
 }
 
 export default function DirectorPortal({
@@ -179,9 +183,12 @@ export default function DirectorPortal({
   updateExcuseStatus,
   directorPassword,
   changeDirectorPassword,
-  updateTeacherPassword
+  updateTeacherPassword,
+  examQuestions = [],
+  saveExamQuestionPaper,
+  deleteExamQuestionPaper
 }: DirectorPortalProps) {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'teachers' | 'students' | 'excuses' | 'announcements' | 'grades' | 'settings' | 'sharing-links' | 'tuition' | 'messages' | 'subjects' | 'classes' | 'attendance' | 'student-registration'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'teachers' | 'students' | 'excuses' | 'announcements' | 'grades' | 'settings' | 'sharing-links' | 'tuition' | 'messages' | 'subjects' | 'classes' | 'attendance' | 'student-registration' | 'questions'>('dashboard');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [copiedState, setCopiedState] = useState<{ [key: string]: boolean }>({});
 
@@ -6146,6 +6153,27 @@ ${directivesFormatted}
             </button>
 
             <button
+              id="dir-nav-questions"
+              onClick={() => {
+                setActiveTab('questions');
+                setIsMobileMenuOpen(false);
+              }}
+              className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-xl text-right text-[11px] font-bold transition-all duration-200 cursor-pointer ${
+                activeTab === 'questions' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-300 hover:bg-slate-900 hover:text-white'
+              }`}
+            >
+              <FileText className="w-3.5 h-3.5 shrink-0 text-amber-400" />
+              <span>الأسئلة (ملف المذاكرات)</span>
+              {examQuestions.length > 0 && (
+                <span className={`mr-auto px-1.5 py-0.5 rounded-full text-[8px] font-bold ${
+                  activeTab === 'questions' ? 'bg-indigo-500/40 text-white' : 'bg-amber-500/20 text-amber-300 border border-amber-400/30'
+                }`}>
+                  {examQuestions.length}
+                </span>
+              )}
+            </button>
+
+            <button
               id="dir-nav-tuition"
               onClick={() => {
                 setActiveTab('tuition');
@@ -10918,7 +10946,28 @@ ${sampleEval}
             </motion.div>
           )}
 
-          {/* Sharing Links Tab */}
+          {/* Exam Questions & Question Bank Tab */}
+          {activeTab === 'questions' && (
+            <motion.div
+              key="questions-management"
+              initial={{ opacity: 0, y: 15 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -15 }}
+              className="space-y-6 text-right"
+            >
+              <ExamQuestionsManager
+                currentUserRole="director"
+                classes={classes.filter(matchesCohort)}
+                examQuestions={examQuestions}
+                onSavePaper={(paper) => {
+                  if (saveExamQuestionPaper) saveExamQuestionPaper(paper);
+                }}
+                onDeletePaper={(id) => {
+                  if (deleteExamQuestionPaper) deleteExamQuestionPaper(id);
+                }}
+              />
+            </motion.div>
+          )}
 
           {/* Tuition Management Tab */}
           {activeTab === 'tuition' && (
