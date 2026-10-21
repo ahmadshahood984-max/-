@@ -212,7 +212,7 @@ export default function ParentPortal({
       'الدرجة المحرزة': gv.score !== null ? gv.score : 'قيد الرصد',
       'الدرجة العظمى': displayMaxGrade,
       'درجة النجاح': displayPassGrade,
-      'التقدير والمستوى': gv.score !== null ? (gv.score >= 90 ? 'ممتاز' : gv.score >= 80 ? 'جيد جداً' : gv.score >= 70 ? 'جيد' : gv.score >= 60 ? 'مقبول' : 'يحتاج متابعة') : 'قيد الرصد'
+      'التقدير والمستوى': gv.score !== null ? (gv.score > 90 ? 'ممتاز' : gv.score > 80 ? 'جيد جداً' : gv.score > 60 ? 'جيد' : gv.score > 40 ? 'وسط' : 'ضعيف') : 'قيد الرصد'
     }));
 
     data.push({
@@ -2091,10 +2091,11 @@ export default function ParentPortal({
   // Grade badge helper
   const getGradeEvaluation = (score: number, max: number) => {
     const percentage = (score / max) * 100;
-    if (percentage >= 90) return { label: 'ممتاز', color: 'bg-emerald-50 text-emerald-700 border border-emerald-100' };
-    if (percentage >= 80) return { label: 'جيد جداً', color: 'bg-sky-50 text-sky-700 border border-sky-100' };
-    if (percentage >= 70) return { label: 'جيد', color: 'bg-amber-50 text-amber-700 border border-amber-100' };
-    return { label: 'مقبول', color: 'bg-rose-50 text-rose-700 border border-rose-100' };
+    if (percentage > 90) return { label: 'ممتاز', color: 'bg-emerald-50 text-emerald-700 border border-emerald-100' };
+    if (percentage > 80) return { label: 'جيد جداً', color: 'bg-teal-50 text-teal-700 border border-teal-100' };
+    if (percentage > 60) return { label: 'جيد', color: 'bg-blue-50 text-blue-700 border border-blue-100' };
+    if (percentage > 40) return { label: 'وسط', color: 'bg-amber-50 text-amber-700 border border-amber-100' };
+    return { label: 'ضعيف', color: 'bg-rose-50 text-rose-700 border border-rose-100' };
   };
 
   // Format notification type and custom text
@@ -2150,7 +2151,7 @@ export default function ParentPortal({
         badgeColor = 'bg-teal-50 text-teal-700 border-teal-100';
       } else if (estimationValue.includes('جيد')) {
         badgeColor = 'bg-blue-50 text-blue-700 border-blue-100';
-      } else if (estimationValue.includes('مقبول')) {
+      } else if (estimationValue.includes('وسط') || estimationValue.includes('مقبول')) {
         badgeColor = 'bg-amber-50 text-amber-700 border-amber-100';
       } else if (estimationValue.includes('ضعيف')) {
         badgeColor = 'bg-rose-50 text-rose-700 border-rose-100';
@@ -2197,22 +2198,22 @@ export default function ParentPortal({
                   let scoreBadge = 'bg-slate-200 text-slate-800';
                   let statusEmoji = '👍';
 
-                  if (gv.score >= 90) {
+                  if (gv.score > 90) {
                     chipStyle = 'bg-emerald-50/80 text-emerald-950 border-emerald-200';
                     scoreBadge = 'bg-emerald-600 text-white';
                     statusEmoji = '🌟 ممتاز';
-                  } else if (gv.score >= 80) {
+                  } else if (gv.score > 80) {
                     chipStyle = 'bg-teal-50/80 text-teal-950 border-teal-200';
                     scoreBadge = 'bg-teal-600 text-white';
                     statusEmoji = '🏅 جيد جداً';
-                  } else if (gv.score >= 70) {
+                  } else if (gv.score > 60) {
                     chipStyle = 'bg-blue-50/80 text-blue-950 border-blue-200';
                     scoreBadge = 'bg-blue-600 text-white';
                     statusEmoji = '👍 جيد';
-                  } else if (gv.score >= 50) {
+                  } else if (gv.score > 40) {
                     chipStyle = 'bg-amber-50/80 text-amber-950 border-amber-200';
                     scoreBadge = 'bg-amber-600 text-white';
-                    statusEmoji = '⚠️ مقبول';
+                    statusEmoji = '🟢 وسط';
                   } else {
                     chipStyle = 'bg-rose-50/80 text-rose-950 border-rose-200';
                     scoreBadge = 'bg-rose-600 text-white';
@@ -2452,15 +2453,45 @@ export default function ParentPortal({
               </div>
             </div>
 
-            {/* Hamburger Button for Mobile on the Right */}
-            <button
-              type="button"
-              onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-              className="md:hidden p-2 text-slate-300 hover:text-white hover:bg-slate-900 rounded-lg transition cursor-pointer"
-              aria-label="القائمة"
-            >
-              {isMobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
-            </button>
+            {/* Hamburger Button and Unread Notification Button for Mobile */}
+            <div className="flex items-center gap-2 md:hidden">
+              {unreadMessagesCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const unreadList = messages.filter(m => {
+                      const isForChild = !m.studentId || m.studentId === selectedChildId;
+                      const isClassCircular = m.receiverId?.startsWith('all_class_') && activeChild?.classId === m.receiverId.replace('all_class_', '');
+                      const isCohortCircular = m.receiverId === 'all_cohort_parents' || m.receiverId === 'all';
+                      const isDirectToMe = m.receiverId === selectedParentId || (m.receiverRole === 'parent' && !m.receiverId);
+                      const isTarget = isForChild && (isDirectToMe || isCohortCircular || isClassCircular);
+                      return isTarget && !m.read;
+                    }).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+                    if (unreadList.length > 0) {
+                      handleOpenMessage(unreadList[0]);
+                    }
+                    markAllAsRead();
+                  }}
+                  className="relative p-2 bg-amber-500 hover:bg-amber-600 text-white rounded-xl transition cursor-pointer shadow-sm animate-pulse flex items-center justify-center"
+                  title="رسالة وإشعار جديد - اضغط لفتح الرسالة فوراً وإخفاء العداد"
+                >
+                  <Bell className="w-4 h-4" />
+                  <span className="absolute -top-1 -right-1 bg-red-600 text-white text-[9px] font-black rounded-full w-4 h-4 flex items-center justify-center">
+                    {unreadMessagesCount}
+                  </span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+                className="p-2 text-slate-300 hover:text-white hover:bg-slate-900 rounded-lg transition cursor-pointer"
+                aria-label="القائمة"
+              >
+                {isMobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+              </button>
+            </div>
           </div>
 
           {/* Collapsible Content Area on Mobile */}
@@ -2565,15 +2596,51 @@ export default function ParentPortal({
                 onClick={() => {
                   setActiveTab('messages');
                   setIsMobileMenuOpen(false);
+                  if (unreadMessagesCount > 0) {
+                    const unreadList = messages.filter(m => {
+                      const isForChild = !m.studentId || m.studentId === selectedChildId;
+                      const isClassCircular = m.receiverId?.startsWith('all_class_') && activeChild?.classId === m.receiverId.replace('all_class_', '');
+                      const isCohortCircular = m.receiverId === 'all_cohort_parents' || m.receiverId === 'all';
+                      const isDirectToMe = m.receiverId === selectedParentId || (m.receiverRole === 'parent' && !m.receiverId);
+                      const isTarget = isForChild && (isDirectToMe || isCohortCircular || isClassCircular);
+                      return isTarget && !m.read;
+                    }).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+                    if (unreadList.length > 0) {
+                      handleOpenMessage(unreadList[0]);
+                    }
+                    markAllAsRead();
+                  }
                 }}
-                className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-right text-xs font-semibold transition-all duration-200 ${
+                className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-right text-xs font-semibold transition-all duration-200 cursor-pointer ${
                   activeTab === 'messages' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-300 hover:bg-slate-900 hover:text-slate-100'
                 }`}
               >
                 <MessageSquare className="w-4.5 h-4.5 shrink-0 text-emerald-400" />
                 <span>تواصل مباشر + إشعارات الدرجات 💬</span>
                 {unreadMessagesCount > 0 && (
-                  <span className="mr-auto bg-emerald-500 text-white px-1.5 py-0.5 rounded-full text-[9px] font-bold animate-pulse">
+                  <span 
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setActiveTab('messages');
+                      setIsMobileMenuOpen(false);
+                      const unreadList = messages.filter(m => {
+                        const isForChild = !m.studentId || m.studentId === selectedChildId;
+                        const isClassCircular = m.receiverId?.startsWith('all_class_') && activeChild?.classId === m.receiverId.replace('all_class_', '');
+                        const isCohortCircular = m.receiverId === 'all_cohort_parents' || m.receiverId === 'all';
+                        const isDirectToMe = m.receiverId === selectedParentId || (m.receiverRole === 'parent' && !m.receiverId);
+                        const isTarget = isForChild && (isDirectToMe || isCohortCircular || isClassCircular);
+                        return isTarget && !m.read;
+                      }).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+                      if (unreadList.length > 0) {
+                        handleOpenMessage(unreadList[0]);
+                      }
+                      markAllAsRead();
+                    }}
+                    className="mr-auto bg-emerald-500 hover:bg-emerald-600 text-white px-2 py-0.5 rounded-full text-[9px] font-black animate-pulse shadow-xs cursor-pointer"
+                    title="اضغط لفتح الرسالة مباشرة وإخفاء العداد"
+                  >
                     {unreadMessagesCount} جديد
                   </span>
                 )}
@@ -2686,6 +2753,33 @@ export default function ParentPortal({
                 </div>
               )}
 
+              {/* زر الرسالة الجديدة مع العداد الذي يفتح الرسالة مباشرة ويخفي العداد */}
+              {unreadMessagesCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const unreadList = messages.filter(m => {
+                      const isForChild = !m.studentId || m.studentId === selectedChildId;
+                      const isClassCircular = m.receiverId?.startsWith('all_class_') && activeChild?.classId === m.receiverId.replace('all_class_', '');
+                      const isCohortCircular = m.receiverId === 'all_cohort_parents' || m.receiverId === 'all';
+                      const isDirectToMe = m.receiverId === selectedParentId || (m.receiverRole === 'parent' && !m.receiverId);
+                      const isTarget = isForChild && (isDirectToMe || isCohortCircular || isClassCircular);
+                      return isTarget && !m.read;
+                    }).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+                    if (unreadList.length > 0) {
+                      handleOpenMessage(unreadList[0]);
+                    }
+                    markAllAsRead();
+                  }}
+                  className="bg-amber-500 hover:bg-amber-600 text-white border border-amber-600 px-3 py-2 rounded-xl text-xs font-black transition flex items-center justify-center gap-1.5 cursor-pointer shadow-sm animate-pulse shrink-0"
+                  title="لديك رسالة أو إشعار كشف درجات جديد - اضغط لفتح الرسالة مباشرة وإخفاء العداد"
+                >
+                  <MessageSquare className="w-3.5 h-3.5 text-white" />
+                  <span>رسالة جديدة ({unreadMessagesCount}) 📩</span>
+                </button>
+              )}
+
               {/* زر الإشعارات المصغر والأنيق */}
               {pushPermissionStatus === 'granted' ? (
                 <button
@@ -2757,7 +2851,12 @@ export default function ParentPortal({
                   {/* Certified Saved Grade Sheets Archive for Child */}
                   {(() => {
                     const childSentSheets = sentGradeSheets.filter(sheet => 
-                      sheet.studentsSummary?.some(s => s.studentId === selectedChildId)
+                      sheet.studentsSummary?.some(s => 
+                        s.studentId === selectedChildId || 
+                        (activeChild?.unifiedNo && (s.unifiedNo === activeChild.unifiedNo || s.rollNo === activeChild.unifiedNo)) ||
+                        (activeChild?.rollNo && (s.rollNo === activeChild.rollNo || s.unifiedNo === activeChild.rollNo)) ||
+                        (activeChild?.name && s.studentName === activeChild.name)
+                      )
                     );
 
                     if (childSentSheets.length === 0) return null;
@@ -2775,7 +2874,12 @@ export default function ParentPortal({
                         </div>
                         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5">
                           {childSentSheets.map(sheet => {
-                            const myStudentSummary = sheet.studentsSummary.find(s => s.studentId === selectedChildId);
+                            const myStudentSummary = sheet.studentsSummary.find(s => 
+                              s.studentId === selectedChildId || 
+                              (activeChild?.unifiedNo && (s.unifiedNo === activeChild.unifiedNo || s.rollNo === activeChild.unifiedNo)) ||
+                              (activeChild?.rollNo && (s.rollNo === activeChild.rollNo || s.unifiedNo === activeChild.rollNo)) ||
+                              (activeChild?.name && s.studentName === activeChild.name)
+                            );
                             const isSelected = (parentSelectedMonth || currentEvaluationMonth) === sheet.month;
                             return (
                               <div
@@ -2859,20 +2963,20 @@ export default function ParentPortal({
                         let badgeColor = 'bg-slate-100 text-slate-700';
                         if (avg !== null) {
                           const avgNum = parseFloat(avg);
-                          if (avgNum >= 90) {
+                          if (avgNum > 90) {
                             estimation = 'ممتاز 🌟';
                             badgeColor = 'bg-emerald-50 text-emerald-800 border-emerald-200';
-                          } else if (avgNum >= 80) {
+                          } else if (avgNum > 80) {
                             estimation = 'جيد جداً 🎈';
                             badgeColor = 'bg-teal-50 text-teal-800 border-teal-200';
-                          } else if (avgNum >= 70) {
+                          } else if (avgNum > 60) {
                             estimation = 'جيد 👍';
                             badgeColor = 'bg-blue-50 text-blue-800 border-blue-200';
-                          } else if (avgNum >= 60) {
-                            estimation = 'مقبول';
+                          } else if (avgNum > 40) {
+                            estimation = 'وسط 🟢';
                             badgeColor = 'bg-amber-50 text-amber-800 border-amber-200';
                           } else {
-                            estimation = 'يحتاج متابعة ⚠️';
+                            estimation = 'ضعيف 🔴';
                             badgeColor = 'bg-rose-50 text-rose-800 border-rose-200';
                           }
                         }
@@ -2916,7 +3020,7 @@ export default function ParentPortal({
                             };
                           }
                           const pct = Math.min(Math.max(score, 0), 100);
-                          if (score >= 90) {
+                          if (score > 90) {
                             return {
                               text: `${score}`,
                               appraisal: 'ممتاز ⭐',
@@ -2925,7 +3029,7 @@ export default function ParentPortal({
                               percentage: pct
                             };
                           }
-                          if (score >= 80) {
+                          if (score > 80) {
                             return {
                               text: `${score}`,
                               appraisal: 'جيد جداً ✨',
@@ -2934,7 +3038,7 @@ export default function ParentPortal({
                               percentage: pct
                             };
                           }
-                          if (score >= 70) {
+                          if (score > 60) {
                             return {
                               text: `${score}`,
                               appraisal: 'جيد 👍',
@@ -2943,10 +3047,10 @@ export default function ParentPortal({
                               percentage: pct
                             };
                           }
-                          if (score >= 60) {
+                          if (score > 40) {
                             return {
                               text: `${score}`,
-                              appraisal: 'مقبول',
+                              appraisal: 'وسط 🟢',
                               badgeClass: 'bg-amber-50 text-amber-800 border-amber-200 font-bold',
                               barColor: 'bg-amber-500',
                               percentage: pct
@@ -2954,7 +3058,7 @@ export default function ParentPortal({
                           }
                           return {
                             text: `${score}`,
-                            appraisal: 'يحتاج متابعة ⚠️',
+                            appraisal: 'ضعيف 🔴',
                             badgeClass: 'bg-rose-50 text-rose-800 border-rose-200 font-black',
                             barColor: 'bg-rose-500',
                             percentage: pct
@@ -3110,6 +3214,31 @@ export default function ParentPortal({
                                   <span className="text-[10px] text-slate-500 font-bold bg-slate-100 px-2 py-0.5 rounded-full">
                                     الدرجة العظمى: 100 • الصغرى للنجاح: 50
                                   </span>
+                                </div>
+
+                                {/* سلم تقدير العلامة للمرحلة المعتمد */}
+                                <div className="mb-3 bg-gradient-to-l from-indigo-50/70 via-slate-50 to-amber-50/70 border border-indigo-100 p-2.5 rounded-xl flex flex-wrap items-center justify-between gap-2 text-xs">
+                                  <span className="font-black text-slate-800 text-[11px] flex items-center gap-1.5">
+                                    <span>🎯</span>
+                                    <span>سلم تقدير العلامة للمرحلة:</span>
+                                  </span>
+                                  <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-bold">
+                                    <span className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-200">
+                                      🌟 من 91 إلى 100: ممتاز
+                                    </span>
+                                    <span className="px-2 py-0.5 rounded-md bg-teal-50 text-teal-800 border border-teal-200">
+                                      ✨ من 81 إلى 90: جيد جداً
+                                    </span>
+                                    <span className="px-2 py-0.5 rounded-md bg-blue-50 text-blue-800 border border-blue-200">
+                                      👍 من 61 إلى 80: جيد
+                                    </span>
+                                    <span className="px-2 py-0.5 rounded-md bg-amber-50 text-amber-800 border border-amber-200">
+                                      🟢 من 41 إلى 60: وسط
+                                    </span>
+                                    <span className="px-2 py-0.5 rounded-md bg-rose-50 text-rose-800 border border-rose-200">
+                                      🔴 من 1 إلى 40: ضعيف
+                                    </span>
+                                  </div>
                                 </div>
 
                                 {/* High-Fidelity Table (Desktop and Print) */}

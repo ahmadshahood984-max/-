@@ -1181,10 +1181,10 @@ ${lateDays > 0 ? `• 🟡 *أيام التأخر:* ❪ *${lateDays} يوم* ❫
     let estimation = '---';
     if (finalScoredCount > 0) {
       const avgNum = Number(avg);
-      if (avgNum >= 90) estimation = 'ممتاز 🌟';
-      else if (avgNum >= 80) estimation = 'جيد جداً ✨';
-      else if (avgNum >= 70) estimation = 'جيد 👍';
-      else if (avgNum >= 60) estimation = 'مقبول 🟢';
+      if (avgNum > 90) estimation = 'ممتاز 🌟';
+      else if (avgNum > 80) estimation = 'جيد جداً ✨';
+      else if (avgNum > 60) estimation = 'جيد 👍';
+      else if (avgNum > 40) estimation = 'وسط 🟢';
       else estimation = 'ضعيف 🔴';
     }
 
@@ -4454,11 +4454,11 @@ ${directivesFormatted}
       let estimation = '---';
       if (studentScoredCount > 0) {
         const avgNum = Number(avg);
-        if (avgNum >= 90) estimation = 'ممتاز 🌟';
-        else if (avgNum >= 80) estimation = 'جيد جداً ✨';
-        else if (avgNum >= 70) estimation = 'جيد 👍';
-        else if (avgNum >= 60) estimation = 'مقبول 🟢';
-        else estimation = 'يحتاج متابعة ⚠️';
+        if (avgNum > 90) estimation = 'ممتاز 🌟';
+        else if (avgNum > 80) estimation = 'جيد جداً ✨';
+        else if (avgNum > 60) estimation = 'جيد 👍';
+        else if (avgNum > 40) estimation = 'وسط 🟢';
+        else estimation = 'ضعيف 🔴';
       }
 
       // Attendance stats for student
@@ -4666,10 +4666,10 @@ ${directivesFormatted}
       
       let estimation = 'ضعيف';
       const avgNum = parseFloat(avg);
-      if (avgNum >= 90) estimation = 'ممتاز';
-      else if (avgNum >= 80) estimation = 'جيد جداً';
-      else if (avgNum >= 70) estimation = 'جيد';
-      else if (avgNum >= 60) estimation = 'مقبول';
+      if (avgNum > 90) estimation = 'ممتاز';
+      else if (avgNum > 80) estimation = 'جيد جداً';
+      else if (avgNum > 60) estimation = 'جيد';
+      else if (avgNum > 40) estimation = 'وسط';
       row['التقدير'] = estimation;
       
       row['توجيهات المعلم'] = evalForMonth?.teacherText !== undefined ? evalForMonth.teacherText : (evalForMonth?.text || '');
@@ -9818,6 +9818,31 @@ if __name__ == "__main__":
                 </div>
               </div>
 
+              {/* سلم تقدير العلامة للمرحلة المعتمد */}
+              <div className="bg-gradient-to-r from-indigo-50 via-white to-amber-50 p-4 rounded-2xl border border-indigo-150 flex flex-wrap items-center justify-between gap-3 text-xs shadow-2xs">
+                <div className="flex items-center gap-2">
+                  <span className="text-base">🎯</span>
+                  <span className="font-extrabold text-slate-800 text-sm">سلم تقدير العلامة للمرحلة المعتمد رسمياً:</span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 font-bold text-xs">
+                  <span className="px-2.5 py-1 rounded-xl bg-emerald-50 text-emerald-800 border border-emerald-200 shadow-2xs">
+                    🌟 من 91 إلى 100: ممتاز
+                  </span>
+                  <span className="px-2.5 py-1 rounded-xl bg-teal-50 text-teal-800 border border-teal-200 shadow-2xs">
+                    ✨ من 81 إلى 90: جيد جداً
+                  </span>
+                  <span className="px-2.5 py-1 rounded-xl bg-blue-50 text-blue-800 border border-blue-200 shadow-2xs">
+                    👍 من 61 إلى 80: جيد
+                  </span>
+                  <span className="px-2.5 py-1 rounded-xl bg-amber-50 text-amber-800 border border-amber-200 shadow-2xs">
+                    🟢 من 41 إلى 60: وسط
+                  </span>
+                  <span className="px-2.5 py-1 rounded-xl bg-rose-50 text-rose-800 border border-rose-200 shadow-2xs">
+                    🔴 من 1 إلى 40: ضعيف
+                  </span>
+                </div>
+              </div>
+
               {/* Excel Controls Panel */}
               <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm space-y-4">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
@@ -10267,17 +10292,17 @@ ${sampleEval}
                                   const avg = totalScore / scoredCount;
                                   let label = 'ضعيف';
                                   let badgeClass = 'bg-rose-50 text-rose-700 border-rose-100';
-                                  if (avg >= 90) {
+                                  if (avg > 90) {
                                     label = 'ممتاز';
                                     badgeClass = 'bg-emerald-50 text-emerald-700 border-emerald-100';
-                                  } else if (avg >= 80) {
+                                  } else if (avg > 80) {
                                     label = 'جيد جداً';
                                     badgeClass = 'bg-teal-50 text-teal-700 border-teal-100';
-                                  } else if (avg >= 70) {
+                                  } else if (avg > 60) {
                                     label = 'جيد';
                                     badgeClass = 'bg-blue-50 text-blue-700 border-blue-100';
-                                  } else if (avg >= 60) {
-                                    label = 'مقبول';
+                                  } else if (avg > 40) {
+                                    label = 'وسط';
                                     badgeClass = 'bg-amber-50 text-amber-700 border-amber-100';
                                   }
                                   return (
