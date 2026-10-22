@@ -50,6 +50,7 @@ export const ExamQuestionsManager: React.FC<ExamQuestionsManagerProps> = ({
 }) => {
   const [editingPaper, setEditingPaper] = useState<ExamQuestionPaper | null>(null);
   const [isCreatingNew, setIsCreatingNew] = useState<boolean>(false);
+  const [paperToDelete, setPaperToDelete] = useState<ExamQuestionPaper | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedClassFilter, setSelectedClassFilter] = useState<string>('');
   const [selectedSubjectFilter, setSelectedSubjectFilter] = useState<string>('');
@@ -358,11 +359,7 @@ export const ExamQuestionsManager: React.FC<ExamQuestionsManagerProps> = ({
                   {/* Delete button */}
                   <button
                     type="button"
-                    onClick={() => {
-                      if (confirm(`هل أنت متأكد من حذف ورقة الأسئلة: "${paper.title}"؟`)) {
-                        onDeletePaper(paper.id);
-                      }
-                    }}
+                    onClick={() => setPaperToDelete(paper)}
                     className="p-2 text-rose-500 hover:bg-rose-50 rounded-xl transition cursor-pointer border border-transparent hover:border-rose-200"
                     title="حذف ورقة الأسئلة"
                   >
@@ -372,6 +369,43 @@ export const ExamQuestionsManager: React.FC<ExamQuestionsManagerProps> = ({
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {paperToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl border border-slate-200 p-6 max-w-sm w-full space-y-4 shadow-xl text-right">
+            <div className="w-12 h-12 rounded-2xl bg-rose-50 text-rose-600 flex items-center justify-center mx-auto">
+              <Trash2 className="w-6 h-6" />
+            </div>
+            <div className="text-center space-y-1.5">
+              <h4 className="font-extrabold text-sm text-slate-800">تأكيد حذف ورقة الأسئلة</h4>
+              <p className="text-xs text-slate-500">
+                هل أنت متأكد من حذف ورقة الأسئلة:<br />
+                <strong className="text-slate-900 font-bold block mt-1">"{paperToDelete.title}"</strong>
+              </p>
+            </div>
+            <div className="flex items-center justify-center gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setPaperToDelete(null)}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition cursor-pointer"
+              >
+                إلغاء
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onDeletePaper(paperToDelete.id);
+                  setPaperToDelete(null);
+                }}
+                className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition cursor-pointer shadow-xs"
+              >
+                نعم، تأكيد الحذف 🗑️
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

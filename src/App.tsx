@@ -342,6 +342,10 @@ export default function App() {
     if (portalParam === 'teacher' || portalParam === 'parent' || portalParam === 'director') {
       return portalParam as 'director' | 'teacher' | 'parent';
     }
+    // If URL has unified, roll, or student, automatically open Parent Portal directly
+    if (params.get('unified') || params.get('roll') || params.get('student') || params.get('studentId')) {
+      return 'parent';
+    }
     return 'director';
   });
 
@@ -349,7 +353,7 @@ export default function App() {
   const [isPortalLocked] = useState<boolean>(() => {
     const params = new URLSearchParams(window.location.search);
     const portalParam = params.get('portal');
-    return portalParam === 'teacher' || portalParam === 'parent' || portalParam === 'director';
+    return portalParam === 'teacher' || portalParam === 'parent' || portalParam === 'director' || !!(params.get('unified') || params.get('roll') || params.get('student') || params.get('studentId'));
   });
 
   const [isPortalSelectorOpen, setIsPortalSelectorOpen] = useState(false);
@@ -461,6 +465,27 @@ export default function App() {
       const savedIcon = localStorage.getItem('school_app_icon');
       if (savedIcon !== null) {
         setAppIcon(savedIcon);
+      }
+
+      // Automatically clean up any duplicate sent grade sheets from previous runs
+      const savedSheetsRaw = localStorage.getItem('school_sent_grade_sheets');
+      if (savedSheetsRaw) {
+        try {
+          const parsedSheets = JSON.parse(savedSheetsRaw);
+          if (Array.isArray(parsedSheets) && parsedSheets.length > 0) {
+            const map = new Map<string, any>();
+            for (const s of parsedSheets) {
+              const key = `${s.classId || s.className || 'all'}_${s.month}`;
+              if (!map.has(key) || new Date(s.dateSent).getTime() >= new Date(map.get(key)!.dateSent).getTime()) {
+                map.set(key, s);
+              }
+            }
+            const deduped = Array.from(map.values());
+            if (deduped.length !== parsedSheets.length) {
+              persistDirectToFirestore('school_sent_grade_sheets', deduped);
+            }
+          }
+        } catch {}
       }
     };
 

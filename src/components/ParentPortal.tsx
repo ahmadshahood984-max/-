@@ -78,42 +78,54 @@ export const normalizeNumberDigits = (str: string): string => {
     .trim();
 };
 
-// Helper to find student strictly by Unified Number (or rollNo/ID)
-export const findStudentByUnifiedInput = (input: string, list: Student[]): Student | undefined => {
-  const rawClean = input.trim();
+// Helper to find student strictly by Unified Number (or rollNo/ID/Name)
+export const findStudentByUnifiedInput = (input: string | undefined | null, list: Student[]): Student | undefined => {
+  if (!input || !Array.isArray(list) || list.length === 0) return undefined;
+  const rawClean = String(input).trim();
   if (!rawClean) return undefined;
 
   const normalizedDigits = normalizeNumberDigits(rawClean);
   const numValue = normalizedDigits ? parseInt(normalizedDigits, 10) : NaN;
 
-  // 1. Try unifiedNo exact string or numeric match
-  let match = list.find(s => {
-    if (!s.unifiedNo) return false;
-    const sClean = s.unifiedNo.trim();
-    if (sClean === rawClean || (normalizedDigits && sClean === normalizedDigits)) return true;
-    const sNum = parseInt(normalizeNumberDigits(sClean), 10);
-    if (!isNaN(numValue) && !isNaN(sNum) && sNum === numValue) return true;
-    return false;
-  });
+  // 1. Direct match with student ID (exact match)
+  let match = list.find(s => s.id && s.id.toLowerCase() === rawClean.toLowerCase());
   if (match) return match;
 
-  // 2. Try rollNo exact or numeric match
+  // 2. Match by unifiedNo (exact string, normalized digits, or integer value)
   match = list.find(s => {
-    if (!s.rollNo) return false;
-    const sClean = s.rollNo.trim();
-    if (sClean === rawClean || (normalizedDigits && sClean === normalizedDigits)) return true;
-    const sNum = parseInt(normalizeNumberDigits(sClean), 10);
+    if (s.unifiedNo === undefined || s.unifiedNo === null) return false;
+    const sStr = String(s.unifiedNo).trim();
+    if (sStr === rawClean) return true;
+    const sDigits = normalizeNumberDigits(sStr);
+    if (normalizedDigits && sDigits === normalizedDigits) return true;
+    const sNum = parseInt(sDigits, 10);
     if (!isNaN(numValue) && !isNaN(sNum) && sNum === numValue) return true;
     return false;
   });
   if (match) return match;
 
-  // 3. Fallback: match by student ID or nationalId
-  match = list.find(s => 
-    s.id.toLowerCase() === rawClean.toLowerCase() ||
-    (s.nationalId && s.nationalId.trim() === rawClean)
-  );
-  return match;
+  // 3. Match by rollNo
+  match = list.find(s => {
+    if (s.rollNo === undefined || s.rollNo === null) return false;
+    const sStr = String(s.rollNo).trim();
+    if (sStr === rawClean) return true;
+    const sDigits = normalizeNumberDigits(sStr);
+    if (normalizedDigits && sDigits === normalizedDigits) return true;
+    const sNum = parseInt(sDigits, 10);
+    if (!isNaN(numValue) && !isNaN(sNum) && sNum === numValue) return true;
+    return false;
+  });
+  if (match) return match;
+
+  // 4. Match by nationalId
+  match = list.find(s => s.nationalId && String(s.nationalId).trim() === rawClean);
+  if (match) return match;
+
+  // 5. Match by exact student name (case-insensitive & trimmed)
+  match = list.find(s => s.name && s.name.trim().toLowerCase() === rawClean.toLowerCase());
+  if (match) return match;
+
+  return undefined;
 };
 
 export default function ParentPortal({
@@ -132,17 +144,32 @@ export default function ParentPortal({
 }: ParentPortalProps) {
   // Unified Student Login System: Strictly single student by Unified Number
   const [loggedInStudentId, setLoggedInStudentId] = useState<string>(() => {
-    return localStorage.getItem('parent_portal_student_id') || '';
+    try {
+      if (typeof window !== 'undefined') {
+        const params = new URLSearchParams(window.location.search);
+        const urlUnified = params.get('unified') || params.get('roll') || params.get('student') || params.get('studentId') || params.get('no');
+        if (urlUnified) {
+          return urlUnified.trim();
+        }
+      }
+      return localStorage.getItem('parent_portal_student_id') || 
+             localStorage.getItem('parent_portal_unified_no') || 
+             localStorage.getItem('parent_portal_saved_login_input') || 
+             '';
+    } catch {
+      return '';
+    }
   });
   const [studentRollInput, setStudentRollInput] = useState('');
   const [loginError, setLoginError] = useState('');
 
   // Active student strictly matching the logged in student ID or unified number
-  const activeStudentObj = students.find(s => 
-    s.id === loggedInStudentId || 
-    (s.unifiedNo && s.unifiedNo.trim() === loggedInStudentId.trim()) ||
-    (s.rollNo && s.rollNo.trim() === loggedInStudentId.trim())
-  );
+  const activeStudentObj = findStudentByUnifiedInput(loggedInStudentId, students) || 
+    students.find(s => 
+      s.id === loggedInStudentId || 
+      (s.unifiedNo && String(s.unifiedNo).trim() === loggedInStudentId.trim()) ||
+      (s.rollNo && String(s.rollNo).trim() === loggedInStudentId.trim())
+    );
   const selectedParentId = activeStudentObj ? activeStudentObj.parentId : '';
   const activeParent = parents.find(p => p.id === selectedParentId);
 
@@ -248,11 +275,23 @@ export default function ParentPortal({
     XLSX.writeFile(workbook, `أسماء_طلاب_فوج_${(activeChild?.name || '').replace(/\s+/g, '_')}.xlsx`);
   };
 
-  // Sent Grade Sheets Archive State (كشوف الدرجات المرسلة والمحفوظة)
+  // Sent Grade Sheets Archive State (كشوف الدرجات المرسلة والمحفوظة بدون تكرار)
+  const deduplicateGradeSheets = (sheets: SentGradeSheet[]): SentGradeSheet[] => {
+    if (!Array.isArray(sheets)) return [];
+    const map = new Map<string, SentGradeSheet>();
+    for (const s of sheets) {
+      const key = `${s.classId || s.className || 'all'}_${s.month}`;
+      if (!map.has(key) || new Date(s.dateSent).getTime() >= new Date(map.get(key)!.dateSent).getTime()) {
+        map.set(key, s);
+      }
+    }
+    return Array.from(map.values());
+  };
+
   const [sentGradeSheets, setSentGradeSheets] = useState<SentGradeSheet[]>(() => {
     try {
       const saved = localStorage.getItem('school_sent_grade_sheets');
-      return saved ? JSON.parse(saved) : [];
+      return saved ? deduplicateGradeSheets(JSON.parse(saved)) : [];
     } catch {
       return [];
     }
@@ -269,7 +308,7 @@ export default function ParentPortal({
       const savedSent = localStorage.getItem('school_sent_grade_sheets');
       if (savedSent) {
         try {
-          setSentGradeSheets(JSON.parse(savedSent));
+          setSentGradeSheets(deduplicateGradeSheets(JSON.parse(savedSent)));
         } catch {}
       }
     };
@@ -413,54 +452,56 @@ export default function ParentPortal({
 
   // Automatic login on mount and student ID validation for seamless direct access
   React.useEffect(() => {
-    if (students.length === 0) return;
+    if (!students || students.length === 0) return;
 
-    // Verify if currently loggedInStudentId actually exists in students list
-    const isCurrentValid = students.some(s => 
-      s.id === loggedInStudentId || 
-      (s.unifiedNo && s.unifiedNo.trim() === loggedInStudentId.trim()) ||
-      (s.rollNo && s.rollNo.trim() === loggedInStudentId.trim())
-    );
+    // 1. First priority: Check URL query parameter (e.g. ?portal=parent&unified=181 or ?unified=181)
+    let urlParamVal: string | null = null;
+    try {
+      if (typeof window !== 'undefined') {
+        const params = new URLSearchParams(window.location.search);
+        urlParamVal = params.get('unified') || params.get('roll') || params.get('student') || params.get('studentId') || params.get('no');
+      }
+    } catch {}
 
-    if (loggedInStudentId && !isCurrentValid) {
-      // If logged in student ID is no longer valid, reset
-      setLoggedInStudentId('');
-      localStorage.removeItem('parent_portal_student_id');
-      localStorage.removeItem('parent_portal_unified_no');
-      return;
+    if (urlParamVal) {
+      const matchFromUrl = findStudentByUnifiedInput(urlParamVal, students);
+      if (matchFromUrl) {
+        setLoggedInStudentId(matchFromUrl.id);
+        localStorage.setItem('parent_portal_student_id', matchFromUrl.id);
+        localStorage.setItem('parent_portal_unified_no', matchFromUrl.unifiedNo || matchFromUrl.rollNo || '');
+        localStorage.setItem('parent_portal_saved_login_input', urlParamVal.trim());
+        localStorage.setItem('parent_portal_auto_login', 'true');
+        return;
+      }
     }
 
-    if (!loggedInStudentId) {
-      const autoLogin = localStorage.getItem('parent_portal_auto_login');
-      // If user explicitly logged out, do not auto-login
-      if (autoLogin === 'false') return;
-
-      const savedStudentId = localStorage.getItem('parent_portal_student_id');
-      const savedUnifiedNo = localStorage.getItem('parent_portal_unified_no');
-      const savedInput = localStorage.getItem('parent_portal_saved_login_input');
-
-      let targetStudent: Student | undefined;
-
-      // 1. Try saved student ID directly
-      if (savedStudentId) {
-        targetStudent = students.find(s => s.id === savedStudentId);
+    // 2. Second priority: If loggedInStudentId is already set, resolve it using findStudentByUnifiedInput
+    if (loggedInStudentId) {
+      const validStudent = findStudentByUnifiedInput(loggedInStudentId, students);
+      if (validStudent) {
+        if (loggedInStudentId !== validStudent.id) {
+          setLoggedInStudentId(validStudent.id);
+        }
+        localStorage.setItem('parent_portal_student_id', validStudent.id);
+        localStorage.setItem('parent_portal_unified_no', validStudent.unifiedNo || validStudent.rollNo || '');
+        return;
       }
+    }
 
-      // 2. Try saved unified number
-      if (!targetStudent && savedUnifiedNo) {
-        targetStudent = findStudentByUnifiedInput(savedUnifiedNo, students);
-      }
+    // 3. Third priority: Try saved unified number, saved student ID, or saved login input from localStorage
+    const savedUnifiedNo = localStorage.getItem('parent_portal_unified_no');
+    const savedStudentId = localStorage.getItem('parent_portal_student_id');
+    const savedInput = localStorage.getItem('parent_portal_saved_login_input');
 
-      // 3. Try saved input
-      if (!targetStudent && savedInput) {
-        targetStudent = findStudentByUnifiedInput(savedInput, students);
-      }
+    const targetStudent = (savedUnifiedNo && findStudentByUnifiedInput(savedUnifiedNo, students)) ||
+                          (savedStudentId && findStudentByUnifiedInput(savedStudentId, students)) ||
+                          (savedInput && findStudentByUnifiedInput(savedInput, students));
 
-      if (targetStudent) {
-        setLoggedInStudentId(targetStudent.id);
-        localStorage.setItem('parent_portal_student_id', targetStudent.id);
-        localStorage.setItem('parent_portal_unified_no', targetStudent.unifiedNo || targetStudent.rollNo || '');
-      }
+    if (targetStudent) {
+      setLoggedInStudentId(targetStudent.id);
+      localStorage.setItem('parent_portal_student_id', targetStudent.id);
+      localStorage.setItem('parent_portal_unified_no', targetStudent.unifiedNo || targetStudent.rollNo || '');
+      return;
     }
   }, [students, loggedInStudentId]);
 
@@ -1400,6 +1441,9 @@ export default function ParentPortal({
           case 'school_evaluation_current_month':
             setCurrentEvaluationMonth(value.startsWith('"') ? parsed : value);
             break;
+          case 'school_sent_grade_sheets':
+            setSentGradeSheets(deduplicateGradeSheets(parsed));
+            break;
         }
       } catch (err) {
         if (key === 'school_evaluation_current_month') {
@@ -1414,6 +1458,10 @@ export default function ParentPortal({
 
     // Initial load check to capture early Firebase synced keys in localStorage
     const reloadFromLocalStorage = () => {
+      const savedSheets = localStorage.getItem('school_sent_grade_sheets');
+      if (savedSheets) {
+        try { setSentGradeSheets(deduplicateGradeSheets(JSON.parse(savedSheets))); } catch (e) {}
+      }
       const savedTuitions = localStorage.getItem('school_tuitions');
       if (savedTuitions) {
         try { setTuitions(JSON.parse(savedTuitions)); } catch (e) {}
@@ -2848,70 +2896,7 @@ export default function ParentPortal({
                     </div>
                   </div>
 
-                  {/* Certified Saved Grade Sheets Archive for Child */}
-                  {(() => {
-                    const childSentSheets = sentGradeSheets.filter(sheet => 
-                      sheet.studentsSummary?.some(s => 
-                        s.studentId === selectedChildId || 
-                        (activeChild?.unifiedNo && (s.unifiedNo === activeChild.unifiedNo || s.rollNo === activeChild.unifiedNo)) ||
-                        (activeChild?.rollNo && (s.rollNo === activeChild.rollNo || s.unifiedNo === activeChild.rollNo)) ||
-                        (activeChild?.name && s.studentName === activeChild.name)
-                      )
-                    );
 
-                    if (childSentSheets.length === 0) return null;
-
-                    return (
-                      <div className="bg-gradient-to-l from-indigo-50/90 to-amber-50/80 p-4 rounded-2xl border border-indigo-200/80 shadow-2xs space-y-3">
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                            <span className="text-base">📜</span>
-                            <h4 className="font-extrabold text-xs text-indigo-950">كشوفات وتقارير الدرجات المعتمدة المستلمة من إدارة المدرسة ({childSentSheets.length})</h4>
-                          </div>
-                          <span className="text-[10px] bg-emerald-600 text-white font-bold px-2 py-0.5 rounded-full shadow-2xs">
-                            محفوظة وموثقة دائماً 🔒
-                          </span>
-                        </div>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5">
-                          {childSentSheets.map(sheet => {
-                            const myStudentSummary = sheet.studentsSummary.find(s => 
-                              s.studentId === selectedChildId || 
-                              (activeChild?.unifiedNo && (s.unifiedNo === activeChild.unifiedNo || s.rollNo === activeChild.unifiedNo)) ||
-                              (activeChild?.rollNo && (s.rollNo === activeChild.rollNo || s.unifiedNo === activeChild.rollNo)) ||
-                              (activeChild?.name && s.studentName === activeChild.name)
-                            );
-                            const isSelected = (parentSelectedMonth || currentEvaluationMonth) === sheet.month;
-                            return (
-                              <div
-                                key={sheet.id}
-                                onClick={() => setParentSelectedMonth(sheet.month)}
-                                className={`p-3 rounded-xl border text-xs transition cursor-pointer flex flex-col justify-between gap-2 ${
-                                  isSelected
-                                    ? 'bg-white border-indigo-500 ring-2 ring-indigo-200 shadow-xs'
-                                    : 'bg-white/90 border-slate-200 hover:border-indigo-300 shadow-3xs'
-                                }`}
-                              >
-                                <div className="flex items-center justify-between">
-                                  <span className="font-extrabold text-slate-800 text-[11px]">{sheet.month}</span>
-                                  <span className="text-[10px] text-slate-400 font-mono">
-                                    {new Date(sheet.dateSent).toLocaleDateString('ar-EG', { month: 'short', day: 'numeric' })}
-                                  </span>
-                                </div>
-                                <div className="flex items-center justify-between text-[11px]">
-                                  <span className="text-slate-500">المعدل: <strong className="text-indigo-600 font-mono">{myStudentSummary?.average || '---'}</strong></span>
-                                  <span className="font-bold text-emerald-700">{myStudentSummary?.estimation || 'معتمد'}</span>
-                                </div>
-                                <div className="pt-1 border-t border-slate-100 flex items-center justify-between text-[10px] text-indigo-600 font-bold">
-                                  <span>{isSelected ? 'الكشف المعروض حالياً 👁️' : 'اضغط لعرض الكشف 📄'}</span>
-                                  <span>بواسطة: {sheet.sentBy}</span>
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    );
-                  })()}
 
                   {blockedGrades[selectedChildId]?.blocked ? (
                     <div className="bg-rose-50 border border-rose-100 p-8 rounded-3xl shadow-xs text-center space-y-4 max-w-2xl mx-auto">
@@ -2936,12 +2921,22 @@ export default function ParentPortal({
                           ? parsedSubjects 
                           : ['الرياضيات', 'العلوم', 'اللغة العربية', 'التربية الإسلامية', 'اللغة الإنجليزية', 'الاجتماعيات'];
 
-                        // Get all months that have grades for this child
+                        // Get all months that have grades for this child or sent certified sheets
                         const allChildGrades = grades.filter(g => g.studentId === selectedChildId);
-                        const uniqueGradeMonths = Array.from(new Set(allChildGrades.map(g => g.examName).filter(Boolean)));
+                        const childSentMonths = sentGradeSheets
+                          .filter(sheet => sheet.studentsSummary?.some(s => 
+                            s.studentId === selectedChildId || 
+                            (activeChild?.unifiedNo && (s.unifiedNo === activeChild.unifiedNo || s.rollNo === activeChild.unifiedNo)) ||
+                            (activeChild?.name && s.studentName === activeChild.name)
+                          ))
+                          .map(s => s.month);
+                        const uniqueGradeMonths = Array.from(new Set([
+                          ...allChildGrades.map(g => g.examName).filter(Boolean),
+                          ...childSentMonths
+                        ]));
                         
-                        // Default month to show
-                        const targetMonth = parentSelectedMonth || currentEvaluationMonth;
+                        // Default month to show: prefer explicit selection, or the latest available month
+                        const targetMonth = parentSelectedMonth || uniqueGradeMonths[0] || currentEvaluationMonth;
                         const studentGrades = allChildGrades.filter(g => g.examName === targetMonth);
 
                         let totalScore = 0;

@@ -80,7 +80,7 @@ import * as XLSX from 'xlsx';
 import { db } from '../lib/firebase';
 import { collection, addDoc, setDoc, deleteDoc, doc, serverTimestamp, writeBatch, getDocs } from 'firebase/firestore';
 import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead } from '../lib/firestoreTracker';
-import { forceRefreshDataFromFirestore, persistDirectToFirestore } from '../lib/firebaseSync';
+import { forceRefreshDataFromFirestore, persistDirectToFirestore, persistGradeReportBatchDirect } from '../lib/firebaseSync';
 import { getStoredWelcomeMessages, saveWelcomeMessages, DEFAULT_WELCOME_MESSAGES, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { Bell, Activity, Info, Smartphone } from 'lucide-react';
 import { sendParentPushNotification, sendBroadcastPushNotification, getRegisteredPushDevicesCount } from '../lib/pushDispatcher';
@@ -1076,11 +1076,23 @@ export default function DirectorPortal({
   // Seal & Signatures Customizer Modal State
   const [isSealModalOpen, setIsSealModalOpen] = useState(false);
 
-  // Sent Grade Sheets Archive State (كشوف الدرجات المرسلة والمحفوظة)
+  // Sent Grade Sheets Archive State (كشوف الدرجات المرسلة والمحفوظة بدون تكرار)
+  const deduplicateGradeSheets = (sheets: SentGradeSheet[]): SentGradeSheet[] => {
+    if (!Array.isArray(sheets)) return [];
+    const map = new Map<string, SentGradeSheet>();
+    for (const s of sheets) {
+      const key = `${s.classId || s.className || 'all'}_${s.month}`;
+      if (!map.has(key) || new Date(s.dateSent).getTime() >= new Date(map.get(key)!.dateSent).getTime()) {
+        map.set(key, s);
+      }
+    }
+    return Array.from(map.values());
+  };
+
   const [sentGradeSheets, setSentGradeSheets] = useState<SentGradeSheet[]>(() => {
     try {
       const saved = localStorage.getItem('school_sent_grade_sheets');
-      return saved ? JSON.parse(saved) : [];
+      return saved ? deduplicateGradeSheets(JSON.parse(saved)) : [];
     } catch {
       return [];
     }
@@ -1092,7 +1104,7 @@ export default function DirectorPortal({
     const handleStorage = (e: any) => {
       if (e?.detail?.key === 'school_sent_grade_sheets') {
         try {
-          setSentGradeSheets(JSON.parse(e.detail.value));
+          setSentGradeSheets(deduplicateGradeSheets(JSON.parse(e.detail.value)));
         } catch {}
       }
     };
@@ -1242,12 +1254,15 @@ ${subjectsDetails}
 📝 *توجيهات وتقارير المتابعة:*
 ${directivesFormatted}
 ─────────────────────────
+🔗 *رابط كشف الدرجات المباشر بالرقم الموحد:*
+${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encodeURIComponent(student.unifiedNo || student.rollNo || student.id)}
 ✨ *شاكرين لكم حسن التعاون والمتابعة* | 🏫 *إدارة المدرسة*`;
 
     const savedCustomTemplate = localStorage.getItem('school_whatsapp_monthly_template');
     let initialMessage = defaultGenerated;
 
     if (savedCustomTemplate) {
+      const directStudentUrl = `${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encodeURIComponent(student.unifiedNo || student.rollNo || student.id)}`;
       let tpl = savedCustomTemplate;
 
       if (!tpl.includes('{كشف_الدرجات}') && !tpl.includes('{الدرجات}') && !tpl.includes('{نتائج_المواد}')) {
@@ -1258,6 +1273,11 @@ ${directivesFormatted}
         .replace(/{اسم_الطالب}/g, student.name)
         .replace(/{الصف}/g, className)
         .replace(/{الشهر}/g, month)
+        .replace(/{الرقم_الموحد}/g, student.unifiedNo || student.rollNo || '')
+        .replace(/{رقم_الطالب}/g, student.unifiedNo || student.rollNo || '')
+        .replace(/{رابط_البوابة}/g, directStudentUrl)
+        .replace(/{رابط_الكشف}/g, directStudentUrl)
+        .replace(/{الرابط}/g, directStudentUrl)
         .replace(/{كشف_الدرجات}/g, subjectsDetails)
         .replace(/{الدرجات}/g, subjectsDetails)
         .replace(/{نتائج_المواد}/g, subjectsDetails)
@@ -1282,6 +1302,10 @@ ${directivesFormatted}
         .replace(/{أيام_الدوام}/g, `${totalDays}`)
         .replace(/{تقرير_الحضور}/g, attendanceFormatted)
         .replace(/{سجل_الحضور}/g, attendanceFormatted);
+
+      if (!tpl.includes('{رابط_البوابة}') && !tpl.includes('{رابط_الكشف}') && !tpl.includes('{الرابط}')) {
+        initialMessage += `\n🔗 *رابط كشف الدرجات المباشر بالرقم الموحد:*\n${directStudentUrl}`;
+      }
     }
 
     const waKey = `${student.id}_monthly_${month}`;
@@ -1831,6 +1855,38 @@ ${directivesFormatted}
           case 'school_evaluation_current_month':
             setCurrentEvaluationMonth(value.startsWith('"') ? parsed : value);
             break;
+          case 'school_sent_grade_sheets':
+            setSentGradeSheets(deduplicateGradeSheets(parsed));
+            break;
+          case 'school_grades':
+            setGrades(parsed);
+            break;
+          case 'school_students': {
+            const cleanList = sanitizeAndDeduplicateStudents(Array.isArray(parsed) ? parsed : []);
+            setStudents(cleanList.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar')));
+            break;
+          }
+          case 'school_teachers':
+            setTeachers(parsed);
+            break;
+          case 'school_classes':
+            setClasses(parsed);
+            break;
+          case 'school_parents':
+            setParents(parsed);
+            break;
+          case 'school_attendance':
+            setAttendance(parsed);
+            break;
+          case 'school_messages':
+            setMessages(parsed);
+            break;
+          case 'school_announcements':
+            setAnnouncements(parsed);
+            break;
+          case 'school_excuses':
+            setExcuses(parsed);
+            break;
           case 'school_apk_mode':
             setApkCompatibilityMode(value === 'true' || parsed === true);
             break;
@@ -1883,6 +1939,14 @@ ${directivesFormatted}
       const savedApkMode = localStorage.getItem('school_apk_mode');
       if (savedApkMode) {
         setApkCompatibilityMode(savedApkMode === 'true');
+      }
+      const savedSent = localStorage.getItem('school_sent_grade_sheets');
+      if (savedSent) {
+        try { setSentGradeSheets(deduplicateGradeSheets(JSON.parse(savedSent))); } catch (e) {}
+      }
+      const savedGrades = localStorage.getItem('school_grades');
+      if (savedGrades) {
+        try { setGrades(JSON.parse(savedGrades)); } catch (e) {}
       }
     };
     reloadFromLocalStorage();
@@ -4550,7 +4614,7 @@ ${directivesFormatted}
           title: `📊 كشف درجات معتمد: ${student.name} - ${currentEvaluationMonth}`,
           body: `أرسلت إدارة المدرسة كشف الدرجات المعتمد لشهر (${currentEvaluationMonth}) بمعدل (${avgFormatted}) وتقدير (${estimation}). اضغط للمعاينة.`,
           tag: `grades_${student.id}_${currentEvaluationMonth}`,
-          url: '/?portal=parent&tab=grades',
+          url: `/?portal=parent&tab=grades&unified=${encodeURIComponent(student.unifiedNo || student.rollNo || student.id)}`,
           msgId: msgId,
           studentId: student.id,
           studentName: student.name,
@@ -4588,23 +4652,32 @@ ${directivesFormatted}
       studentsSummary
     };
 
-    // 3. Update States
-    const updatedMessages = [...newMessagesList, ...messages];
+    // 3. Update States (استبدال الكشف والمراسلات السابقة لنفس الشهر بدلاً من تكرارها)
+    const existingMessagesWithoutTheseGrades = messages.filter(m => {
+      if (m.category === 'grade_report' && m.content.includes(currentEvaluationMonth)) {
+        return !targetStudents.some(s => s.id === m.studentId);
+      }
+      return true;
+    });
+    const updatedMessages = [...newMessagesList, ...existingMessagesWithoutTheseGrades];
     setMessages(updatedMessages);
 
-    const updatedSentSheets = [sheetRecord, ...sentGradeSheets];
+    const filteredPreviousSheets = sentGradeSheets.filter(s => 
+      !(s.month === currentEvaluationMonth && (s.classId === targetClassId || s.className === scopeTitle))
+    );
+    const updatedSentSheets = deduplicateGradeSheets([sheetRecord, ...filteredPreviousSheets]);
     setSentGradeSheets(updatedSentSheets);
 
-    // 4. Persist immediately to localStorage & Firestore so it remains saved even after closing the app
-    await Promise.all([
-      persistDirectToFirestore('school_grades', grades),
-      persistDirectToFirestore('school_messages', updatedMessages),
-      persistDirectToFirestore('school_sent_grade_sheets', updatedSentSheets),
-      persistDirectToFirestore('school_monthly_evaluations', monthlyEvaluations),
-      persistDirectToFirestore('school_evaluation_current_month', currentEvaluationMonth)
-    ]);
+    // 4. Persist with ultra-fast parallel cloud sync across PC, mobile, and parent devices
+    await persistGradeReportBatchDirect({
+      grades,
+      messages: updatedMessages,
+      sentSheets: updatedSentSheets,
+      monthlyEvaluations,
+      currentMonth: currentEvaluationMonth
+    });
 
-    alert(`🎉 تم بنجاح حفظ واعتماد وإرسال كشف الدرجات لشهر (${currentEvaluationMonth}) إلى أولياء الأمور!\n\n📊 إجمالي الطلاب المستلمين: ${targetStudents.length} طالب وطالبة\n🏫 النطاق: ${scopeTitle}\n\n✅ تم توثيق الكشف وحفظه بشكل دائم في سجل الإدارة وبوابات أولياء الأمور، وسيبقى محفوظاً ومتاحاً دائماً حتى بعد إغلاق التطبيق.`);
+    alert(`🎉 تم بنجاح حفظ واعتماد وإرسال كشف الدرجات لشهر (${currentEvaluationMonth}) إلى أولياء الأمور!\n\n📊 إجمالي الطلاب المستلمين: ${targetStudents.length} طالب وطالبة\n🏫 النطاق: ${scopeTitle}\n\n✅ تم المزامنة السريعة وحفظ الكشف وتحديثه فورياً على كافة حواسب وهواتف الإدارة وأولياء الأمور ⚡`);
   };
 
   const handleExportGradesExcel = (cohortMode: boolean = false) => {
@@ -5995,6 +6068,27 @@ ${directivesFormatted}
             aria-label="القائمة"
           >
             {isMobileMenuOpen ? <X className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
+          </button>
+        </div>
+
+        {/* Quick Cloud Sync Button between PC and Phone */}
+        <div className="px-1 pt-1 pb-1">
+          <button
+            type="button"
+            onClick={handleManualSync}
+            disabled={isSyncingData}
+            className={`w-full py-1.5 px-2.5 rounded-xl text-[10px] font-extrabold flex items-center justify-between transition cursor-pointer border shadow-2xs ${
+              isSyncingData 
+                ? 'bg-amber-500/20 text-amber-300 border-amber-400/40 animate-pulse'
+                : 'bg-emerald-950/80 hover:bg-emerald-900 text-emerald-300 border-emerald-700/60 hover:text-white'
+            }`}
+            title="مزامنة فورية سحابية سريعة بين الكمبيوتر والهاتف وأولياء الأمور"
+          >
+            <div className="flex items-center gap-1.5">
+              <RefreshCw className={`w-3.5 h-3.5 ${isSyncingData ? 'animate-spin text-amber-400' : 'text-emerald-400'}`} />
+              <span>{isSyncingData ? 'جاري المزامنة السريعة...' : '⚡ مزامنة سريعة'}</span>
+            </div>
+            <span className="text-[9px] px-1.5 py-0.5 rounded-md bg-emerald-800/80 text-emerald-100 font-mono">كمبيوتر ⇄ هاتف</span>
           </button>
         </div>
 
@@ -16291,11 +16385,9 @@ ${sampleEval}
                               <button
                                 type="button"
                                 onClick={async () => {
-                                  if (window.confirm(`هل أنت متأكد من حذف (${sheet.title}) من سجل الكشوفات؟`)) {
-                                    const next = sentGradeSheets.filter(s => s.id !== sheet.id);
-                                    setSentGradeSheets(next);
-                                    await persistDirectToFirestore('school_sent_grade_sheets', next);
-                                  }
+                                  const next = sentGradeSheets.filter(s => s.id !== sheet.id);
+                                  setSentGradeSheets(next);
+                                  await persistDirectToFirestore('school_sent_grade_sheets', next);
                                 }}
                                 className="w-8 h-8 rounded-xl bg-slate-100 hover:bg-rose-50 text-slate-400 hover:text-rose-600 flex items-center justify-center transition cursor-pointer border border-slate-200"
                                 title="حذف من السجل"
