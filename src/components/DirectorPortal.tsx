@@ -63,7 +63,9 @@ import {
   LayoutGrid,
   ClipboardList,
   Camera,
-  BarChart3
+  BarChart3,
+  Link as LinkIcon,
+  QrCode
 } from 'lucide-react';
 import { printElementById, downloadElementAsImage, exportElementAsPdf } from '../lib/printUtils';
 import { buildWhatsAppUrl, openWhatsAppDirectly, getWhatsAppSentRecords, recordWhatsAppSent, WhatsAppSentRecord } from '../lib/whatsapp';
@@ -781,6 +783,10 @@ export default function DirectorPortal({
     message: string;
     onConfirm: () => void;
   } | null>(null);
+
+  // Smart Link modal state for Director
+  const [selectedSmartLinkStudent, setSelectedSmartLinkStudent] = useState<Student | null>(null);
+  const [directorSmartLinkCopied, setDirectorSmartLinkCopied] = useState<boolean>(false);
 
   // Automatic Backup Snapshot before any deletion or wipe operation
   const saveAutomaticSnapshot = () => {
@@ -3261,6 +3267,8 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       setParents(updatedParents);
       localStorage.setItem('school_students', JSON.stringify(updatedStudents));
       localStorage.setItem('school_parents', JSON.stringify(updatedParents));
+      persistDirectToFirestore('school_students', updatedStudents);
+      persistDirectToFirestore('school_parents', updatedParents);
 
       setShowRegExcelImportModal(false);
       setRegExcelParsedRows(null);
@@ -3851,6 +3859,8 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       setParents(updatedParents);
       localStorage.setItem('school_students', JSON.stringify(updatedStudents));
       localStorage.setItem('school_parents', JSON.stringify(updatedParents));
+      persistDirectToFirestore('school_students', updatedStudents);
+      persistDirectToFirestore('school_parents', updatedParents);
       setPastedStudentData('');
       setShowPastedStudentInput(false);
       let msg = `🎉 تم استيراد عدد ${importedCount} طالب بنجاح وتوزيعهم على الصف المحدد!`;
@@ -3993,6 +4003,8 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
           setParents(updatedParents);
           localStorage.setItem('school_students', JSON.stringify(updatedStudents));
           localStorage.setItem('school_parents', JSON.stringify(updatedParents));
+          persistDirectToFirestore('school_students', updatedStudents);
+          persistDirectToFirestore('school_parents', updatedParents);
           e.target.value = '';
           
           let msg = `🎉 تم استيراد عدد ${importedCount} طالب بنجاح وتوزيعهم على الصف المحدد! ✅`;
@@ -4888,6 +4900,7 @@ ${directivesFormatted}
           const updatedStudents = currentList.filter(s => s.id !== itemId);
           setStudents(updatedStudents);
           localStorage.setItem('school_students', JSON.stringify(updatedStudents));
+          persistDirectToFirestore('school_students', updatedStudents);
           window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_students', value: JSON.stringify(updatedStudents) } }));
 
           const updatedGrades = grades.filter(g => g.studentId !== itemId);
@@ -4908,6 +4921,7 @@ ${directivesFormatted}
           })).filter(p => p.childrenIds.length > 0);
           setParents(updatedParents);
           localStorage.setItem('school_parents', JSON.stringify(updatedParents));
+          persistDirectToFirestore('school_parents', updatedParents);
 
           alert(`✅ تم حذف الطالب (${student.name}) بنجاح.`);
         }
@@ -5675,6 +5689,7 @@ ${directivesFormatted}
         classId: newStudent.classId,
         parentId: '', // generated inside App.tsx
         rollNo: finalRollNo,
+        unifiedNo: finalRollNo,
         gender: newStudent.gender || 'male',
         dob: newStudent.dob || '2018-01-01',
         parentName: newStudent.parentName,
@@ -8779,6 +8794,17 @@ ${directivesFormatted}
                               </td>
                               <td className="p-2.5 text-center sticky left-0 bg-white/95 z-10 shadow-[-4px_0_6px_rgba(0,0,0,0.04)]">
                                 <div className="flex items-center justify-center gap-1.5">
+                                  {/* Smart Link for Parent Direct Access */}
+                                  <button
+                                    type="button"
+                                    onClick={() => setSelectedSmartLinkStudent(st)}
+                                    title="إنشاء ومشاركة الرابط الذكي لولي الأمر (دخول مباشر بالرقم الموحد)"
+                                    className="p-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-lg transition cursor-pointer flex items-center gap-1 text-[10px] font-bold"
+                                  >
+                                    <LinkIcon className="w-3.5 h-3.5 text-emerald-600" />
+                                    <span>رابط ذكي</span>
+                                  </button>
+
                                   {/* Print & Preview Card Button */}
                                   <button
                                     type="button"
@@ -9189,6 +9215,15 @@ if __name__ == "__main__":
                                 </td>
                                 <td className="p-3 text-center">
                                   <div className="flex gap-1.5 justify-center">
+                                    <button
+                                      type="button"
+                                      onClick={() => setSelectedSmartLinkStudent(student)}
+                                      className="text-[10px] bg-emerald-50 hover:bg-emerald-100 text-emerald-700 px-2.5 py-1 rounded-lg border border-emerald-200 transition cursor-pointer flex items-center gap-1 font-bold"
+                                      title="الرابط الذكي المباشر لولي الأمر (دخول تلقائي بالرقم الموحد)"
+                                    >
+                                      <LinkIcon className="w-3 h-3 text-emerald-600" />
+                                      <span>رابط ذكي</span>
+                                    </button>
                                     <button
                                       type="button"
                                       onClick={() => {
@@ -16428,6 +16463,203 @@ ${sampleEval}
           isOpen={isSealModalOpen}
           onClose={() => setIsSealModalOpen(false)}
         />
+
+        {/* Director Student Smart Link Modal */}
+        <AnimatePresence>
+          {selectedSmartLinkStudent && (() => {
+            const st = selectedSmartLinkStudent;
+            const identifier = st.unifiedNo || st.rollNo || st.id;
+            const smartUrl = typeof window !== 'undefined'
+              ? `${window.location.origin}${window.location.pathname}?portal=parent&unified=${encodeURIComponent(identifier)}`
+              : '';
+            const stClass = classes.find(c => c.id === st.classId);
+            const parentObj = parents.find(p => p.id === st.parentId || p.childrenIds?.includes(st.id));
+            const phone = st.parentPhone || parentObj?.phone || '';
+
+            const handleCopyDirectorSmartLink = async () => {
+              try {
+                if (navigator.clipboard) {
+                  await navigator.clipboard.writeText(smartUrl);
+                } else {
+                  const ta = document.createElement('textarea');
+                  ta.value = smartUrl;
+                  document.body.appendChild(ta);
+                  ta.select();
+                  document.execCommand('copy');
+                  document.body.removeChild(ta);
+                }
+                setDirectorSmartLinkCopied(true);
+                setTimeout(() => setDirectorSmartLinkCopied(false), 3000);
+              } catch (e) {
+                console.warn(e);
+              }
+            };
+
+            const handleSendWhatsApp = () => {
+              const text = 
+`💚 *المدرسة الدولية الخاصة* 💚
+🎓 *الرابط الذكي المباشر لملف الطالب:*
+═════════════════════════
+👤 *اسم الطالب:* *${st.name}*
+🔢 *الرقم الموحد المعتمد:* *#${identifier}*
+🏫 *الصف والشعبة:* *${stClass?.name || 'الصف الدراسي'}*
+═════════════════════════
+🔗 *رابط الدخول المباشر بنقرة واحدة:*
+${smartUrl}
+
+💡 *ملاحظة لولي الأمر:*
+يمكنك الضغط مباشرة على هذا الرابط لفتح ملف الطالب والاطلاع على كشوف الدرجات والتقارير الشهرية وسجل الحضور والغياب دون الحاجة لكتابة أي رقم.
+✨ *مع تحيات إدارة المدرسة الدولية*`;
+
+              if (phone) {
+                openWhatsAppDirectly(phone, text);
+              } else {
+                window.open(`https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`, '_blank');
+              }
+            };
+
+            return (
+              <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs">
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.95, y: 15 }}
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  exit={{ opacity: 0, scale: 0.95, y: 15 }}
+                  className="bg-white rounded-3xl shadow-2xl border border-slate-200 w-full max-w-lg overflow-hidden text-right max-h-[92vh] flex flex-col"
+                  style={{ direction: 'rtl' }}
+                >
+                  {/* Header */}
+                  <div className="bg-gradient-to-l from-emerald-800 via-teal-900 to-indigo-950 p-5 text-white flex items-center justify-between shrink-0">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-2xl bg-emerald-500/20 border border-emerald-400/30 flex items-center justify-center text-emerald-300">
+                        <LinkIcon className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <span className="text-[10px] font-bold text-emerald-300 block">
+                          🔗 الإدارة المدرسية • الرابط الذكي المباشر
+                        </span>
+                        <h3 className="font-extrabold text-base text-white">
+                          الرابط الذكي لولي أمر الطالب
+                        </h3>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedSmartLinkStudent(null)}
+                      className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 text-slate-300 hover:text-white flex items-center justify-center transition cursor-pointer"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  {/* Body */}
+                  <div className="p-5 sm:p-6 space-y-4 overflow-y-auto">
+                    {/* Student card info */}
+                    <div className="bg-gradient-to-br from-emerald-50 via-teal-50/50 to-indigo-50 border border-emerald-200/80 rounded-2xl p-4 flex items-center justify-between">
+                      <div className="space-y-1">
+                        <span className="text-[10px] font-bold text-emerald-700 block">الطالب:</span>
+                        <h4 className="text-base font-black text-slate-900">{st.name}</h4>
+                        <div className="text-xs text-slate-600 font-medium flex items-center gap-2">
+                          <span>الصف: <strong className="text-indigo-700">{stClass?.name || '---'}</strong></span>
+                          {phone && (
+                            <>
+                              <span>•</span>
+                              <span className="font-mono text-emerald-700">واتساب: {phone}</span>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                      <div className="text-center bg-white px-3 py-2 rounded-xl border border-emerald-200 shadow-2xs">
+                        <span className="text-[9px] font-bold text-slate-400 block">الرقم الموحد</span>
+                        <span className="text-base font-black font-mono text-emerald-700">
+                          #{identifier}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* URL Input */}
+                    <div className="space-y-2">
+                      <label className="block text-xs font-bold text-slate-700">
+                        الرابط الذكي المباشر المخصص لهذا الطالب:
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          readOnly
+                          value={smartUrl}
+                          className="w-full text-xs font-mono bg-slate-50 border border-slate-300 px-3 py-2.5 rounded-xl text-slate-700 select-all focus:outline-none"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleCopyDirectorSmartLink}
+                          className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2.5 rounded-xl text-xs font-extrabold transition flex items-center gap-1.5 shrink-0 cursor-pointer shadow-xs"
+                        >
+                          {directorSmartLinkCopied ? (
+                            <>
+                              <Check className="w-4 h-4 text-emerald-300" />
+                              <span>تم النسخ! ✓</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-4 h-4" />
+                              <span>نسخ</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                      {directorSmartLinkCopied && (
+                        <p className="text-[11px] text-emerald-600 font-bold">
+                          ✓ تم نسخ الرابط الذكي بنجاح إلى الحافظة!
+                        </p>
+                      )}
+                    </div>
+
+                    {/* WhatsApp Action */}
+                    <div>
+                      <button
+                        type="button"
+                        onClick={handleSendWhatsApp}
+                        className="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-3 px-4 rounded-xl text-xs font-extrabold transition flex items-center justify-center gap-2 cursor-pointer shadow-sm"
+                      >
+                        <Share2 className="w-4 h-4" />
+                        <span>إرسال الرابط الذكي فورياً عبر واتساب لولي الأمر 📲</span>
+                      </button>
+                    </div>
+
+                    {/* QR Code */}
+                    <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 text-center space-y-3">
+                      <div className="flex items-center justify-center gap-1.5 text-xs font-extrabold text-slate-700">
+                        <QrCode className="w-4 h-4 text-indigo-600" />
+                        <span>رمز الاستجابة السريعة (QR Code) للطالب</span>
+                      </div>
+                      <div className="inline-block p-3 bg-white rounded-2xl border border-slate-200 shadow-xs">
+                        <img
+                          src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(smartUrl)}`}
+                          alt="QR Code"
+                          className="w-36 h-36 mx-auto"
+                        />
+                      </div>
+                      <p className="text-[11px] text-slate-500 font-medium">
+                        يمكن طباعة هذا الرمز أو لصقه في بطاقة الطالب ليتمكن ولي الأمر من مسحه والدخول المباشر.
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Footer */}
+                  <div className="p-4 bg-slate-50 border-t border-slate-100 flex items-center justify-between shrink-0">
+                    <span className="text-[10px] text-slate-400">المدرسة الدولية الخاصة - مدينة مارع</span>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedSmartLinkStudent(null)}
+                      className="px-5 py-2 bg-slate-200 hover:bg-slate-300 text-slate-800 text-xs font-bold rounded-xl transition cursor-pointer"
+                    >
+                      إغلاق
+                    </button>
+                  </div>
+                </motion.div>
+              </div>
+            );
+          })()}
+        </AnimatePresence>
 
         {/* Portal Bottom Designer Signature - Aligned completely to the left */}
         <div className="mt-8 pt-4 border-t border-slate-200/60 no-print flex flex-col sm:flex-row items-center justify-between gap-3">

@@ -893,17 +893,20 @@ export default function App() {
       candidateNum++;
       studentId = 's' + candidateNum;
     }
+
+    const candidateUnified = studentData.unifiedNo || studentData.rollNo || String(candidateNum).padStart(3, '0');
     
     // Check if parent already exists (by phone)
     let parentId = '';
     const existingParent = parents.find(p => p.phone === parentData.phone);
+    let updatedParentsList: Parent[];
     
     if (existingParent) {
       parentId = existingParent.id;
       // update parent's children
-      setParents(prev => prev.map(p => 
+      updatedParentsList = parents.map(p => 
         p.id === parentId ? { ...p, childrenIds: [...p.childrenIds.filter(id => id !== studentId), studentId] } : p
-      ));
+      );
     } else {
       let pNum = parents.length + 1;
       let pId = 'p' + pNum;
@@ -919,20 +922,26 @@ export default function App() {
         phone: parentData.phone,
         childrenIds: [studentId]
       };
-      setParents(prev => [...prev, newParent]);
+      updatedParentsList = [...parents, newParent];
     }
+    setParents(updatedParentsList);
+    persistDirectToFirestore('school_parents', updatedParentsList);
 
     const newStudent: Student = {
       ...studentData,
       id: studentId,
-      parentId
+      parentId,
+      unifiedNo: candidateUnified,
+      rollNo: studentData.rollNo || candidateUnified
     };
 
     setStudents(prev => {
       const sanitized = sanitizeAndDeduplicateStudents([...prev, newStudent]);
-      return sanitized.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
+      const sorted = sanitized.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
+      persistDirectToFirestore('school_students', sorted);
+      return sorted;
     });
-    logEvent(`تم تسجيل الطالب: ${newStudent.name} وربطه بولي الأمر: ${parentData.name}`, 'success');
+    logEvent(`تم تسجيل الطالب: ${newStudent.name} (الرقم الموحد: ${candidateUnified}) وربطه بولي الأمر: ${parentData.name}`, 'success');
   };
 
   // 3. Director or Teacher publishes Announcement

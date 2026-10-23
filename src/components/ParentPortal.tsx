@@ -42,7 +42,11 @@ import {
   Copy,
   Check,
   CheckCheck,
-  AlertTriangle
+  AlertTriangle,
+  Link,
+  QrCode,
+  Share2,
+  RefreshCw
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { Parent, Student, Attendance, Grade, Announcement, Message, AbsenceExcuse, Teacher, Class, SentGradeSheet } from '../types';
@@ -54,6 +58,7 @@ import { sendParentPushNotification } from '../lib/pushDispatcher';
 import { getStoredWelcomeMessages, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { motion, AnimatePresence } from 'motion/react';
 import { trackActivityOperation } from '../lib/firestoreTracker';
+import { forceRefreshDataFromFirestore } from '../lib/firebaseSync';
 
 interface ParentPortalProps {
   parents: Parent[];
@@ -377,7 +382,60 @@ export default function ParentPortal({
 
   // --- Auto-Login & Save Phone Number States ---
   const [rememberMe, setRememberMe] = React.useState<boolean>(true);
+  const [isLoggingIn, setIsLoggingIn] = React.useState<boolean>(false);
+  const [showSmartLinkModal, setShowSmartLinkModal] = React.useState<boolean>(false);
+  const [smartLinkCopied, setSmartLinkCopied] = React.useState<boolean>(false);
   const savedLoginInput = typeof window !== 'undefined' ? localStorage.getItem('parent_portal_saved_login_input') || '' : '';
+
+  const getDirectSmartLink = (child?: Student | null): string => {
+    if (typeof window === 'undefined') return '';
+    const st = child || activeChild;
+    if (!st) return '';
+    const identifier = st.unifiedNo || st.rollNo || st.id;
+    return `${window.location.origin}${window.location.pathname}?portal=parent&unified=${encodeURIComponent(identifier)}`;
+  };
+
+  const handleCopySmartLink = async (url: string) => {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(url);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = url;
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      }
+      setSmartLinkCopied(true);
+      setTimeout(() => setSmartLinkCopied(false), 3000);
+    } catch (e) {
+      console.warn('Copy smart link failed', e);
+    }
+  };
+
+  const handleShareSmartLinkWhatsApp = (child: Student | null, url: string) => {
+    const st = child || activeChild;
+    if (!st) return;
+    const studentClassName = activeChildClass?.name || 'الصف الدراسي';
+    const text = 
+`💚 *المدرسة الدولية الخاصة* 💚
+🎓 *الرابط الذكي المباشر لملف الطالب:*
+═════════════════════════
+👤 *اسم الطالب:* *${st.name}*
+🔢 *الرقم الموحد المعتمد:* *#${st.unifiedNo || st.rollNo}*
+🏫 *الصف والشعبة:* *${studentClassName}*
+═════════════════════════
+🔗 *رابط الدخول المباشر بنقرة واحدة:*
+${url}
+
+💡 *ملاحظة هامة لولي الأمر:*
+هذا الرابط الذكي مخصص لفتح ملف الطالب مباشرة والاطلاع الفوري على كشوف الدرجات والتقارير الشهرية وسجل الحضور دون الحاجة لإدخال الرقم الموحد في كل مرة.
+✨ *مع تحيات إدارة المدرسة الدولية*`;
+
+    const waUrl = `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;
+    window.open(waUrl, '_blank');
+  };
 
   // --- Live Parent Messaging States ---
   const [parentMsgTarget, setParentMsgTarget] = React.useState<'director' | 'teacher' | 'both'>('director');
@@ -1152,7 +1210,7 @@ export default function ParentPortal({
     };
   }, [messages]);
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanInput = studentRollInput.trim();
     if (!cleanInput) {
@@ -1160,18 +1218,88 @@ export default function ParentPortal({
       return;
     }
 
-    // Find student strictly by Unified Number
-    const foundStudent = findStudentByUnifiedInput(cleanInput, students);
+    setIsLoggingIn(true);
+    setLoginError('');
 
-    if (foundStudent) {
-      setLoggedInStudentId(foundStudent.id);
-      localStorage.setItem('parent_portal_student_id', foundStudent.id);
-      localStorage.setItem('parent_portal_unified_no', foundStudent.unifiedNo || foundStudent.rollNo || '');
-      localStorage.setItem('parent_portal_saved_login_input', cleanInput);
-      localStorage.setItem('parent_portal_auto_login', rememberMe ? 'true' : 'false');
-      setLoginError('');
-    } else {
-      setLoginError(`لم يتم العثور على طالب مسجل بالرقم الموحد (${cleanInput}). يرجى التحقق من الرقم الموحد الخاص بالطالب في المدرسة.`);
+    try {
+      // 1. First priority: look up student in the current in-memory students list
+      let foundStudent = findStudentByUnifiedInput(cleanInput, students);
+
+      // 2. Second priority: If not found, immediately pull fresh data from Firestore cloud database
+      if (!foundStudent) {
+        await forceRefreshDataFromFirestore();
+        const latestStudentsRaw = localStorage.getItem('school_students');
+        if (latestStudentsRaw) {
+          try {
+            const parsed = JSON.parse(latestStudentsRaw);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              foundStudent = findStudentByUnifiedInput(cleanInput, parsed);
+            }
+          } catch {}
+        }
+      }
+
+      // 3. Third priority: Check sent grade sheets archive for this student
+      if (!foundStudent) {
+        const sentSheetsRaw = localStorage.getItem('school_sent_grade_sheets');
+        if (sentSheetsRaw) {
+          try {
+            const parsedSheets = JSON.parse(sentSheetsRaw);
+            if (Array.isArray(parsedSheets)) {
+              for (const sh of parsedSheets) {
+                if (Array.isArray(sh.studentsSummary)) {
+                  const match = sh.studentsSummary.find((sum: any) =>
+                    (sum.unifiedNo && String(sum.unifiedNo).trim() === cleanInput) ||
+                    (sum.rollNo && String(sum.rollNo).trim() === cleanInput) ||
+                    (sum.studentName && sum.studentName.trim().toLowerCase() === cleanInput.toLowerCase())
+                  );
+                  if (match) {
+                    foundStudent = {
+                      id: match.studentId || ('s_' + (match.unifiedNo || cleanInput)),
+                      name: match.studentName,
+                      classId: sh.classId || 'class-auto',
+                      parentId: 'p_' + (match.studentId || cleanInput),
+                      rollNo: match.rollNo || match.unifiedNo || cleanInput,
+                      unifiedNo: match.unifiedNo || match.rollNo || cleanInput,
+                      gender: 'male',
+                      dob: '2015-01-01',
+                      parentName: match.parentName || `ولي أمر ${match.studentName}`,
+                      parentPhone: match.parentPhone || ''
+                    };
+                    break;
+                  }
+                }
+              }
+            }
+          } catch {}
+        }
+      }
+
+      if (foundStudent) {
+        setLoggedInStudentId(foundStudent.id);
+        localStorage.setItem('parent_portal_student_id', foundStudent.id);
+        localStorage.setItem('parent_portal_unified_no', foundStudent.unifiedNo || foundStudent.rollNo || '');
+        localStorage.setItem('parent_portal_saved_login_input', cleanInput);
+        localStorage.setItem('parent_portal_auto_login', rememberMe ? 'true' : 'false');
+        setLoginError('');
+      } else {
+        setLoginError(
+          `لم يتم العثور على طالب مسجل بالرقم الموحد (${cleanInput}).\n` +
+          `تمت مزامنة قاعدة البيانات السحابية الحية ولم يتم العثور على هذا الرقم. يرجى التأكد من الرقم الموحد المسجل لدى إدارة المدرسة.`
+        );
+      }
+    } catch (err) {
+      console.error('Error during parent login:', err);
+      const fallback = findStudentByUnifiedInput(cleanInput, students);
+      if (fallback) {
+        setLoggedInStudentId(fallback.id);
+        localStorage.setItem('parent_portal_student_id', fallback.id);
+        localStorage.setItem('parent_portal_unified_no', fallback.unifiedNo || fallback.rollNo || '');
+      } else {
+        setLoginError(`تعذر التحقق من الرقم الموحد (${cleanInput}). يرجى التأكد من اتصال الإنترنت والمحاولة مجدداً.`);
+      }
+    } finally {
+      setIsLoggingIn(false);
     }
   };
 
@@ -2445,18 +2573,51 @@ export default function ParentPortal({
             </div>
 
             {loginError && (
-              <p className="text-rose-600 text-xs font-bold text-center bg-rose-50 p-3 rounded-xl border border-rose-200 leading-relaxed">
+              <p className="text-rose-600 text-xs font-bold text-center bg-rose-50 p-3 rounded-xl border border-rose-200 leading-relaxed whitespace-pre-line">
                 ⚠️ {loginError}
               </p>
             )}
 
             <button
               type="submit"
-              className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold py-3.5 rounded-xl transition cursor-pointer text-xs shadow-md shadow-indigo-100 flex items-center justify-center gap-2"
+              disabled={isLoggingIn}
+              className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white font-extrabold py-3.5 rounded-xl transition cursor-pointer text-xs shadow-md shadow-indigo-100 flex items-center justify-center gap-2"
             >
-              <span>فتح ملف الطالب بالرقم الموحد</span>
-              <UserCheck className="w-4 h-4" />
+              {isLoggingIn ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  <span>جارٍ التحقق والمزامنة مع السحابة...</span>
+                </>
+              ) : (
+                <>
+                  <span>فتح ملف الطالب بالرقم الموحد</span>
+                  <UserCheck className="w-4 h-4" />
+                </>
+              )}
             </button>
+
+            <div className="flex items-center justify-center pt-1">
+              <button
+                type="button"
+                disabled={isLoggingIn}
+                onClick={async () => {
+                  setIsLoggingIn(true);
+                  setLoginError('');
+                  try {
+                    await forceRefreshDataFromFirestore();
+                    setLoginError('✅ تمت مزامنة قاعدة البيانات السحابية بنجاح! يمكنك الآن تجربة إدخال الرقم الموحد.');
+                  } catch {
+                    setLoginError('⚠️ تعذر الاتصال بالسحابة مؤقتاً، يرجى المحاولة بعد قليل.');
+                  } finally {
+                    setIsLoggingIn(false);
+                  }
+                }}
+                className="text-[11px] text-slate-500 hover:text-indigo-600 transition flex items-center gap-1.5 cursor-pointer underline decoration-dotted disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3 h-3 text-indigo-500 ${isLoggingIn ? 'animate-spin' : ''}`} />
+                <span>تحديث ومزامنة بيانات الطلاب من السحابة الآن</span>
+              </button>
+            </div>
           </form>
 
           <div className="border-t border-slate-100 pt-3 text-center space-y-2">
@@ -2564,15 +2725,27 @@ export default function ParentPortal({
                 )}
               </div>
 
-              <button
-                type="button"
-                onClick={handleLogout}
-                className="w-full bg-slate-800 hover:bg-rose-900/80 hover:border-rose-700/80 border border-slate-700 text-slate-200 hover:text-white font-bold text-[10px] py-2 px-3 rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5 shadow-xs"
-                title="الخروج وإدخال رقم موحد لطالب آخر"
-              >
-                <ArrowLeftRight className="w-3.5 h-3.5 text-indigo-400" />
-                <span>تغيير الطالب (رقم موحد آخر)</span>
-              </button>
+              <div className="space-y-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setShowSmartLinkModal(true)}
+                  className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-black text-[11px] py-2 px-3 rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5 shadow-sm"
+                  title="إنشاء ومشاركة الرابط الذكي المباشر لملف هذا الطالب"
+                >
+                  <Link className="w-3.5 h-3.5 text-emerald-100" />
+                  <span>الرابط الذكي لملف الطالب 🔗</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  className="w-full bg-slate-800 hover:bg-rose-900/80 hover:border-rose-700/80 border border-slate-700 text-slate-200 hover:text-white font-bold text-[10px] py-2 px-3 rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5 shadow-xs"
+                  title="الخروج وإدخال رقم موحد لطالب آخر"
+                >
+                  <ArrowLeftRight className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>تغيير الطالب (رقم موحد آخر)</span>
+                </button>
+              </div>
             </div>
 
             <nav className="space-y-1">
@@ -2793,6 +2966,17 @@ export default function ParentPortal({
                   #{activeChild?.unifiedNo || activeChild?.rollNo}
                 </div>
               </div>
+
+              {/* زر الرابط الذكي المباشر لولي الأمر */}
+              <button
+                type="button"
+                onClick={() => setShowSmartLinkModal(true)}
+                className="bg-emerald-600 hover:bg-emerald-700 text-white border border-emerald-500 p-2.5 px-3.5 rounded-2xl text-xs font-black transition flex items-center gap-2 cursor-pointer shadow-sm shrink-0"
+                title="إنشاء ومشاركة الرابط الذكي المباشر لملف هذا الطالب"
+              >
+                <Link className="w-4 h-4 text-emerald-100" />
+                <span>الرابط الذكي 🔗</span>
+              </button>
 
               {activeChildTeacher && (
                 <div className="p-2.5 px-3 bg-slate-50 rounded-2xl border border-slate-200/80 text-xs shrink-0 text-right">
@@ -4507,6 +4691,155 @@ export default function ParentPortal({
                 >
                   <Send className="w-3.5 h-3.5" />
                   <span>الرد على هذه الرسالة</span>
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {/* Smart Link Direct Access Modal */}
+        {showSmartLinkModal && activeChild && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 15 }}
+              className="bg-white rounded-3xl shadow-2xl border border-slate-200 w-full max-w-lg overflow-hidden text-right max-h-[92vh] flex flex-col"
+              style={{ direction: 'rtl' }}
+            >
+              {/* Header */}
+              <div className="bg-gradient-to-l from-emerald-800 via-teal-900 to-indigo-950 p-5 text-white flex items-center justify-between shrink-0">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-2xl bg-emerald-500/20 border border-emerald-400/30 flex items-center justify-center text-emerald-300">
+                    <Link className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <span className="text-[10px] font-bold text-emerald-300 block">
+                      🔗 خاصية الدخول المباشر الفوري
+                    </span>
+                    <h3 className="font-extrabold text-base text-white">
+                      الرابط الذكي لملف الطالب
+                    </h3>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowSmartLinkModal(false)}
+                  className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 text-slate-300 hover:text-white flex items-center justify-center transition cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Scrollable Content */}
+              <div className="p-5 sm:p-6 space-y-4 overflow-y-auto">
+                {/* Student Info Card */}
+                <div className="bg-gradient-to-br from-emerald-50 via-teal-50/50 to-indigo-50 border border-emerald-200/80 rounded-2xl p-4 flex items-center justify-between">
+                  <div className="space-y-1">
+                    <span className="text-[10px] font-bold text-emerald-700 block">الطالب المستهدف:</span>
+                    <h4 className="text-base font-black text-slate-900">{activeChild.name}</h4>
+                    <p className="text-xs text-slate-600 font-medium">
+                      الصف: <strong className="text-indigo-700">{activeChildClass?.name || 'الصف الدراسي'}</strong>
+                    </p>
+                  </div>
+                  <div className="text-center bg-white px-3 py-2 rounded-xl border border-emerald-200 shadow-2xs">
+                    <span className="text-[9px] font-bold text-slate-400 block">الرقم الموحد</span>
+                    <span className="text-base font-black font-mono text-emerald-700">
+                      #{activeChild.unifiedNo || activeChild.rollNo}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Direct URL Input & Copy Button */}
+                <div className="space-y-2">
+                  <label className="block text-xs font-bold text-slate-700">
+                    رابط الدخول المباشر (جاهز للنقر والفتح فوراً):
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      readOnly
+                      value={getDirectSmartLink(activeChild)}
+                      className="w-full text-xs font-mono bg-slate-50 border border-slate-300 px-3 py-2.5 rounded-xl text-slate-700 select-all focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleCopySmartLink(getDirectSmartLink(activeChild))}
+                      className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2.5 rounded-xl text-xs font-extrabold transition flex items-center gap-1.5 shrink-0 cursor-pointer shadow-xs"
+                    >
+                      {smartLinkCopied ? (
+                        <>
+                          <Check className="w-4 h-4 text-emerald-300" />
+                          <span>تم النسخ! ✓</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-4 h-4" />
+                          <span>نسخ</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                  {smartLinkCopied && (
+                    <p className="text-[11px] text-emerald-600 font-bold">
+                      ✓ تم نسخ الرابط الذكي بنجاح إلى الحافظة! يمكنك الآن لصقه ومشاركته.
+                    </p>
+                  )}
+                </div>
+
+                {/* WhatsApp Direct Share Button */}
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => handleShareSmartLinkWhatsApp(activeChild, getDirectSmartLink(activeChild))}
+                    className="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-3 px-4 rounded-xl text-xs font-extrabold transition flex items-center justify-center gap-2 cursor-pointer shadow-sm"
+                  >
+                    <Share2 className="w-4 h-4" />
+                    <span>مشاركة الرابط الذكي مباشرة عبر واتساب 📲</span>
+                  </button>
+                </div>
+
+                {/* QR Code Section */}
+                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 text-center space-y-3">
+                  <div className="flex items-center justify-center gap-1.5 text-xs font-extrabold text-slate-700">
+                    <QrCode className="w-4 h-4 text-indigo-600" />
+                    <span>رمز الاستجابة السريعة (QR Code) للمسح بكاميرا الهاتف</span>
+                  </div>
+                  <div className="inline-block p-3 bg-white rounded-2xl border border-slate-200 shadow-xs">
+                    <img
+                      src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(getDirectSmartLink(activeChild))}`}
+                      alt="QR Code"
+                      className="w-40 h-40 mx-auto"
+                    />
+                  </div>
+                  <p className="text-[11px] text-slate-500 font-medium">
+                    امسح هذا الرمز بكاميرا أي هاتف محمول لفتح ملف الطالب فورياً دون كتابة الرقم الموحد.
+                  </p>
+                </div>
+
+                {/* Explanatory Info Card */}
+                <div className="bg-indigo-50/70 border border-indigo-100 rounded-2xl p-3.5 space-y-1.5 text-xs text-indigo-950 font-medium leading-relaxed">
+                  <div className="font-extrabold text-indigo-900 flex items-center gap-1.5">
+                    <Sparkles className="w-4 h-4 text-amber-500" />
+                    <span>كيفية استخدام الرابط الذكي:</span>
+                  </div>
+                  <ul className="list-disc list-inside space-y-1 text-[11px] text-slate-700">
+                    <li>يحتوي الرابط الذكي على الرقم الموحد للطالب تلقائياً، فلا يطلب المتصفح إدخال أي رقم.</li>
+                    <li>يمكن لولي الأمر حفظ الصفحة في المفضلة (Bookmarks) للرجوع إليها بلمسة واحدة.</li>
+                    <li>يمكن تثبيته كأيقونة على شاشة الهاتف الرئيسية عبر خيار "إضافة إلى الشاشة الرئيسية".</li>
+                  </ul>
+                </div>
+              </div>
+
+              {/* Footer */}
+              <div className="p-4 bg-slate-50 border-t border-slate-100 flex items-center justify-between shrink-0">
+                <span className="text-[10px] text-slate-400">المدرسة الدولية الخاصة - مدينة مارع</span>
+                <button
+                  type="button"
+                  onClick={() => setShowSmartLinkModal(false)}
+                  className="px-5 py-2 bg-slate-200 hover:bg-slate-300 text-slate-800 text-xs font-bold rounded-xl transition cursor-pointer"
+                >
+                  إغلاق
                 </button>
               </div>
             </motion.div>
