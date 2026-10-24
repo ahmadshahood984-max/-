@@ -39,6 +39,7 @@ const SYNC_KEYS = [
 
 let isRemoteSyncing = false;
 const initialLoadCompletedKeys = new Set<string>();
+const localUpdateTimestamps = new Map<string, number>();
 
 // Custom event name
 export const STORAGE_UPDATE_EVENT = 'school_storage_update';
@@ -79,12 +80,26 @@ function broadcastLocalUpdate(key: string, value: string) {
 }
 
 /**
+ * Checks whether a given payload is considered empty (null, undefined, empty array, or empty object)
+ */
+function isDataEmpty(val: any): boolean {
+  if (val === null || val === undefined) return true;
+  if (Array.isArray(val)) return val.length === 0;
+  if (typeof val === 'object') return Object.keys(val).length === 0;
+  if (typeof val === 'string') return val.trim() === '' || val === '[]' || val === '{}';
+  return false;
+}
+
+/**
  * Directly writes and persists data to both Firestore and localStorage immediately
  * Guarantees data remains saved even after closing the application, and broadcasts to all clients.
  */
 export async function persistDirectToFirestore(key: string, data: any): Promise<boolean> {
   try {
     const valueString = typeof data === 'object' ? JSON.stringify(data) : String(data);
+    const now = Date.now();
+    localUpdateTimestamps.set(key, now);
+
     originalSetItem(key, valueString);
     
     if (typeof window !== 'undefined') {
@@ -96,7 +111,7 @@ export async function persistDirectToFirestore(key: string, data: any): Promise<
 
     if (db) {
       const docRef = doc(db, 'school_live_data', key);
-      await setDoc(docRef, { data, updatedAt: Date.now() }, { merge: true });
+      await setDoc(docRef, { data, updatedAt: now }, { merge: true });
       trackFirestoreWrite(1);
       initialLoadCompletedKeys.add(key);
     }
@@ -137,7 +152,7 @@ export async function persistGradeReportBatchDirect({
 
 /**
  * High-speed parallel force refresh from Firestore.
- * Retrieves all keys concurrently in < 300ms instead of sequential 4s delay.
+ * Retrieves all keys concurrently with anti-wipe protection.
  */
 export async function forceRefreshDataFromFirestore(): Promise<boolean> {
   if (!db) return false;
@@ -154,20 +169,46 @@ export async function forceRefreshDataFromFirestore(): Promise<boolean> {
             if (key === 'school_students' && Array.isArray(payload)) {
               payload = sanitizeAndDeduplicateStudents(payload);
             }
+
+            // Anti-wipe safeguard: Never overwrite valid local non-empty data with an empty remote document!
+            const localVal = localStorage.getItem(key);
+            let localHasRealData = false;
+            let localParsed: any = null;
+            if (localVal) {
+              try {
+                localParsed = JSON.parse(localVal);
+                if (!isDataEmpty(localParsed)) {
+                  localHasRealData = true;
+                }
+              } catch {
+                if (localVal.trim().length > 0) localHasRealData = true;
+              }
+            }
+
+            if (isDataEmpty(payload) && localHasRealData) {
+              console.warn(`[Fast Sync] Protected local key ${key} from being wiped out by empty remote. Re-seeding remote...`);
+              await setDoc(docRef, { data: localParsed ?? localVal, updatedAt: Date.now() }, { merge: true });
+              initialLoadCompletedKeys.add(key);
+              return;
+            }
+
             const valueString = typeof payload === 'object' 
               ? JSON.stringify(payload) 
               : String(payload);
             
-            isRemoteSyncing = true;
-            originalSetItem(key, valueString);
-            isRemoteSyncing = false;
+            if (localVal !== valueString) {
+              isRemoteSyncing = true;
+              originalSetItem(key, valueString);
+              isRemoteSyncing = false;
 
-            if (typeof window !== 'undefined') {
-              window.dispatchEvent(new CustomEvent(STORAGE_UPDATE_EVENT, {
-                detail: { key, value: valueString }
-              }));
-              broadcastLocalUpdate(key, valueString);
+              if (typeof window !== 'undefined') {
+                window.dispatchEvent(new CustomEvent(STORAGE_UPDATE_EVENT, {
+                  detail: { key, value: valueString }
+                }));
+                broadcastLocalUpdate(key, valueString);
+              }
             }
+            initialLoadCompletedKeys.add(key);
           }
         }
       } catch (keyErr) {
@@ -184,7 +225,7 @@ export async function forceRefreshDataFromFirestore(): Promise<boolean> {
 }
 
 export function setupFirebaseSync() {
-  console.log('Initializing Firebase real-time database synchronization with high-speed listeners...');
+  console.log('Initializing Firebase real-time database synchronization with anti-wipe protection...');
 
   // 1. Intercept localStorage.setItem
   localStorage.setItem = (key: string, value: string) => {
@@ -192,16 +233,24 @@ export function setupFirebaseSync() {
     originalSetItem(key, value);
 
     if (SYNC_KEYS.includes(key) && !isRemoteSyncing) {
-      if (!initialLoadCompletedKeys.has(key)) {
-        // Prevent overwriting remote data with local defaults during startup
-        console.log(`[Firestore Sync] Skipping write for ${key} because initial remote load is not yet complete.`);
+      const now = Date.now();
+      localUpdateTimestamps.set(key, now);
+
+      // CRITICAL SAFEGUARD:
+      // If the value being written is empty ("[]", "{}", "") and initial remote load hasn't arrived yet,
+      // DO NOT push empty defaults to Firestore! This completely prevents uninitialized browser tabs
+      // from zeroing the database.
+      if (!initialLoadCompletedKeys.has(key) && (value === '[]' || value === '{}' || value.trim() === '')) {
+        console.log(`[Firestore Sync] Safeguard: Skipping push of empty default for ${key} during startup.`);
         return;
       }
+
       if (prevValue === value) {
-        // Skip redundant updates to conserve Firestore write quotas
+        // Redundant write, skip network call
         return;
       }
-      // Sync to Firestore in background
+
+      // Sync immediately to Firestore with merge: true and updatedAt timestamp
       try {
         let parsedData;
         try {
@@ -210,12 +259,18 @@ export function setupFirebaseSync() {
           parsedData = value;
         }
 
-        const docRef = doc(db, 'school_live_data', key);
-        setDoc(docRef, { data: parsedData, updatedAt: Date.now() }).then(() => {
-          trackFirestoreWrite(1);
-        }).catch(err => {
-          console.error(`Error writing key ${key} to Firestore:`, err);
-        });
+        if (db) {
+          const docRef = doc(db, 'school_live_data', key);
+          setDoc(docRef, { data: parsedData, updatedAt: now }, { merge: true }).then(() => {
+            trackFirestoreWrite(1);
+            initialLoadCompletedKeys.add(key);
+          }).catch(err => {
+            console.error(`Error writing key ${key} to Firestore:`, err);
+          });
+        }
+
+        // Broadcast to other tabs on the same device immediately
+        broadcastLocalUpdate(key, value);
       } catch (err) {
         console.error(`Error preparing write for key ${key} to Firestore:`, err);
       }
@@ -239,18 +294,60 @@ export function setupFirebaseSync() {
           if (key === 'school_students' && Array.isArray(payload)) {
             payload = sanitizeAndDeduplicateStudents(payload);
           }
+
+          const remoteUpdatedAt = Number(docData.updatedAt) || 0;
+          const localUpdatedAt = localUpdateTimestamps.get(key) || 0;
+
+          // SAFEGUARD 1: If user recently edited this key locally (< 20s ago) and local is newer than snapshot,
+          // DO NOT let the slower incoming snapshot overwrite the fresh local data!
+          if (localUpdatedAt > remoteUpdatedAt && (Date.now() - localUpdatedAt < 20000)) {
+            console.log(`[Firestore Sync] Protected local edit for ${key} (local is newer than snapshot). Re-pushing...`);
+            const currentLocal = localStorage.getItem(key);
+            if (currentLocal && db) {
+              try {
+                const parsed = JSON.parse(currentLocal);
+                setDoc(docRef, { data: parsed, updatedAt: localUpdatedAt }, { merge: true });
+              } catch {}
+            }
+            initialLoadCompletedKeys.add(key);
+            return;
+          }
+
+          // SAFEGUARD 2: Anti-wipe. If remote snapshot contains empty data (e.g. wiped [] or null),
+          // but local storage currently has real, populated data (e.g. 181 students, existing classes),
+          // NEVER wipe out the local data! Instead, repair Firestore by sending the local data.
+          const localVal = localStorage.getItem(key);
+          let localHasRealData = false;
+          let localParsed: any = null;
+          if (localVal) {
+            try {
+              localParsed = JSON.parse(localVal);
+              if (!isDataEmpty(localParsed)) {
+                localHasRealData = true;
+              }
+            } catch {
+              if (localVal.trim().length > 0) localHasRealData = true;
+            }
+          }
+
+          if (isDataEmpty(payload) && localHasRealData) {
+            console.warn(`[Firestore Sync] Prevented wiping populated local data for ${key} with empty remote snapshot! Re-saving local data to Firestore...`);
+            setDoc(docRef, { data: localParsed ?? localVal, updatedAt: Date.now() }, { merge: true });
+            initialLoadCompletedKeys.add(key);
+            return;
+          }
+
           const valueString = typeof payload === 'object' 
             ? JSON.stringify(payload) 
             : String(payload);
           
-          const localVal = localStorage.getItem(key);
           if (localVal !== valueString) {
             console.log(`[Firestore Sync] Key ${key} updated from remote database.`);
             
             isRemoteSyncing = true;
             originalSetItem(key, valueString);
             isRemoteSyncing = false;
- 
+
             // Dispatch custom window event so React states can react
             window.dispatchEvent(new CustomEvent(STORAGE_UPDATE_EVENT, {
               detail: { key, value: valueString }
@@ -261,10 +358,10 @@ export function setupFirebaseSync() {
         // Mark as completed so subsequent local updates can sync to remote
         initialLoadCompletedKeys.add(key);
       } else {
-        // Document does not exist yet in Firestore (e.g. database newly created).
-        // Let's seed it with whatever is currently in local storage (or initial data)!
+        // Document does not exist yet in Firestore.
+        // Seed it with whatever is currently in local storage if not empty!
         const localVal = localStorage.getItem(key);
-        if (localVal) {
+        if (localVal && !isDataEmpty(localVal)) {
           try {
             let parsedData;
             try {
@@ -272,31 +369,28 @@ export function setupFirebaseSync() {
             } catch {
               parsedData = localVal;
             }
-            isRemoteSyncing = true;
-            setDoc(docRef, { data: parsedData, updatedAt: Date.now() }).then(() => {
-              trackFirestoreWrite(1);
-            }).finally(() => {
-              isRemoteSyncing = false;
-              // Mark as completed even on seeding
-              initialLoadCompletedKeys.add(key);
-            });
+            if (!isDataEmpty(parsedData)) {
+              isRemoteSyncing = true;
+              setDoc(docRef, { data: parsedData, updatedAt: Date.now() }, { merge: true }).then(() => {
+                trackFirestoreWrite(1);
+              }).finally(() => {
+                isRemoteSyncing = false;
+                initialLoadCompletedKeys.add(key);
+              });
+              return;
+            }
           } catch (e) {
             console.error(`Error seeding key ${key}:`, e);
-            initialLoadCompletedKeys.add(key);
           }
-        } else {
-          // No local value either, just mark as complete
-          initialLoadCompletedKeys.add(key);
         }
+        initialLoadCompletedKeys.add(key);
       }
     }, (error) => {
-      // Graceful fallback if transient connection issues occur
       if (error && error.code === 'unavailable') {
         console.warn(`[Firestore Sync] Key ${key} operating in offline cache mode.`);
       } else {
         console.warn(`[Firestore Sync] Key ${key} listener notice:`, error?.message || error);
       }
-      // Fallback: allow local writes to proceed so user workflow is never blocked
       initialLoadCompletedKeys.add(key);
     });
   });

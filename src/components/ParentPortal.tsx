@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Heart, 
   Award, 
@@ -168,15 +168,52 @@ export default function ParentPortal({
   const [studentRollInput, setStudentRollInput] = useState('');
   const [loginError, setLoginError] = useState('');
 
-  // Active student strictly matching the logged in student ID or unified number
-  const activeStudentObj = findStudentByUnifiedInput(loggedInStudentId, students) || 
+  // Active student object cached directly to guarantee instant opening on any browser/phone
+  const [activeDirectStudent, setActiveDirectStudent] = useState<Student | null>(() => {
+    try {
+      const saved = localStorage.getItem('parent_portal_active_student_obj');
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  // Active student strictly matching the logged in student ID or unified number across all sources
+  const activeStudentObj: Student | undefined = 
+    findStudentByUnifiedInput(loggedInStudentId, students) || 
+    (activeDirectStudent && (
+      !loggedInStudentId ||
+      activeDirectStudent.id === loggedInStudentId || 
+      (activeDirectStudent.unifiedNo && String(activeDirectStudent.unifiedNo).trim() === loggedInStudentId.trim()) ||
+      (activeDirectStudent.rollNo && String(activeDirectStudent.rollNo).trim() === loggedInStudentId.trim())
+    ) ? activeDirectStudent : undefined) ||
+    (() => {
+      try {
+        const raw = localStorage.getItem('school_students');
+        if (raw) {
+          const list = JSON.parse(raw);
+          if (Array.isArray(list) && list.length > 0) {
+            return findStudentByUnifiedInput(loggedInStudentId, list);
+          }
+        }
+      } catch {}
+      return undefined;
+    })() ||
     students.find(s => 
       s.id === loggedInStudentId || 
       (s.unifiedNo && String(s.unifiedNo).trim() === loggedInStudentId.trim()) ||
       (s.rollNo && String(s.rollNo).trim() === loggedInStudentId.trim())
     );
+
   const selectedParentId = activeStudentObj ? activeStudentObj.parentId : '';
-  const activeParent = parents.find(p => p.id === selectedParentId);
+  const activeParent = parents.find(p => p.id === selectedParentId) || 
+    (activeStudentObj?.parentName ? {
+      id: selectedParentId || 'p_auto',
+      name: activeStudentObj.parentName,
+      phone: activeStudentObj.parentPhone || '',
+      email: '',
+      childrenIds: [activeStudentObj.id]
+    } : undefined);
 
   // Single active student (strictly one child matching the unified number)
   const activeChild = activeStudentObj;
@@ -318,6 +355,27 @@ export default function ParentPortal({
       }
     };
     window.addEventListener('school_storage_update', handleStorageUpdate);
+
+    // Direct Firestore fetch on mount to ensure fresh certified sheets appear on any device
+    (async () => {
+      try {
+        const { doc, getDoc } = await import('firebase/firestore');
+        const { db } = await import('../lib/firebase');
+        if (db) {
+          const sentSnap = await getDoc(doc(db, 'school_live_data', 'school_sent_grade_sheets'));
+          if (sentSnap.exists()) {
+            const data = sentSnap.data()?.data;
+            if (Array.isArray(data) && data.length > 0) {
+              setSentGradeSheets(deduplicateGradeSheets(data));
+              localStorage.setItem('school_sent_grade_sheets', JSON.stringify(data));
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('Error fetching sent grade sheets from Firestore on mount:', err);
+      }
+    })();
+
     return () => window.removeEventListener('school_storage_update', handleStorageUpdate);
   }, []);
 
@@ -510,9 +568,7 @@ ${url}
 
   // Automatic login on mount and student ID validation for seamless direct access
   React.useEffect(() => {
-    if (!students || students.length === 0) return;
-
-    // 1. First priority: Check URL query parameter (e.g. ?portal=parent&unified=181 or ?unified=181)
+    // 1. Check URL query parameters (e.g. ?portal=parent&unified=181 or ?unified=181)
     let urlParamVal: string | null = null;
     try {
       if (typeof window !== 'undefined') {
@@ -521,46 +577,69 @@ ${url}
       }
     } catch {}
 
-    if (urlParamVal) {
-      const matchFromUrl = findStudentByUnifiedInput(urlParamVal, students);
-      if (matchFromUrl) {
-        setLoggedInStudentId(matchFromUrl.id);
-        localStorage.setItem('parent_portal_student_id', matchFromUrl.id);
-        localStorage.setItem('parent_portal_unified_no', matchFromUrl.unifiedNo || matchFromUrl.rollNo || '');
-        localStorage.setItem('parent_portal_saved_login_input', urlParamVal.trim());
-        localStorage.setItem('parent_portal_auto_login', 'true');
-        return;
-      }
-    }
+    const targetInput = urlParamVal?.trim() || loggedInStudentId?.trim() || localStorage.getItem('parent_portal_saved_login_input')?.trim() || localStorage.getItem('parent_portal_unified_no')?.trim();
 
-    // 2. Second priority: If loggedInStudentId is already set, resolve it using findStudentByUnifiedInput
-    if (loggedInStudentId) {
-      const validStudent = findStudentByUnifiedInput(loggedInStudentId, students);
-      if (validStudent) {
-        if (loggedInStudentId !== validStudent.id) {
-          setLoggedInStudentId(validStudent.id);
+    if (!targetInput) return;
+
+    // A. Match from in-memory students prop
+    let match = findStudentByUnifiedInput(targetInput, students);
+
+    // B. Match from localStorage if available
+    if (!match) {
+      try {
+        const raw = localStorage.getItem('school_students');
+        if (raw) {
+          const list = JSON.parse(raw);
+          if (Array.isArray(list)) {
+            match = findStudentByUnifiedInput(targetInput, list);
+          }
         }
-        localStorage.setItem('parent_portal_student_id', validStudent.id);
-        localStorage.setItem('parent_portal_unified_no', validStudent.unifiedNo || validStudent.rollNo || '');
-        return;
-      }
+      } catch {}
     }
 
-    // 3. Third priority: Try saved unified number, saved student ID, or saved login input from localStorage
-    const savedUnifiedNo = localStorage.getItem('parent_portal_unified_no');
-    const savedStudentId = localStorage.getItem('parent_portal_student_id');
-    const savedInput = localStorage.getItem('parent_portal_saved_login_input');
-
-    const targetStudent = (savedUnifiedNo && findStudentByUnifiedInput(savedUnifiedNo, students)) ||
-                          (savedStudentId && findStudentByUnifiedInput(savedStudentId, students)) ||
-                          (savedInput && findStudentByUnifiedInput(savedInput, students));
-
-    if (targetStudent) {
-      setLoggedInStudentId(targetStudent.id);
-      localStorage.setItem('parent_portal_student_id', targetStudent.id);
-      localStorage.setItem('parent_portal_unified_no', targetStudent.unifiedNo || targetStudent.rollNo || '');
+    // C. If found locally, immediately set active direct student and ID
+    if (match) {
+      setActiveDirectStudent(match);
+      setLoggedInStudentId(match.id);
+      localStorage.setItem('parent_portal_student_id', match.id);
+      localStorage.setItem('parent_portal_unified_no', match.unifiedNo || match.rollNo || '');
+      localStorage.setItem('parent_portal_active_student_obj', JSON.stringify(match));
+      localStorage.setItem('parent_portal_saved_login_input', targetInput);
+      localStorage.setItem('parent_portal_auto_login', 'true');
       return;
     }
+
+    // D. If not found locally (fresh browser/phone session), immediately query Firestore cloud directly in the background
+    (async () => {
+      try {
+        const { doc, getDoc } = await import('firebase/firestore');
+        const { db } = await import('../lib/firebase');
+        if (db) {
+          const snap = await getDoc(doc(db, 'school_live_data', 'school_students'));
+          if (snap.exists()) {
+            const allSt = snap.data()?.data;
+            if (Array.isArray(allSt)) {
+              const remoteMatch = findStudentByUnifiedInput(targetInput, allSt);
+              if (remoteMatch) {
+                setActiveDirectStudent(remoteMatch);
+                setLoggedInStudentId(remoteMatch.id);
+                localStorage.setItem('parent_portal_student_id', remoteMatch.id);
+                localStorage.setItem('parent_portal_unified_no', remoteMatch.unifiedNo || remoteMatch.rollNo || '');
+                localStorage.setItem('parent_portal_active_student_obj', JSON.stringify(remoteMatch));
+                localStorage.setItem('parent_portal_saved_login_input', targetInput);
+                localStorage.setItem('parent_portal_auto_login', 'true');
+                localStorage.setItem('school_students', JSON.stringify(allSt));
+                window.dispatchEvent(new CustomEvent('school_storage_update', {
+                  detail: { key: 'school_students', value: JSON.stringify(allSt) }
+                }));
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('Auto URL student resolve from Firestore error:', err);
+      }
+    })();
   }, [students, loggedInStudentId]);
 
   // --- Web Audio Synthesized Chime (Professional Smartphone Ringtone) ---
@@ -1210,11 +1289,12 @@ ${url}
     };
   }, [messages]);
 
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const cleanInput = studentRollInput.trim();
+  const executeStudentLogin = async (rawInput: string, isAuto: boolean = false) => {
+    const cleanInput = rawInput.trim();
     if (!cleanInput) {
-      setLoginError('يرجى إدخال الرقم الموحد المخصص للطالب أولاً');
+      if (!isAuto) {
+        setLoginError('يرجى إدخال الرقم الموحد المخصص للطالب أولاً');
+      }
       return;
     }
 
@@ -1222,12 +1302,11 @@ ${url}
     setLoginError('');
 
     try {
-      // 1. First priority: look up student in the current in-memory students list
+      // 1. Look up student in in-memory students list
       let foundStudent = findStudentByUnifiedInput(cleanInput, students);
 
-      // 2. Second priority: If not found, immediately pull fresh data from Firestore cloud database
+      // 2. Look up in localStorage school_students
       if (!foundStudent) {
-        await forceRefreshDataFromFirestore();
         const latestStudentsRaw = localStorage.getItem('school_students');
         if (latestStudentsRaw) {
           try {
@@ -1239,7 +1318,21 @@ ${url}
         }
       }
 
-      // 3. Third priority: Check sent grade sheets archive for this student
+      // 3. If not found locally, query Firestore cloud database directly
+      if (!foundStudent) {
+        await forceRefreshDataFromFirestore();
+        const freshRaw = localStorage.getItem('school_students');
+        if (freshRaw) {
+          try {
+            const parsed = JSON.parse(freshRaw);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              foundStudent = findStudentByUnifiedInput(cleanInput, parsed);
+            }
+          } catch {}
+        }
+      }
+
+      // 4. Check sent grade sheets archive for this student
       if (!foundStudent) {
         const sentSheetsRaw = localStorage.getItem('school_sent_grade_sheets');
         if (sentSheetsRaw) {
@@ -1276,6 +1369,8 @@ ${url}
       }
 
       if (foundStudent) {
+        setActiveDirectStudent(foundStudent);
+        localStorage.setItem('parent_portal_active_student_obj', JSON.stringify(foundStudent));
         setLoggedInStudentId(foundStudent.id);
         localStorage.setItem('parent_portal_student_id', foundStudent.id);
         localStorage.setItem('parent_portal_unified_no', foundStudent.unifiedNo || foundStudent.rollNo || '');
@@ -1283,19 +1378,23 @@ ${url}
         localStorage.setItem('parent_portal_auto_login', rememberMe ? 'true' : 'false');
         setLoginError('');
       } else {
-        setLoginError(
-          `لم يتم العثور على طالب مسجل بالرقم الموحد (${cleanInput}).\n` +
-          `تمت مزامنة قاعدة البيانات السحابية الحية ولم يتم العثور على هذا الرقم. يرجى التأكد من الرقم الموحد المسجل لدى إدارة المدرسة.`
-        );
+        if (!isAuto) {
+          setLoginError(
+            `لم يتم العثور على طالب مسجل بالرقم الموحد (${cleanInput}).\n` +
+            `يرجى التأكد من كتابة الرقم الموحد المخصص للطالب بشكل صحيح كما سُجل لدى إدارة المدرسة.`
+          );
+        }
       }
     } catch (err) {
       console.error('Error during parent login:', err);
       const fallback = findStudentByUnifiedInput(cleanInput, students);
       if (fallback) {
+        setActiveDirectStudent(fallback);
+        localStorage.setItem('parent_portal_active_student_obj', JSON.stringify(fallback));
         setLoggedInStudentId(fallback.id);
         localStorage.setItem('parent_portal_student_id', fallback.id);
         localStorage.setItem('parent_portal_unified_no', fallback.unifiedNo || fallback.rollNo || '');
-      } else {
+      } else if (!isAuto) {
         setLoginError(`تعذر التحقق من الرقم الموحد (${cleanInput}). يرجى التأكد من اتصال الإنترنت والمحاولة مجدداً.`);
       }
     } finally {
@@ -1303,7 +1402,43 @@ ${url}
     }
   };
 
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await executeStudentLogin(studentRollInput, false);
+  };
+
+  // Instant Auto-Login upon entering the unified number
+  useEffect(() => {
+    const raw = studentRollInput.trim();
+    if (!raw) return;
+
+    const digitsOnly = normalizeNumberDigits(raw);
+    if (!digitsOnly) return;
+
+    // Check if there is an exact student match in memory or localStorage
+    const localStudents = students.length > 0 ? students : (() => {
+      try {
+        const saved = localStorage.getItem('school_students');
+        return saved ? JSON.parse(saved) : [];
+      } catch {
+        return [];
+      }
+    })();
+
+    const directMatch = findStudentByUnifiedInput(digitsOnly, localStudents);
+
+    // If an exact match is found locally, log in immediately after a quick 300ms debounce
+    // If not yet in memory, give 650ms debounce to allow user to complete entering the digits
+    const timer = setTimeout(() => {
+      executeStudentLogin(digitsOnly, true);
+    }, directMatch ? 300 : 650);
+
+    return () => clearTimeout(timer);
+  }, [studentRollInput, students]);
+
   const handleLogout = () => {
+    setActiveDirectStudent(null);
+    localStorage.removeItem('parent_portal_active_student_obj');
     setLoggedInStudentId('');
     localStorage.removeItem('parent_portal_student_id');
     localStorage.removeItem('parent_portal_unified_no');
@@ -2549,10 +2684,16 @@ ${url}
               <div className="relative">
                 <input
                   type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  enterKeyHint="go"
                   value={studentRollInput}
-                  onChange={e => setStudentRollInput(e.target.value)}
+                  onChange={e => {
+                    setLoginError('');
+                    setStudentRollInput(e.target.value);
+                  }}
                   placeholder="أدخل الرقم الموحد للطالب هنا..."
-                  className="w-full text-sm border-2 border-indigo-100 focus:border-indigo-600 px-4 py-3 rounded-xl focus:outline-none font-mono text-center font-black bg-slate-50/80 transition"
+                  className="w-full text-base sm:text-sm border-2 border-indigo-100 focus:border-indigo-600 px-4 py-3.5 rounded-xl focus:outline-none font-mono text-center font-black bg-slate-50/80 transition shadow-inner"
                   autoFocus
                 />
               </div>
@@ -2581,12 +2722,12 @@ ${url}
             <button
               type="submit"
               disabled={isLoggingIn}
-              className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white font-extrabold py-3.5 rounded-xl transition cursor-pointer text-xs shadow-md shadow-indigo-100 flex items-center justify-center gap-2"
+              className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-85 text-white font-extrabold py-3.5 rounded-xl transition cursor-pointer text-xs shadow-md shadow-indigo-100 flex items-center justify-center gap-2"
             >
               {isLoggingIn ? (
                 <>
-                  <RefreshCw className="w-4 h-4 animate-spin" />
-                  <span>جارٍ التحقق والمزامنة مع السحابة...</span>
+                  <RefreshCw className="w-4 h-4 animate-spin text-indigo-200" />
+                  <span>جارٍ فتح ملف الطالب تلقائياً...</span>
                 </>
               ) : (
                 <>
@@ -2595,29 +2736,6 @@ ${url}
                 </>
               )}
             </button>
-
-            <div className="flex items-center justify-center pt-1">
-              <button
-                type="button"
-                disabled={isLoggingIn}
-                onClick={async () => {
-                  setIsLoggingIn(true);
-                  setLoginError('');
-                  try {
-                    await forceRefreshDataFromFirestore();
-                    setLoginError('✅ تمت مزامنة قاعدة البيانات السحابية بنجاح! يمكنك الآن تجربة إدخال الرقم الموحد.');
-                  } catch {
-                    setLoginError('⚠️ تعذر الاتصال بالسحابة مؤقتاً، يرجى المحاولة بعد قليل.');
-                  } finally {
-                    setIsLoggingIn(false);
-                  }
-                }}
-                className="text-[11px] text-slate-500 hover:text-indigo-600 transition flex items-center gap-1.5 cursor-pointer underline decoration-dotted disabled:opacity-50"
-              >
-                <RefreshCw className={`w-3 h-3 text-indigo-500 ${isLoggingIn ? 'animate-spin' : ''}`} />
-                <span>تحديث ومزامنة بيانات الطلاب من السحابة الآن</span>
-              </button>
-            </div>
           </form>
 
           <div className="border-t border-slate-100 pt-3 text-center space-y-2">
@@ -3123,21 +3241,58 @@ ${url}
                         const targetMonth = parentSelectedMonth || uniqueGradeMonths[0] || currentEvaluationMonth;
                         const studentGrades = allChildGrades.filter(g => g.examName === targetMonth);
 
+                        // Find any certified sent grade sheet for this target month and this child
+                        const sentSheetForMonth = sentGradeSheets.find(sheet => 
+                          sheet.month === targetMonth && 
+                          sheet.studentsSummary?.some(s => 
+                            s.studentId === selectedChildId || 
+                            (activeChild?.unifiedNo && (String(s.unifiedNo).trim() === String(activeChild.unifiedNo).trim() || String(s.rollNo).trim() === String(activeChild.unifiedNo).trim())) ||
+                            (activeChild?.rollNo && (String(s.rollNo).trim() === String(activeChild.rollNo).trim() || String(s.unifiedNo).trim() === String(activeChild.rollNo).trim())) ||
+                            (activeChild?.name && s.studentName?.trim().toLowerCase() === activeChild.name.trim().toLowerCase())
+                          )
+                        );
+                        const sentStudentSummary = sentSheetForMonth?.studentsSummary?.find(s => 
+                          s.studentId === selectedChildId || 
+                          (activeChild?.unifiedNo && (String(s.unifiedNo).trim() === String(activeChild.unifiedNo).trim() || String(s.rollNo).trim() === String(activeChild.unifiedNo).trim())) ||
+                          (activeChild?.rollNo && (String(s.rollNo).trim() === String(activeChild.rollNo).trim() || String(s.unifiedNo).trim() === String(activeChild.rollNo).trim())) ||
+                          (activeChild?.name && s.studentName?.trim().toLowerCase() === activeChild.name.trim().toLowerCase())
+                        );
+
+                        // If sent sheet contains subjects not in activeSubjects, include them so no grades are hidden
+                        const subjectsFromSent = sentStudentSummary && Array.isArray(sentStudentSummary.scores)
+                          ? sentStudentSummary.scores.map(sc => sc.subject).filter(Boolean)
+                          : [];
+                        const combinedSubjects = Array.from(new Set([...activeSubjects, ...subjectsFromSent]));
+
                         let totalScore = 0;
                         let scoredCount = 0;
-                        const gradeValues = activeSubjects.map(sub => {
+                        const gradeValues = combinedSubjects.map(sub => {
                           const subGrade = studentGrades.find(g => g.subject === sub);
+                          let finalScore: number | null = null;
                           if (subGrade && subGrade.score !== null && subGrade.score !== undefined) {
-                            totalScore += subGrade.score;
+                            finalScore = subGrade.score;
+                          } else if (sentStudentSummary && Array.isArray(sentStudentSummary.scores)) {
+                            const sentSub = sentStudentSummary.scores.find(sc => sc.subject === sub);
+                            if (sentSub && sentSub.score !== null && sentSub.score !== undefined) {
+                              finalScore = sentSub.score;
+                            }
+                          }
+
+                          if (finalScore !== null) {
+                            totalScore += finalScore;
                             scoredCount++;
                           }
                           return {
                             subject: sub,
-                            score: subGrade && subGrade.score !== null && subGrade.score !== undefined ? subGrade.score : null
+                            score: finalScore
                           };
                         });
 
-                        const avg = scoredCount > 0 ? (totalScore / scoredCount).toFixed(1) : null;
+                        const calcAvg = scoredCount > 0 ? (totalScore / scoredCount).toFixed(1) : null;
+                        const avg = calcAvg !== null 
+                          ? calcAvg 
+                          : (sentStudentSummary?.average ? String(sentStudentSummary.average).replace('%', '').trim() : null);
+
                         let estimation = '---';
                         let badgeColor = 'bg-slate-100 text-slate-700';
                         if (avg !== null) {
@@ -3158,6 +3313,8 @@ ${url}
                             estimation = 'ضعيف 🔴';
                             badgeColor = 'bg-rose-50 text-rose-800 border-rose-200';
                           }
+                        } else if (sentStudentSummary?.estimation) {
+                          estimation = sentStudentSummary.estimation;
                         }
 
                         // Evaluation for target month
@@ -3170,7 +3327,7 @@ ${url}
                           monthlyEvaluations[activeChild?.rollNo || ''];
 
                         const teacherMsg = evalForMonth?.teacherText !== undefined ? evalForMonth.teacherText : (evalForMonth?.text || '');
-                        const directorMsg = evalForMonth?.directorText || '';
+                        const directorMsg = evalForMonth?.directorText || sentStudentSummary?.directorNotes || '';
 
                         const schoolLogo = localStorage.getItem('school_logo_image') || schoolAppIcon;
                         const studentPhoto = localStorage.getItem(`student_photo_${selectedChildId}`) || localStorage.getItem(`student_photo_${activeChild?.name}`);
