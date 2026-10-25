@@ -50,6 +50,7 @@ import {
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { Parent, Student, Attendance, Grade, Announcement, Message, AbsenceExcuse, Teacher, Class, SentGradeSheet } from '../types';
+import { INITIAL_STUDENTS, INITIAL_CLASSES, INITIAL_TEACHERS } from '../data';
 import { PortalDesignerBadge } from './PortalDesignerBadge';
 import { GradeSheetSignatures } from './GradeSheetSignatures';
 import { printElementById, downloadElementAsImage, exportElementAsPdf } from '../lib/printUtils';
@@ -83,52 +84,93 @@ export const normalizeNumberDigits = (str: string): string => {
     .trim();
 };
 
-// Helper to find student strictly by Unified Number (or rollNo/ID/Name)
-export const findStudentByUnifiedInput = (input: string | undefined | null, list: Student[]): Student | undefined => {
-  if (!input || !Array.isArray(list) || list.length === 0) return undefined;
+// Helper to find student strictly by Unified Number (or rollNo/ID/nationalId/Name) across all available sources
+export const findStudentByUnifiedInput = (input: string | undefined | null, list?: Student[]): Student | undefined => {
+  if (!input) return undefined;
   const rawClean = String(input).trim();
   if (!rawClean) return undefined;
 
   const normalizedDigits = normalizeNumberDigits(rawClean);
   const numValue = normalizedDigits ? parseInt(normalizedDigits, 10) : NaN;
 
-  // 1. Direct match with student ID (exact match)
-  let match = list.find(s => s.id && s.id.toLowerCase() === rawClean.toLowerCase());
-  if (match) return match;
+  const searchInList = (arr: Student[] | undefined): Student | undefined => {
+    if (!Array.isArray(arr) || arr.length === 0) return undefined;
 
-  // 2. Match by unifiedNo (exact string, normalized digits, or integer value)
-  match = list.find(s => {
-    if (s.unifiedNo === undefined || s.unifiedNo === null) return false;
-    const sStr = String(s.unifiedNo).trim();
-    if (sStr === rawClean) return true;
-    const sDigits = normalizeNumberDigits(sStr);
-    if (normalizedDigits && sDigits === normalizedDigits) return true;
-    const sNum = parseInt(sDigits, 10);
-    if (!isNaN(numValue) && !isNaN(sNum) && sNum === numValue) return true;
-    return false;
-  });
-  if (match) return match;
+    // 1. Direct match with student ID (exact match)
+    let match = arr.find(s => s && s.id && s.id.toLowerCase() === rawClean.toLowerCase());
+    if (match) return match;
 
-  // 3. Match by rollNo
-  match = list.find(s => {
-    if (s.rollNo === undefined || s.rollNo === null) return false;
-    const sStr = String(s.rollNo).trim();
-    if (sStr === rawClean) return true;
-    const sDigits = normalizeNumberDigits(sStr);
-    if (normalizedDigits && sDigits === normalizedDigits) return true;
-    const sNum = parseInt(sDigits, 10);
-    if (!isNaN(numValue) && !isNaN(sNum) && sNum === numValue) return true;
-    return false;
-  });
-  if (match) return match;
+    // 2. Match by unifiedNo (exact string, normalized digits, or integer value)
+    match = arr.find(s => {
+      if (!s || s.unifiedNo === undefined || s.unifiedNo === null) return false;
+      const sStr = String(s.unifiedNo).trim();
+      if (sStr === rawClean) return true;
+      const sDigits = normalizeNumberDigits(sStr);
+      if (normalizedDigits && sDigits === normalizedDigits) return true;
+      const sNum = parseInt(sDigits, 10);
+      if (!isNaN(numValue) && !isNaN(sNum) && sNum === numValue) return true;
+      return false;
+    });
+    if (match) return match;
 
-  // 4. Match by nationalId
-  match = list.find(s => s.nationalId && String(s.nationalId).trim() === rawClean);
-  if (match) return match;
+    // 3. Match by rollNo
+    match = arr.find(s => {
+      if (!s || s.rollNo === undefined || s.rollNo === null) return false;
+      const sStr = String(s.rollNo).trim();
+      if (sStr === rawClean) return true;
+      const sDigits = normalizeNumberDigits(sStr);
+      if (normalizedDigits && sDigits === normalizedDigits) return true;
+      const sNum = parseInt(sDigits, 10);
+      if (!isNaN(numValue) && !isNaN(sNum) && sNum === numValue) return true;
+      return false;
+    });
+    if (match) return match;
 
-  // 5. Match by exact student name (case-insensitive & trimmed)
-  match = list.find(s => s.name && s.name.trim().toLowerCase() === rawClean.toLowerCase());
-  if (match) return match;
+    // 4. Match by nationalId (strip leading punctuation like commas or apostrophes)
+    match = arr.find(s => {
+      if (!s || !s.nationalId) return false;
+      const cleanNat = String(s.nationalId).replace(/^[,'’]/, '').trim();
+      if (cleanNat === rawClean) return true;
+      const natDigits = normalizeNumberDigits(cleanNat);
+      if (normalizedDigits && natDigits === normalizedDigits) return true;
+      const sNum = parseInt(natDigits, 10);
+      if (!isNaN(numValue) && !isNaN(sNum) && sNum === numValue) return true;
+      return false;
+    });
+    if (match) return match;
+
+    // 5. Match by exact student name (case-insensitive & trimmed)
+    match = arr.find(s => s && s.name && s.name.trim().toLowerCase() === rawClean.toLowerCase());
+    if (match) return match;
+
+    return undefined;
+  };
+
+  // Step 1: Search in provided list
+  if (list && list.length > 0) {
+    const res = searchInList(list);
+    if (res) return res;
+  }
+
+  // Step 2: Search in localStorage school_students if available
+  try {
+    if (typeof window !== 'undefined') {
+      const raw = localStorage.getItem('school_students');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed !== list) {
+          const res = searchInList(parsed);
+          if (res) return res;
+        }
+      }
+    }
+  } catch {}
+
+  // Step 3: Search in INITIAL_STUDENTS as guaranteed permanent fallback
+  if (Array.isArray(INITIAL_STUDENTS) && list !== INITIAL_STUDENTS) {
+    const res = searchInList(INITIAL_STUDENTS);
+    if (res) return res;
+  }
 
   return undefined;
 };
@@ -182,6 +224,7 @@ export default function ParentPortal({
   const activeStudentObj: Student | undefined = 
     activeDirectStudent || 
     findStudentByUnifiedInput(loggedInStudentId, students) ||
+    findStudentByUnifiedInput(loggedInStudentId, INITIAL_STUDENTS) ||
     (() => {
       try {
         const raw = localStorage.getItem('school_students');
@@ -195,9 +238,14 @@ export default function ParentPortal({
       return undefined;
     })() ||
     students.find(s => 
-      s.id === loggedInStudentId || 
-      (s.unifiedNo && String(s.unifiedNo).trim() === loggedInStudentId.trim()) ||
-      (s.rollNo && String(s.rollNo).trim() === loggedInStudentId.trim())
+      (s && s.id && s.id === loggedInStudentId) || 
+      (s && s.unifiedNo && String(s.unifiedNo).trim() === loggedInStudentId.trim()) ||
+      (s && s.rollNo && String(s.rollNo).trim() === loggedInStudentId.trim())
+    ) ||
+    INITIAL_STUDENTS.find(s => 
+      (s && s.id && s.id === loggedInStudentId) || 
+      (s && s.unifiedNo && String(s.unifiedNo).trim() === loggedInStudentId.trim()) ||
+      (s && s.rollNo && String(s.rollNo).trim() === loggedInStudentId.trim())
     );
 
   const selectedParentId = activeStudentObj ? activeStudentObj.parentId : '';
@@ -427,10 +475,13 @@ export default function ParentPortal({
     }
   }, [selectedParentId, selectedChildId]);
 
-  const activeChildClass = classes.find(c => c.id === activeChild?.classId);
+  const activeChildClass = classes.find(c => c.id === activeChild?.classId) ||
+                           INITIAL_CLASSES.find(c => c.id === activeChild?.classId);
   const activeChildTeacher = 
     teachers.find(t => t.id === activeChildClass?.teacherId) ||
     teachers.find(t => activeChildClass?.id && t.classes && t.classes.includes(activeChildClass.id)) ||
+    INITIAL_TEACHERS.find(t => t.id === activeChildClass?.teacherId) ||
+    INITIAL_TEACHERS[0] ||
     teachers[0];
 
   // --- Auto-Login & Save Phone Number States ---
@@ -1297,10 +1348,11 @@ ${url}
     setLoginError('');
 
     try {
-      // 1. Look up student in in-memory students list
-      let foundStudent = findStudentByUnifiedInput(cleanInput, students);
+      // 1. Look up student across students list, localStorage, and INITIAL_STUDENTS (0ms instant lookup)
+      let foundStudent = findStudentByUnifiedInput(cleanInput, students) ||
+                         findStudentByUnifiedInput(cleanInput, INITIAL_STUDENTS);
 
-      // 2. Look up in localStorage school_students
+      // 2. Look up in localStorage school_students if not found
       if (!foundStudent) {
         const latestStudentsRaw = localStorage.getItem('school_students');
         if (latestStudentsRaw) {
@@ -1313,15 +1365,7 @@ ${url}
         }
       }
 
-      // 3. If not found locally, fast single-doc fetch for school_students directly from Firestore (takes ~150ms)
-      if (!foundStudent) {
-        const directList = await fetchStudentsOnlyDirectly();
-        if (Array.isArray(directList) && directList.length > 0) {
-          foundStudent = findStudentByUnifiedInput(cleanInput, directList);
-        }
-      }
-
-      // 4. Check sent grade sheets archive for this student
+      // 3. Check sent grade sheets archive for this student
       if (!foundStudent) {
         const sentSheetsRaw = localStorage.getItem('school_sent_grade_sheets');
         if (sentSheetsRaw) {
@@ -1357,6 +1401,21 @@ ${url}
         }
       }
 
+      // 4. Fast single-doc fetch from Firestore with short 1.2s timeout only if not found locally
+      if (!foundStudent) {
+        try {
+          const directList = await Promise.race([
+            fetchStudentsOnlyDirectly(),
+            new Promise<any[]>((resolve) => setTimeout(() => resolve([]), 1200))
+          ]);
+          if (Array.isArray(directList) && directList.length > 0) {
+            foundStudent = findStudentByUnifiedInput(cleanInput, directList);
+          }
+        } catch {
+          // ignore network or quota limits
+        }
+      }
+
       if (foundStudent) {
         setActiveDirectStudent(foundStudent);
         localStorage.setItem('parent_portal_active_student_obj', JSON.stringify(foundStudent));
@@ -1376,15 +1435,16 @@ ${url}
       }
     } catch (err) {
       console.error('Error during parent login:', err);
-      const fallback = findStudentByUnifiedInput(cleanInput, students);
+      const fallback = findStudentByUnifiedInput(cleanInput, students) || findStudentByUnifiedInput(cleanInput, INITIAL_STUDENTS);
       if (fallback) {
         setActiveDirectStudent(fallback);
         localStorage.setItem('parent_portal_active_student_obj', JSON.stringify(fallback));
         setLoggedInStudentId(fallback.id);
         localStorage.setItem('parent_portal_student_id', fallback.id);
         localStorage.setItem('parent_portal_unified_no', fallback.unifiedNo || fallback.rollNo || '');
+        setLoginError('');
       } else if (!isAuto) {
-        setLoginError(`تعذر التحقق من الرقم الموحد (${cleanInput}). يرجى التأكد من اتصال الإنترنت والمحاولة مجدداً.`);
+        setLoginError(`تعذر التحقق من الرقم الموحد (${cleanInput}). يرجى التأكد من كتابة الرقم بشكل صحيح والمحاولة مجدداً.`);
       }
     } finally {
       setIsLoggingIn(false);

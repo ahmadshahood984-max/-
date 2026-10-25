@@ -31,7 +31,13 @@ import DirectorPortal from './components/DirectorPortal';
 import TeacherPortal from './components/TeacherPortal';
 import ParentPortal from './components/ParentPortal';
 import PortalDesignerBadge from './components/PortalDesignerBadge';
-import { sanitizeAndDeduplicateStudents } from './lib/studentDeduplicator';
+import { 
+  sanitizeAndDeduplicateStudents, 
+  mergeStudentsWithSeed, 
+  mergeClassesWithSeed, 
+  mergeTeachersWithSeed, 
+  mergeParentsWithSeed 
+} from './lib/studentDeduplicator';
 import { safeShowNotification } from './lib/notificationHelper';
 import { sendParentPushNotification, sendBroadcastPushNotification } from './lib/pushDispatcher';
 import { persistDirectToFirestore, forceRefreshDataFromFirestore } from './lib/firebaseSync';
@@ -71,38 +77,34 @@ export default function App() {
   // --- Persistent State Hooks ---
   const [teachers, setTeachers] = useState<Teacher[]>(() => {
     const saved = localStorage.getItem('school_teachers');
-    const list = saved ? JSON.parse(saved) : INITIAL_TEACHERS;
-    if (!saved && list.length > 0) {
-      try { localStorage.setItem('school_teachers', JSON.stringify(list)); } catch {}
-    }
+    const parsed = saved ? JSON.parse(saved) : [];
+    const list = mergeTeachersWithSeed(parsed, INITIAL_TEACHERS);
+    try { localStorage.setItem('school_teachers', JSON.stringify(list)); } catch {}
     return list;
   });
 
   const [classes, setClasses] = useState<Class[]>(() => {
     const saved = localStorage.getItem('school_classes');
-    const list = saved ? JSON.parse(saved) : INITIAL_CLASSES;
-    if (!saved && list.length > 0) {
-      try { localStorage.setItem('school_classes', JSON.stringify(list)); } catch {}
-    }
+    const parsed = saved ? JSON.parse(saved) : [];
+    const list = mergeClassesWithSeed(parsed, INITIAL_CLASSES);
+    try { localStorage.setItem('school_classes', JSON.stringify(list)); } catch {}
     return list;
   });
 
   const [parents, setParents] = useState<Parent[]>(() => {
     const saved = localStorage.getItem('school_parents');
-    const list = saved ? JSON.parse(saved) : INITIAL_PARENTS;
-    if (!saved && list.length > 0) {
-      try { localStorage.setItem('school_parents', JSON.stringify(list)); } catch {}
-    }
+    const parsed = saved ? JSON.parse(saved) : [];
+    const list = mergeParentsWithSeed(parsed, INITIAL_PARENTS);
+    try { localStorage.setItem('school_parents', JSON.stringify(list)); } catch {}
     return list;
   });
 
   const [students, setStudents] = useState<Student[]>(() => {
     const saved = localStorage.getItem('school_students');
-    const raw: Student[] = saved ? JSON.parse(saved) : INITIAL_STUDENTS;
-    const cleaned = sanitizeAndDeduplicateStudents(raw);
-    if (!saved || JSON.stringify(cleaned) !== saved) {
-      try { localStorage.setItem('school_students', JSON.stringify(cleaned)); } catch {}
-    }
+    const parsed: Student[] = saved ? JSON.parse(saved) : [];
+    const merged = mergeStudentsWithSeed(parsed, INITIAL_STUDENTS);
+    const cleaned = sanitizeAndDeduplicateStudents(merged);
+    try { localStorage.setItem('school_students', JSON.stringify(cleaned)); } catch {}
     return cleaned.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
   });
 
@@ -110,7 +112,8 @@ export default function App() {
   const safeSetStudents: React.Dispatch<React.SetStateAction<Student[]>> = (action) => {
     setStudents(prev => {
       const nextRaw = typeof action === 'function' ? action(prev) : action;
-      const cleanList = sanitizeAndDeduplicateStudents(Array.isArray(nextRaw) ? nextRaw : []);
+      const merged = mergeStudentsWithSeed(Array.isArray(nextRaw) ? nextRaw : [], INITIAL_STUDENTS);
+      const cleanList = sanitizeAndDeduplicateStudents(merged);
       const sorted = cleanList.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
       try {
         localStorage.setItem('school_students', JSON.stringify(sorted));
@@ -443,11 +446,21 @@ export default function App() {
     // Initial load check to capture early Firebase synced keys in localStorage
     const reloadFromLocalStorage = () => {
       const keysToLoad: Record<string, (val: any) => void> = {
-        'school_teachers': setTeachers,
-        'school_classes': setClasses,
-        'school_parents': setParents,
+        'school_teachers': (val: any) => {
+          const list = mergeTeachersWithSeed(Array.isArray(val) ? val : [], INITIAL_TEACHERS);
+          setTeachers(list);
+        },
+        'school_classes': (val: any) => {
+          const list = mergeClassesWithSeed(Array.isArray(val) ? val : [], INITIAL_CLASSES);
+          setClasses(list);
+        },
+        'school_parents': (val: any) => {
+          const list = mergeParentsWithSeed(Array.isArray(val) ? val : [], INITIAL_PARENTS);
+          setParents(list);
+        },
         'school_students': (val: any) => {
-          const cleanList = sanitizeAndDeduplicateStudents(Array.isArray(val) ? val : []);
+          const merged = mergeStudentsWithSeed(Array.isArray(val) ? val : [], INITIAL_STUDENTS);
+          const cleanList = sanitizeAndDeduplicateStudents(merged);
           setStudents(cleanList.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar')));
         },
         'school_attendance': setAttendance,

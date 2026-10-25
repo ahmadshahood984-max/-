@@ -160,7 +160,7 @@ export async function fetchStudentsOnlyDirectly(): Promise<any[]> {
     const docRef = doc(db, 'school_live_data', 'school_students');
     const snap = await Promise.race([
       getDoc(docRef),
-      new Promise<any>((_, reject) => setTimeout(() => reject(new Error('timeout')), 8000))
+      new Promise<any>((_, reject) => setTimeout(() => reject(new Error('timeout')), 1500))
     ]);
     if (snap && snap.exists()) {
       trackFirestoreRead(1);
