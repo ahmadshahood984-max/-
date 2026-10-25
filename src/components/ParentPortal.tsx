@@ -1407,35 +1407,6 @@ ${url}
     await executeStudentLogin(studentRollInput, false);
   };
 
-  // Instant Auto-Login upon entering the unified number
-  useEffect(() => {
-    const raw = studentRollInput.trim();
-    if (!raw) return;
-
-    const digitsOnly = normalizeNumberDigits(raw);
-    if (!digitsOnly) return;
-
-    // Check if there is an exact student match in memory or localStorage
-    const localStudents = students.length > 0 ? students : (() => {
-      try {
-        const saved = localStorage.getItem('school_students');
-        return saved ? JSON.parse(saved) : [];
-      } catch {
-        return [];
-      }
-    })();
-
-    const directMatch = findStudentByUnifiedInput(digitsOnly, localStudents);
-
-    // If an exact match is found locally, log in immediately after a quick 300ms debounce
-    // If not yet in memory, give 650ms debounce to allow user to complete entering the digits
-    const timer = setTimeout(() => {
-      executeStudentLogin(digitsOnly, true);
-    }, directMatch ? 300 : 650);
-
-    return () => clearTimeout(timer);
-  }, [studentRollInput, students]);
-
   const handleLogout = () => {
     setActiveDirectStudent(null);
     localStorage.removeItem('parent_portal_active_student_obj');
@@ -2722,17 +2693,17 @@ ${url}
             <button
               type="submit"
               disabled={isLoggingIn}
-              className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-85 text-white font-extrabold py-3.5 rounded-xl transition cursor-pointer text-xs shadow-md shadow-indigo-100 flex items-center justify-center gap-2"
+              className="w-full bg-gradient-to-r from-indigo-600 to-indigo-700 hover:from-indigo-700 hover:to-indigo-800 disabled:opacity-85 text-white font-black py-3.5 rounded-xl transition cursor-pointer text-base shadow-md shadow-indigo-100 flex items-center justify-center gap-2 active:scale-[0.99]"
             >
               {isLoggingIn ? (
                 <>
                   <RefreshCw className="w-4 h-4 animate-spin text-indigo-200" />
-                  <span>جارٍ فتح ملف الطالب تلقائياً...</span>
+                  <span>جارٍ الفتح...</span>
                 </>
               ) : (
                 <>
-                  <span>فتح ملف الطالب بالرقم الموحد</span>
-                  <UserCheck className="w-4 h-4" />
+                  <span className="text-base font-black tracking-wide">فــتــح</span>
+                  <UserCheck className="w-5 h-5" />
                 </>
               )}
             </button>

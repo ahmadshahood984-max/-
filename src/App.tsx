@@ -487,48 +487,26 @@ export default function App() {
           }
         } catch {}
       }
-      // Healing check: if classes were empty, restore them from student class IDs & unified ranges
+      // Healing check: only set local default classes if both local and remote have never been configured
       const currentClassesRaw = localStorage.getItem('school_classes');
       let currentClassesList: Class[] = [];
       try {
         currentClassesList = currentClassesRaw ? JSON.parse(currentClassesRaw) : [];
       } catch {}
       if (!Array.isArray(currentClassesList) || currentClassesList.length === 0) {
-        const restoredClasses: Class[] = [
-          { id: 'class-1791723647468', name: 'الصف الأول الابتدائي (شعبة أ)', grade: 'الأول', room: 'قاعة 1', teacherId: 't1', shift: 'morning' },
-          { id: 'class-1791723664131', name: 'الصف الثاني الابتدائي (شعبة أ)', grade: 'الثاني', room: 'قاعة 2', teacherId: 't2', shift: 'morning' },
-          { id: 'class-1791723705531', name: 'الصف الثالث الابتدائي (شعبة أ)', grade: 'الثالث', room: 'قاعة 3', teacherId: 't3', shift: 'morning' },
-          { id: 'class-1791723720986', name: 'الصف الرابع الابتدائي (شعبة أ)', grade: 'الرابع', room: 'قاعة 4', teacherId: 't4', shift: 'morning' },
-          { id: 'class-1791723742763', name: 'الصف الخامس الابتدائي (شعبة أ)', grade: 'الخامس', room: 'قاعة 5', teacherId: 't5', shift: 'morning' },
-          { id: 'class-1791723751987', name: 'الصف السادس الابتدائي (شعبة أ)', grade: 'السادس', room: 'قاعة 6', teacherId: 't6', shift: 'morning' },
-          { id: 'class-1791791748574', name: 'الصف الأول (الفوج المسائي)', grade: 'الأول', room: 'قاعة م1', teacherId: 't7', shift: 'evening' },
-          { id: 'class-1791791762036', name: 'الصف الثاني (الفوج المسائي)', grade: 'الثاني', room: 'قاعة م2', teacherId: 't8', shift: 'evening' },
-          { id: 'class-1791791772068', name: 'الصف الثالث (الفوج المسائي)', grade: 'الثالث', room: 'قاعة م3', teacherId: 't9', shift: 'evening' },
-          { id: 'class-1791791782045', name: 'الصف الرابع (الفوج المسائي)', grade: 'الرابع', room: 'قاعة م4', teacherId: 't10', shift: 'evening' },
-          { id: 'class-1791791791054', name: 'الصف الخامس (الفوج المسائي)', grade: 'الخامس', room: 'قاعة م5', teacherId: 't11', shift: 'evening' },
-          { id: 'class-1791791801044', name: 'الصف السادس (الفوج المسائي)', grade: 'السادس', room: 'قاعة م6', teacherId: 't12', shift: 'evening' }
-        ];
-        setClasses(restoredClasses);
-        persistDirectToFirestore('school_classes', restoredClasses);
+        // Do NOT overwrite Firestore! Just retain existing classes or initial empty state until remote arrives
+        console.log('[Classes Init] Awaiting classes from Firestore cloud...');
       }
 
-      // Healing check: if teachers were empty, restore default teaching staff
+      // Healing check: only set local default teachers if both local and remote have never been configured
       const currentTeachersRaw = localStorage.getItem('school_teachers');
       let currentTeachersList: Teacher[] = [];
       try {
         currentTeachersList = currentTeachersRaw ? JSON.parse(currentTeachersRaw) : [];
       } catch {}
       if (!Array.isArray(currentTeachersList) || currentTeachersList.length === 0) {
-        const restoredTeachers: Teacher[] = [
-          { id: 't1', name: 'أحمد العلي', email: 'ahmad@school.edu', phone: '0933111222', subjects: ['اللغة العربية', 'التربية الإسلامية'], classes: ['class-1791723647468'], joinDate: '2024-09-01', password: '123', shift: 'morning' },
-          { id: 't2', name: 'سارة الخطيب', email: 'sara@school.edu', phone: '0944222333', subjects: ['الرياضيات', 'العلوم'], classes: ['class-1791723664131'], joinDate: '2024-09-01', password: '123', shift: 'morning' },
-          { id: 't3', name: 'منى السعيد', email: 'mona@school.edu', phone: '0955333444', subjects: ['اللغة الإنكليزية'], classes: ['class-1791723705531'], joinDate: '2024-09-01', password: '123', shift: 'morning' },
-          { id: 't4', name: 'عمر القاسم', email: 'omar@school.edu', phone: '0966444555', subjects: ['الاجتماعيات', 'التاريخ'], classes: ['class-1791723720986'], joinDate: '2024-09-01', password: '123', shift: 'morning' },
-          { id: 't5', name: 'هند النجار', email: 'hind@school.edu', phone: '0977555666', subjects: ['العلوم', 'الفيزياء'], classes: ['class-1791723742763'], joinDate: '2024-09-01', password: '123', shift: 'morning' },
-          { id: 't6', name: 'خالد درويش', email: 'khaled@school.edu', phone: '0988666777', subjects: ['الرياضيات'], classes: ['class-1791723751987'], joinDate: '2024-09-01', password: '123', shift: 'morning' }
-        ];
-        setTeachers(restoredTeachers);
-        persistDirectToFirestore('school_teachers', restoredTeachers);
+        // Do NOT overwrite Firestore! Just retain existing teachers until remote arrives
+        console.log('[Teachers Init] Awaiting teachers from Firestore cloud...');
       }
 
       // Healing check: if grades were empty, reconstruct from certified sent grade sheet
@@ -965,16 +943,24 @@ export default function App() {
 
   // 1. Director adds a Teacher
   const addTeacher = (teacherData: Omit<Teacher, 'id' | 'joinDate'>) => {
-    const id = 't' + (teachers.length + 1);
+    const id = `t-${Date.now()}`;
     const joinDate = new Date().toISOString().split('T')[0];
     const newTeacher: Teacher = { ...teacherData, id, joinDate };
     
-    setTeachers(prev => [...prev, newTeacher]);
+    setTeachers(prev => {
+      const updated = [...prev, newTeacher];
+      persistDirectToFirestore('school_teachers', updated);
+      return updated;
+    });
     logEvent(`المدير أضاف المعلم الجديد: ${newTeacher.name} وتخصيص المواد: ${newTeacher.subjects.join(', ')}`, 'success');
   };
 
   const updateTeacherPassword = (teacherId: string, newPass: string) => {
-    setTeachers(prev => prev.map(t => t.id === teacherId ? { ...t, password: newPass } : t));
+    setTeachers(prev => {
+      const updated = prev.map(t => t.id === teacherId ? { ...t, password: newPass } : t);
+      persistDirectToFirestore('school_teachers', updated);
+      return updated;
+    });
     const teacherName = teachers.find(t => t.id === teacherId)?.name || '';
     logEvent(`المدير قام بتعديل كلمة مرور المعلم: ${teacherName}`, 'success');
   };

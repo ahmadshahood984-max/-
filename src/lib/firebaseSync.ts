@@ -169,6 +169,34 @@ export async function forceRefreshDataFromFirestore(): Promise<boolean> {
             if (key === 'school_students' && Array.isArray(payload)) {
               payload = sanitizeAndDeduplicateStudents(payload);
             }
+            if (key === 'school_teachers' && Array.isArray(payload)) {
+              try {
+                const localStr = localStorage.getItem('school_teachers');
+                const localList = localStr ? JSON.parse(localStr) : null;
+                if (Array.isArray(localList) && localList.length > payload.length) {
+                  const remoteIds = new Set(payload.map((t: any) => t.id));
+                  const newLocal = localList.filter((t: any) => t.id && !remoteIds.has(t.id));
+                  if (newLocal.length > 0) {
+                    payload = [...payload, ...newLocal];
+                    await setDoc(docRef, { data: payload, updatedAt: Date.now() }, { merge: true });
+                  }
+                }
+              } catch {}
+            }
+            if (key === 'school_classes' && Array.isArray(payload)) {
+              try {
+                const localStr = localStorage.getItem('school_classes');
+                const localList = localStr ? JSON.parse(localStr) : null;
+                if (Array.isArray(localList) && localList.length > payload.length) {
+                  const remoteIds = new Set(payload.map((c: any) => c.id));
+                  const newLocal = localList.filter((c: any) => c.id && !remoteIds.has(c.id));
+                  if (newLocal.length > 0) {
+                    payload = [...payload, ...newLocal];
+                    await setDoc(docRef, { data: payload, updatedAt: Date.now() }, { merge: true });
+                  }
+                }
+              } catch {}
+            }
 
             // Anti-wipe safeguard: Never overwrite valid local non-empty data with an empty remote document!
             const localVal = localStorage.getItem(key);
@@ -293,6 +321,38 @@ export function setupFirebaseSync() {
           let payload = docData.data;
           if (key === 'school_students' && Array.isArray(payload)) {
             payload = sanitizeAndDeduplicateStudents(payload);
+          }
+          if (key === 'school_teachers' && Array.isArray(payload)) {
+            try {
+              const localStr = localStorage.getItem('school_teachers');
+              const localList = localStr ? JSON.parse(localStr) : null;
+              if (Array.isArray(localList) && localList.length > payload.length) {
+                const remoteIds = new Set(payload.map((t: any) => t.id));
+                const newLocal = localList.filter((t: any) => t.id && !remoteIds.has(t.id));
+                if (newLocal.length > 0) {
+                  payload = [...payload, ...newLocal];
+                  if (db) {
+                    setDoc(docRef, { data: payload, updatedAt: Date.now() }, { merge: true }).catch(() => {});
+                  }
+                }
+              }
+            } catch {}
+          }
+          if (key === 'school_classes' && Array.isArray(payload)) {
+            try {
+              const localStr = localStorage.getItem('school_classes');
+              const localList = localStr ? JSON.parse(localStr) : null;
+              if (Array.isArray(localList) && localList.length > payload.length) {
+                const remoteIds = new Set(payload.map((c: any) => c.id));
+                const newLocal = localList.filter((c: any) => c.id && !remoteIds.has(c.id));
+                if (newLocal.length > 0) {
+                  payload = [...payload, ...newLocal];
+                  if (db) {
+                    setDoc(docRef, { data: payload, updatedAt: Date.now() }, { merge: true }).catch(() => {});
+                  }
+                }
+              }
+            } catch {}
           }
 
           const remoteUpdatedAt = Number(docData.updatedAt) || 0;

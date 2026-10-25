@@ -827,18 +827,15 @@ export default function DirectorPortal({
       if (confirm(`هل أنت متأكد من إلغاء آخر حذف واسترجاع كافة البيانات المحفوظة بتاريخ (${snapshot.dateStr || 'سابقاً'})؟`)) {
         if (snapshot.teachers) {
           setTeachers(snapshot.teachers);
-          localStorage.setItem('school_teachers', JSON.stringify(snapshot.teachers));
-          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_teachers', value: JSON.stringify(snapshot.teachers) } }));
+          persistDirectToFirestore('school_teachers', snapshot.teachers);
         }
         if (snapshot.students) {
           setStudents(snapshot.students);
-          localStorage.setItem('school_students', JSON.stringify(snapshot.students));
-          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_students', value: JSON.stringify(snapshot.students) } }));
+          persistDirectToFirestore('school_students', snapshot.students);
         }
         if (snapshot.classes) {
           setClasses(snapshot.classes);
-          localStorage.setItem('school_classes', JSON.stringify(snapshot.classes));
-          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_classes', value: JSON.stringify(snapshot.classes) } }));
+          persistDirectToFirestore('school_classes', snapshot.classes);
         }
         if (snapshot.parents) {
           setParents(snapshot.parents);
@@ -1025,9 +1022,10 @@ export default function DirectorPortal({
   });
   const [newSubjectName, setNewSubjectName] = useState('');
 
-  // Class addition states in Student Affairs
+  // Class addition & editing states in Student Affairs
   const [showClassForm, setShowClassForm] = useState(false);
   const [showSubjectModal, setShowSubjectModal] = useState(false);
+  const [editingClass, setEditingClass] = useState<Class | null>(null);
   const [newClassGrade, setNewClassGrade] = useState('');
   const [newClassSection, setNewClassSection] = useState('');
   const [newClassName, setNewClassName] = useState('');
@@ -4935,7 +4933,7 @@ ${directivesFormatted}
         () => {
           const updated = teachers.filter(t => t.id !== itemId);
           setTeachers(updated);
-          localStorage.setItem('school_teachers', JSON.stringify(updated));
+          persistDirectToFirestore('school_teachers', updated);
           alert(`✅ تم حذف المعلم (${teacher.name}) بنجاح.`);
         }
       );
@@ -4990,7 +4988,7 @@ ${directivesFormatted}
         () => {
           const updated = classes.filter(c => c.id !== itemId);
           setClasses(updated);
-          localStorage.setItem('school_classes', JSON.stringify(updated));
+          persistDirectToFirestore('school_classes', updated);
           alert(`✅ تم حذف الصف/الشعبة بنجاح.`);
         }
       );
@@ -5079,8 +5077,7 @@ ${directivesFormatted}
         } else if (category === 'teachers') {
           const remaining = teachers.filter(t => !matchesCohort(t));
           setTeachers(remaining);
-          localStorage.setItem('school_teachers', JSON.stringify(remaining));
-          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_teachers', value: JSON.stringify(remaining) } }));
+          persistDirectToFirestore('school_teachers', remaining);
         } else if (category === 'announcements') {
           const remaining = announcements.filter(a => !matchesCohort(a));
           setAnnouncements(remaining);
@@ -5100,7 +5097,6 @@ ${directivesFormatted}
                 c++;
                 if (c % 400 === 0) {
                   b.commit();
-                  b = writeBatch(db);
                 }
               });
               if (c % 400 !== 0) b.commit();
@@ -5114,8 +5110,7 @@ ${directivesFormatted}
         } else if (category === 'classes') {
           const remaining = classes.filter(c => !matchesCohort(c));
           setClasses(remaining);
-          localStorage.setItem('school_classes', JSON.stringify(remaining));
-          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_classes', value: JSON.stringify(remaining) } }));
+          persistDirectToFirestore('school_classes', remaining);
         } else if (category === 'grades') {
           const remaining = grades.filter(g => !matchesCohort(g));
           setGrades(remaining);
@@ -5264,14 +5259,12 @@ ${directivesFormatted}
         // 2. Remove teachers
         const updatedTeachers = teachers.filter(t => !matchesTarget(t));
         setTeachers(updatedTeachers);
-        localStorage.setItem('school_teachers', JSON.stringify(updatedTeachers));
-        window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_teachers', value: JSON.stringify(updatedTeachers) } }));
+        persistDirectToFirestore('school_teachers', updatedTeachers);
 
         // 3. Remove classes
         const updatedClasses = classes.filter(c => !matchesTarget(c));
         setClasses(updatedClasses);
-        localStorage.setItem('school_classes', JSON.stringify(updatedClasses));
-        window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_classes', value: JSON.stringify(updatedClasses) } }));
+        persistDirectToFirestore('school_classes', updatedClasses);
 
         // 4. Remove announcements
         const updatedAnnounce = announcements.filter(a => !matchesTarget(a));
@@ -5514,7 +5507,26 @@ ${directivesFormatted}
     }
   };
 
-  const handleAddClass = (e: React.FormEvent) => {
+  const handleEditClass = (cls: Class) => {
+    setEditingClass(cls);
+    setNewClassName(cls.name);
+    setNewClassGrade(cls.grade || '');
+    setNewClassRoom(cls.room || '');
+    setNewClassTeacherId(cls.teacherId || '');
+    if (cls.shift) setNewClassShift(cls.shift);
+    const parts = cls.name.split(' - ');
+    if (parts.length > 1) {
+      setNewClassSection(parts[1].trim());
+    } else {
+      setNewClassSection('');
+    }
+    const formElement = document.getElementById('class-form-card');
+    if (formElement) {
+      formElement.scrollIntoView({ behavior: 'smooth' });
+    }
+  };
+
+  const handleAddClass = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newClassGrade.trim()) {
       alert('الرجاء كتابة الصف / المرحلة الدراسية');
@@ -5522,26 +5534,41 @@ ${directivesFormatted}
     }
     const finalClassName = newClassName.trim() || (newClassSection.trim() ? `${newClassGrade.trim()} - ${newClassSection.trim()}` : newClassGrade.trim());
     const currentShift = newClassShift || (activeCohort === 'evening' ? 'evening' : 'morning');
-    const newClassObj: Class = {
-      id: `class-${Date.now()}`,
-      name: finalClassName,
-      grade: newClassGrade.trim(),
-      room: newClassRoom.trim() || (newClassSection.trim() ? `شعبة ${newClassSection.trim()}` : 'غير محدد'),
-      teacherId: newClassTeacherId || '',
-      shift: currentShift
-    };
-    setClasses(prev => {
-      const updated = [...prev, newClassObj];
-      localStorage.setItem('school_classes', JSON.stringify(updated));
-      return updated;
-    });
+
+    let updatedClasses: Class[] = [];
+    if (editingClass) {
+      updatedClasses = classes.map(c => c.id === editingClass.id ? {
+        ...c,
+        name: finalClassName,
+        grade: newClassGrade.trim(),
+        room: newClassRoom.trim() || (newClassSection.trim() ? `شعبة ${newClassSection.trim()}` : 'غير محدد'),
+        teacherId: newClassTeacherId || '',
+        shift: currentShift
+      } : c);
+    } else {
+      const newClassObj: Class = {
+        id: `class-${Date.now()}`,
+        name: finalClassName,
+        grade: newClassGrade.trim(),
+        room: newClassRoom.trim() || (newClassSection.trim() ? `شعبة ${newClassSection.trim()}` : 'غير محدد'),
+        teacherId: newClassTeacherId || '',
+        shift: currentShift
+      };
+      updatedClasses = [...classes, newClassObj];
+    }
+
+    setClasses(updatedClasses);
+    await persistDirectToFirestore('school_classes', updatedClasses);
+
+    const isEdit = !!editingClass;
+    setEditingClass(null);
     setNewClassName('');
     setNewClassGrade('');
     setNewClassSection('');
     setNewClassRoom('');
     setNewClassTeacherId('');
     setShowClassForm(false);
-    alert('🎉 تم إضافة الصف الدراسي والشعبة بنجاح (مع تخصيص 30 رقماً موحداً لها)!');
+    alert(isEdit ? '🎉 تم تعديل وحفظ بيانات الصف بنجاح في قاعدة البيانات السحابية!' : '🎉 تم إضافة وحفظ الصف الدراسي والشعبة بنجاح في قاعدة البيانات السحابية!');
   };
 
   const handleEditTeacher = (teacher: Teacher) => {
@@ -5585,7 +5612,7 @@ ${directivesFormatted}
     }, 100);
   };
 
-  const handleAddTeacher = (e: React.FormEvent) => {
+  const handleAddTeacher = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTeacher.name.trim() || !newTeacher.password.trim()) {
       alert('الرجاء كتابة اسم المعلم والرمز السري الخاص به');
@@ -5629,8 +5656,9 @@ ${directivesFormatted}
     const generatedEmail = `${newTeacher.name.trim().replace(/\s+/g, "")}_${Date.now()}@school.com`;
     const defaultPhone = '0500000000';
 
+    let updatedTeachers: Teacher[] = [];
     if (editingTeacher) {
-      const updatedTeachers = teachers.map(t => {
+      updatedTeachers = teachers.map(t => {
         if (t.id === editingTeacher.id) {
           return {
             ...t,
@@ -5642,19 +5670,23 @@ ${directivesFormatted}
         }
         return t;
       });
-      setTeachers(updatedTeachers);
-      localStorage.setItem('school_teachers', JSON.stringify(updatedTeachers));
     } else {
-      addTeacher({
+      const newTeacherObj: Teacher = {
+        id: `t-${Date.now()}`,
         name: newTeacher.name.trim(),
         email: generatedEmail,
         phone: defaultPhone,
         subjects: finalSubjects,
         classes: finalClasses,
         password: newTeacher.password.trim(),
-        shift: newTeacherShift || (activeCohort === 'evening' ? 'evening' : 'morning')
-      });
+        shift: newTeacherShift || (activeCohort === 'evening' ? 'evening' : 'morning'),
+        joinDate: new Date().toISOString().split('T')[0]
+      };
+      updatedTeachers = [...teachers, newTeacherObj];
     }
+
+    setTeachers(updatedTeachers);
+    await persistDirectToFirestore('school_teachers', updatedTeachers);
 
     const isEdit = !!editingTeacher;
 
@@ -5666,7 +5698,7 @@ ${directivesFormatted}
     setTeacherAssignmentType('full_class');
     setShowTeacherForm(false);
     setEditingTeacher(null);
-    alert(isEdit ? '🎉 تم تعديل بيانات المعلم بنجاح!' : '🎉 تم إضافة المعلم وتخصيص جدول حصصه بنجاح!');
+    alert(isEdit ? '🎉 تم تعديل بيانات المعلم وحفظها بنجاح في قاعدة البيانات!' : '🎉 تم إضافة المعلم وتخصيص مواده وحفظه نهائياً في قاعدة البيانات السحابية!');
   };
 
 
@@ -8184,8 +8216,7 @@ ${directivesFormatted}
                                 if (ensured.didChange) {
                                   workingClasses = ensured.updatedClasses;
                                   setClasses(workingClasses);
-                                  localStorage.setItem('school_classes', JSON.stringify(workingClasses));
-                                  window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_classes', value: JSON.stringify(workingClasses) } }));
+                                  persistDirectToFirestore('school_classes', workingClasses);
                                 }
                                 eveningCls = workingClasses.find(c => c.shift === 'evening');
                               }
@@ -12381,10 +12412,29 @@ ${sampleEval}
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                {/* Add Class Card */}
-                <div className="bg-white p-6 rounded-3xl border border-slate-100 shadow-sm lg:col-span-1 space-y-4">
-                  <h3 className="font-bold text-slate-800 text-sm pb-2 border-b border-slate-100 flex items-center gap-2 justify-end">
-                    <span>➕ إضافة صف وشعبة جديدة</span>
+                {/* Add / Edit Class Card */}
+                <div id="class-form-card" className="bg-white p-6 rounded-3xl border border-slate-100 shadow-sm lg:col-span-1 space-y-4">
+                  <h3 className="font-bold text-slate-800 text-sm pb-2 border-b border-slate-100 flex items-center justify-between">
+                    {editingClass ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingClass(null);
+                          setNewClassName('');
+                          setNewClassGrade('');
+                          setNewClassSection('');
+                          setNewClassRoom('');
+                          setNewClassTeacherId('');
+                        }}
+                        className="text-xs text-rose-500 hover:underline flex items-center gap-1 cursor-pointer font-normal"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                        <span>إلغاء التعديل</span>
+                      </button>
+                    ) : <span />}
+                    <span className="flex items-center gap-1.5">
+                      <span>{editingClass ? '✏️ تعديل بيانات الصف والشعبة' : '➕ إضافة صف وشعبة جديدة'}</span>
+                    </span>
                   </h3>
                   
                   <form onSubmit={handleAddClass} className="space-y-4">
@@ -12484,8 +12534,8 @@ ${sampleEval}
                       type="submit"
                       className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs py-3 rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5 shadow-md shadow-indigo-100"
                     >
-                      <Plus className="w-4 h-4" />
-                      <span>حفظ وإضافة الصف الدراسي والشعبة</span>
+                      {editingClass ? <Save className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
+                      <span>{editingClass ? 'حفظ تعديلات الصف في السحابة' : 'حفظ وإضافة الصف والشعبة في السحابة'}</span>
                     </button>
                   </form>
                 </div>
@@ -12504,20 +12554,30 @@ ${sampleEval}
                       const range = getClassUnifiedRange(cls.id, classes);
                       return (
                         <div key={cls.id} className="p-4 rounded-2xl border border-slate-100 hover:border-indigo-100 bg-slate-50/50 hover:bg-indigo-50/10 transition flex items-center justify-between gap-4">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (confirm(`هل أنت متأكد من حذف الصف "${cls.name}"؟`)) {
-                                const updated = classes.filter(c => c.id !== cls.id);
-                                setClasses(updated);
-                                localStorage.setItem('school_classes', JSON.stringify(updated));
-                              }
-                            }}
-                            className="p-1.5 bg-rose-50 text-rose-500 hover:bg-rose-100 rounded-lg transition cursor-pointer"
-                            title="حذف الصف"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => handleEditClass(cls)}
+                              className="p-1.5 bg-indigo-50 text-indigo-600 hover:bg-indigo-100 rounded-lg transition cursor-pointer"
+                              title="تعديل بيانات الصف"
+                            >
+                              <Edit className="w-4 h-4" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                if (confirm(`هل أنت متأكد من حذف الصف "${cls.name}"؟`)) {
+                                  const updated = classes.filter(c => c.id !== cls.id);
+                                  setClasses(updated);
+                                  await persistDirectToFirestore('school_classes', updated);
+                                }
+                              }}
+                              className="p-1.5 bg-rose-50 text-rose-500 hover:bg-rose-100 rounded-lg transition cursor-pointer"
+                              title="حذف الصف"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
                           
                           <div className="text-right flex-1">
                             <div className="flex items-center justify-between gap-2">
