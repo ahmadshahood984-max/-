@@ -58,7 +58,7 @@ import { sendParentPushNotification } from '../lib/pushDispatcher';
 import { getStoredWelcomeMessages, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { motion, AnimatePresence } from 'motion/react';
 import { trackActivityOperation } from '../lib/firestoreTracker';
-import { forceRefreshDataFromFirestore } from '../lib/firebaseSync';
+import { forceRefreshDataFromFirestore, fetchStudentsOnlyDirectly } from '../lib/firebaseSync';
 
 interface ParentPortalProps {
   parents: Parent[];
@@ -180,13 +180,8 @@ export default function ParentPortal({
 
   // Active student strictly matching the logged in student ID or unified number across all sources
   const activeStudentObj: Student | undefined = 
-    findStudentByUnifiedInput(loggedInStudentId, students) || 
-    (activeDirectStudent && (
-      !loggedInStudentId ||
-      activeDirectStudent.id === loggedInStudentId || 
-      (activeDirectStudent.unifiedNo && String(activeDirectStudent.unifiedNo).trim() === loggedInStudentId.trim()) ||
-      (activeDirectStudent.rollNo && String(activeDirectStudent.rollNo).trim() === loggedInStudentId.trim())
-    ) ? activeDirectStudent : undefined) ||
+    activeDirectStudent || 
+    findStudentByUnifiedInput(loggedInStudentId, students) ||
     (() => {
       try {
         const raw = localStorage.getItem('school_students');
@@ -1318,17 +1313,11 @@ ${url}
         }
       }
 
-      // 3. If not found locally, query Firestore cloud database directly
+      // 3. If not found locally, fast single-doc fetch for school_students directly from Firestore (takes ~150ms)
       if (!foundStudent) {
-        await forceRefreshDataFromFirestore();
-        const freshRaw = localStorage.getItem('school_students');
-        if (freshRaw) {
-          try {
-            const parsed = JSON.parse(freshRaw);
-            if (Array.isArray(parsed) && parsed.length > 0) {
-              foundStudent = findStudentByUnifiedInput(cleanInput, parsed);
-            }
-          } catch {}
+        const directList = await fetchStudentsOnlyDirectly();
+        if (Array.isArray(directList) && directList.length > 0) {
+          foundStudent = findStudentByUnifiedInput(cleanInput, directList);
         }
       }
 

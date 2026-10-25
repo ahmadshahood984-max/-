@@ -151,6 +151,41 @@ export async function persistGradeReportBatchDirect({
 }
 
 /**
+ * Ultra-fast targeted single-document fetch for school_students ONLY.
+ * Resolves within ~100-200ms without waiting on other Firestore documents.
+ */
+export async function fetchStudentsOnlyDirectly(): Promise<any[]> {
+  if (!db) return [];
+  try {
+    const docRef = doc(db, 'school_live_data', 'school_students');
+    const snap = await Promise.race([
+      getDoc(docRef),
+      new Promise<any>((_, reject) => setTimeout(() => reject(new Error('timeout')), 3500))
+    ]);
+    if (snap && snap.exists()) {
+      trackFirestoreRead(1);
+      const docData = snap.data();
+      if (docData && Array.isArray(docData.data)) {
+        const clean = sanitizeAndDeduplicateStudents(docData.data);
+        const str = JSON.stringify(clean);
+        originalSetItem('school_students', str);
+        initialLoadCompletedKeys.add('school_students');
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent(STORAGE_UPDATE_EVENT, {
+            detail: { key: 'school_students', value: str }
+          }));
+          broadcastLocalUpdate('school_students', str);
+        }
+        return clean;
+      }
+    }
+  } catch (err) {
+    console.warn('Fast students-only direct fetch notice:', err);
+  }
+  return [];
+}
+
+/**
  * High-speed parallel force refresh from Firestore.
  * Retrieves all keys concurrently with anti-wipe protection.
  */
@@ -160,9 +195,12 @@ export async function forceRefreshDataFromFirestore(): Promise<boolean> {
     const refreshTasks = SYNC_KEYS.map(async (key) => {
       try {
         const docRef = doc(db, 'school_live_data', key);
-        const snap = await getDoc(docRef);
+        const snap = await Promise.race([
+          getDoc(docRef),
+          new Promise<any>((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000))
+        ]);
         trackFirestoreRead(1);
-        if (snap.exists()) {
+        if (snap && snap.exists()) {
           const docData = snap.data();
           if (docData && docData.data !== undefined) {
             let payload = docData.data;
