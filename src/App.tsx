@@ -71,25 +71,37 @@ export default function App() {
   // --- Persistent State Hooks ---
   const [teachers, setTeachers] = useState<Teacher[]>(() => {
     const saved = localStorage.getItem('school_teachers');
-    return saved ? JSON.parse(saved) : INITIAL_TEACHERS;
+    const list = saved ? JSON.parse(saved) : INITIAL_TEACHERS;
+    if (!saved && list.length > 0) {
+      try { localStorage.setItem('school_teachers', JSON.stringify(list)); } catch {}
+    }
+    return list;
   });
 
   const [classes, setClasses] = useState<Class[]>(() => {
     const saved = localStorage.getItem('school_classes');
-    return saved ? JSON.parse(saved) : INITIAL_CLASSES;
+    const list = saved ? JSON.parse(saved) : INITIAL_CLASSES;
+    if (!saved && list.length > 0) {
+      try { localStorage.setItem('school_classes', JSON.stringify(list)); } catch {}
+    }
+    return list;
   });
 
   const [parents, setParents] = useState<Parent[]>(() => {
     const saved = localStorage.getItem('school_parents');
-    return saved ? JSON.parse(saved) : INITIAL_PARENTS;
+    const list = saved ? JSON.parse(saved) : INITIAL_PARENTS;
+    if (!saved && list.length > 0) {
+      try { localStorage.setItem('school_parents', JSON.stringify(list)); } catch {}
+    }
+    return list;
   });
 
   const [students, setStudents] = useState<Student[]>(() => {
     const saved = localStorage.getItem('school_students');
     const raw: Student[] = saved ? JSON.parse(saved) : INITIAL_STUDENTS;
     const cleaned = sanitizeAndDeduplicateStudents(raw);
-    if (saved && JSON.stringify(cleaned) !== saved) {
-      localStorage.setItem('school_students', JSON.stringify(cleaned));
+    if (!saved || JSON.stringify(cleaned) !== saved) {
+      try { localStorage.setItem('school_students', JSON.stringify(cleaned)); } catch {}
     }
     return cleaned.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
   });

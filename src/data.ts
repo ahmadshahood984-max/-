@@ -5,13 +5,15 @@
 
 import { Teacher, Student, Parent, Class, Attendance, Grade, Announcement, Message, AbsenceExcuse } from './types';
 
-export const INITIAL_CLASSES: Class[] = [];
+import seedData from './seedData.json';
 
-export const INITIAL_TEACHERS: Teacher[] = [];
+export const INITIAL_CLASSES: Class[] = (seedData.classes || []) as Class[];
 
-export const INITIAL_PARENTS: Parent[] = [];
+export const INITIAL_TEACHERS: Teacher[] = (seedData.teachers || []) as Teacher[];
 
-export const INITIAL_STUDENTS: Student[] = [];
+export const INITIAL_PARENTS: Parent[] = (seedData.parents || []) as Parent[];
+
+export const INITIAL_STUDENTS: Student[] = (seedData.students || []) as Student[];
 
 export const INITIAL_ATTENDANCE: Attendance[] = [];
 
