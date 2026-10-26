@@ -422,6 +422,59 @@ export default function ParentPortal({
     return () => window.removeEventListener('school_storage_update', handleStorageUpdate);
   }, []);
 
+  // Manual Refresh handler for parents to instantly sync latest grades and sheets
+  const [isParentRefreshing, setIsParentRefreshing] = useState(false);
+  const [parentRefreshSuccess, setParentRefreshSuccess] = useState(false);
+
+  const handleParentManualRefresh = async () => {
+    setIsParentRefreshing(true);
+    try {
+      // 1. Refresh sent grade sheets from localStorage
+      const savedSent = localStorage.getItem('school_sent_grade_sheets');
+      if (savedSent) {
+        try {
+          setSentGradeSheets(deduplicateGradeSheets(JSON.parse(savedSent)));
+        } catch {}
+      }
+
+      // 2. Refresh monthly evaluations
+      const savedEval = localStorage.getItem('school_monthly_evaluations');
+      if (savedEval) {
+        try {
+          setMonthlyEvaluations(JSON.parse(savedEval));
+        } catch {}
+      }
+
+      // 3. Dispatch storage update to trigger reloads
+      window.dispatchEvent(new CustomEvent('school_storage_update', {
+        detail: { key: 'manual_refresh', value: String(Date.now()) }
+      }));
+
+      // 4. Direct Firestore check if available
+      try {
+        const { doc, getDoc } = await import('firebase/firestore');
+        const { db } = await import('../lib/firebase');
+        if (db) {
+          const sentSnap = await getDoc(doc(db, 'school_live_data', 'school_sent_grade_sheets'));
+          if (sentSnap.exists()) {
+            const data = sentSnap.data()?.data;
+            if (Array.isArray(data) && data.length > 0) {
+              setSentGradeSheets(deduplicateGradeSheets(data));
+              localStorage.setItem('school_sent_grade_sheets', JSON.stringify(data));
+            }
+          }
+        }
+      } catch {
+        // quota or offline fallback
+      }
+
+      setParentRefreshSuccess(true);
+      setTimeout(() => setParentRefreshSuccess(false), 3000);
+    } finally {
+      setIsParentRefreshing(false);
+    }
+  };
+
   // Track read state for various categories per parent
   const [readGradeIds, setReadGradeIds] = useState<string[]>(() => {
     try {
@@ -1660,27 +1713,91 @@ ${url}
     );
   };
 
+  const isMessageForThisStudent = React.useCallback((m: Message): boolean => {
+    if (!activeChild) return false;
+    const cId = String(activeChild.id || '').trim();
+    const cUnif = String(activeChild.unifiedNo || '').trim();
+    const cRoll = String(activeChild.rollNo || '').trim();
+    const cNat = String(activeChild.nationalId || '').trim();
+    const cName = String(activeChild.name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    const pId = String(selectedParentId || '').trim();
+    const childParentId = String(activeChild.parentId || '').trim();
+
+    // 1. Direct match on studentId
+    if (m.studentId) {
+      const mSid = String(m.studentId).trim();
+      if (mSid === cId || (cUnif && mSid === cUnif) || (cRoll && mSid === cRoll) || (cNat && mSid === cNat)) {
+        return true;
+      }
+    }
+
+    // 2. Direct match on receiverId
+    if (m.receiverId) {
+      const mRec = String(m.receiverId).trim();
+      const isDirectRecipient = (
+        (pId && mRec === pId) ||
+        (childParentId && mRec === childParentId) ||
+        mRec === cId ||
+        (cUnif && mRec === cUnif) ||
+        (cRoll && mRec === cRoll) ||
+        mRec === 'parent'
+      );
+      if (isDirectRecipient) {
+        if (!m.studentId) return true;
+        const mSid = String(m.studentId).trim();
+        if (mSid === cId || (cUnif && mSid === cUnif) || (cRoll && mSid === cRoll) || (cNat && mSid === cNat)) {
+          return true;
+        }
+      }
+
+      // Class or cohort broadcasts
+      if (
+        mRec === 'all' || 
+        mRec === 'all_cohort_parents' || 
+        (mRec.startsWith('all_class_') && activeChild.classId === mRec.replace('all_class_', ''))
+      ) {
+        if (!m.studentId) return true;
+        const mSid = String(m.studentId).trim();
+        if (mSid === cId || (cUnif && mSid === cUnif) || (cRoll && mSid === cRoll) || (cNat && mSid === cNat)) {
+          return true;
+        }
+      }
+    }
+
+    // 3. Fallback: message receiverRole is parent and no specific receiver or student is set
+    if (m.receiverRole === 'parent' && !m.receiverId && !m.studentId) {
+      return true;
+    }
+
+    // 4. Content mentions the student's name or unified number
+    if (m.content) {
+      const normContent = m.content.toLowerCase().replace(/\s+/g, ' ');
+      if (cName && normContent.includes(cName)) return true;
+      if (cUnif && m.content.includes(`#${cUnif}`)) return true;
+    }
+
+    return false;
+  }, [activeChild, selectedParentId]);
+
   const childBehaviorMessages = messages.filter(m => {
-    // Strictly scoped to this student: if studentId exists, must match selectedChildId
-    const isForChild = m.studentId ? m.studentId === selectedChildId : true;
-    const isForParent = m.receiverId === selectedParentId || m.receiverRole === 'parent' || m.receiverId === 'parent' || m.receiverId === selectedChildId;
+    const isForChild = isMessageForThisStudent(m);
     const isFromStaff = m.senderRole === 'teacher' || m.senderRole === 'director';
-    const isBehavior = m.content.includes('سلوك') || 
+    const isBehavior = m.category === 'behavior' ||
+                       m.content.includes('سلوك') || 
                        m.content.includes('تنبيه سلوكي') || 
                        m.content.includes('تصنيف الإشعار: سلوك') ||
                        m.content.includes('ملاحظة سلوكية') ||
-                       m.content.includes('تقييم سلوكي');
-    return isForParent && isForChild && isFromStaff && isBehavior;
+                       m.content.includes('تقييم سلوكي') ||
+                       m.content.includes('شكر') ||
+                       m.content.includes('مرفق_صورة') ||
+                       m.content.includes('مرفق_فيديو');
+    return isForChild && (isFromStaff || !m.senderRole) && isBehavior;
   }).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
   const unreadBehaviorCount = childBehaviorMessages.filter(m => !m.read).length;
 
   const unreadMessagesCount = messages.filter(m => {
-    const isForChild = !m.studentId || m.studentId === selectedChildId;
-    const isClassCircular = m.receiverId?.startsWith('all_class_') && activeChild?.classId === m.receiverId.replace('all_class_', '');
-    const isCohortCircular = m.receiverId === 'all_cohort_parents' || m.receiverId === 'all';
-    const isDirectToMe = m.receiverId === selectedParentId || (m.receiverRole === 'parent' && !m.receiverId);
-    const isTarget = isForChild && (isDirectToMe || isCohortCircular || isClassCircular);
+    const isTarget = isMessageForThisStudent(m);
     const isIncoming = m.senderRole !== 'parent' && m.senderId !== selectedParentId;
     return isTarget && isIncoming && !m.read;
   }).length;
@@ -1988,25 +2105,16 @@ ${url}
 
   const renderChatPanel = () => {
     // 1. Grade Notifications Messages
-    const teacherGradeMessages = messages.filter(m => {
-      const isRelatedToChild = !m.studentId || m.studentId === selectedChildId;
-      const isForParent = m.receiverId === selectedParentId || m.receiverRole === 'parent';
-      return isRelatedToChild && isForParent && isTeacherGradeMessage(m);
-    }).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    const teacherGradeMessages = messages.filter(m => 
+      isMessageForThisStudent(m) && isTeacherGradeMessage(m)
+    ).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
     // 2. Direct Messages (Incoming & Outgoing between parent, director, teacher)
-    const directMessages = messages.filter(m => {
-      const isRelatedToChild = !m.studentId || m.studentId === selectedChildId;
-      const isClassCircular = m.receiverId?.startsWith('all_class_') && activeChild?.classId === m.receiverId.replace('all_class_', '');
-      const isCohortCircular = m.receiverId === 'all_cohort_parents' || m.receiverId === 'all';
-      const isDirectToMe = m.senderId === selectedParentId || m.receiverId === selectedParentId;
-      const isParentInvolved = isDirectToMe || isCohortCircular || isClassCircular || (m.receiverRole === 'parent' && !m.receiverId);
-      return isRelatedToChild && isParentInvolved && !isTeacherGradeMessage(m);
-    }).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    const directMessages = messages.filter(m => 
+      isMessageForThisStudent(m) && !isTeacherGradeMessage(m)
+    ).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
-    const unreadDirectCount = directMessages.filter(m => 
-      (m.receiverId === selectedParentId || m.receiverId === 'all' || m.receiverId === 'all_cohort_parents' || (m.receiverId?.startsWith('all_class_') && activeChild?.classId === m.receiverId.replace('all_class_', ''))) && !m.read
-    ).length;
+    const unreadDirectCount = directMessages.filter(m => !m.read && m.senderRole !== 'parent').length;
 
     return (
       <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between min-h-[520px] text-right" style={{ direction: 'rtl' }}>
@@ -2055,14 +2163,14 @@ ${url}
             >
               <Award className="w-3.5 h-3.5" />
               <span>📊 إشعارات رصد الدرجات</span>
-              {teacherGradeMessages.filter(m => m.receiverId === selectedParentId && !m.read).length > 0 && (
+              {teacherGradeMessages.filter(m => !m.read).length > 0 && (
                 <span className="bg-emerald-500 text-white text-[9px] px-1.5 py-0.2 rounded-full font-bold">
-                  {teacherGradeMessages.filter(m => m.receiverId === selectedParentId && !m.read).length}
+                  {teacherGradeMessages.filter(m => !m.read).length}
                 </span>
               )}
             </button>
 
-            {(unreadDirectCount > 0 || teacherGradeMessages.filter(m => m.receiverId === selectedParentId && !m.read).length > 0) && (
+            {(unreadDirectCount > 0 || teacherGradeMessages.filter(m => !m.read).length > 0) && (
               <button
                 type="button"
                 onClick={markAllAsRead}
@@ -2374,9 +2482,31 @@ ${url}
     return 'general';
   };
 
+  const isGradeForActiveChild = React.useCallback((g: Grade): boolean => {
+    if (!activeChild) return false;
+    const sid = String(g.studentId || '').trim();
+    if (!sid) return false;
+    const cId = String(activeChild.id || '').trim();
+    const cUnif = String(activeChild.unifiedNo || '').trim();
+    const cRoll = String(activeChild.rollNo || '').trim();
+    const cNat = String(activeChild.nationalId || '').trim();
+    return sid === cId || (cUnif && sid === cUnif) || (cRoll && sid === cRoll) || (cNat && sid === cNat);
+  }, [activeChild]);
+
+  const isAttendanceForActiveChild = React.useCallback((a: Attendance): boolean => {
+    if (!activeChild) return false;
+    const sid = String(a.studentId || '').trim();
+    if (!sid) return false;
+    const cId = String(activeChild.id || '').trim();
+    const cUnif = String(activeChild.unifiedNo || '').trim();
+    const cRoll = String(activeChild.rollNo || '').trim();
+    const cNat = String(activeChild.nationalId || '').trim();
+    return sid === cId || (cUnif && sid === cUnif) || (cRoll && sid === cRoll) || (cNat && sid === cNat);
+  }, [activeChild]);
+
   // Filter and sort child-specific grades
   const childGrades = React.useMemo(() => {
-    let list = grades.filter(g => g.studentId === selectedChildId);
+    let list = grades.filter(isGradeForActiveChild);
 
     // Filter by type
     if (gradeTypeFilter !== 'all') {
@@ -2403,20 +2533,23 @@ ${url}
       }
       return 0;
     });
-  }, [grades, selectedChildId, gradeTypeFilter, gradeSortBy]);
+  }, [grades, isGradeForActiveChild, gradeTypeFilter, gradeSortBy]);
 
   // Filter child-specific attendance
-  const childAttendance = attendance.filter(a => a.studentId === selectedChildId);
+  const childAttendance = attendance.filter(isAttendanceForActiveChild);
 
   // Filter announcements for parents or all
-  const filteredAnnouncements = announcements.filter(a => a.target === 'parents' || a.target === 'all');
+  const filteredAnnouncements = announcements.filter(a => a.target === 'parents' || a.target === 'all' || !a.target);
 
   // Track unread counts for grades, attendance, announcements
-  const unreadGradesCount = grades.filter(g => g.studentId === selectedChildId && !readGradeIds.includes(g.id)).length;
-  const isEvalUnread = !!(monthlyEvaluations[selectedChildId] && monthlyEvaluations[selectedChildId].text.trim() && monthlyEvaluations[selectedChildId].text !== readMonthlyEval);
+  const unreadGradesCount = grades.filter(g => isGradeForActiveChild(g) && !readGradeIds.includes(g.id)).length;
+  const isEvalUnread = !!(
+    (monthlyEvaluations[selectedChildId] && monthlyEvaluations[selectedChildId].text.trim() && monthlyEvaluations[selectedChildId].text !== readMonthlyEval) ||
+    (activeChild?.unifiedNo && monthlyEvaluations[activeChild.unifiedNo] && monthlyEvaluations[activeChild.unifiedNo].text.trim() && monthlyEvaluations[activeChild.unifiedNo].text !== readMonthlyEval)
+  );
   const totalUnreadGrades = unreadGradesCount + (isEvalUnread ? 1 : 0);
 
-  const unreadAttendanceCount = attendance.filter(a => a.studentId === selectedChildId && !readAttendanceIds.includes(a.id)).length;
+  const unreadAttendanceCount = attendance.filter(a => isAttendanceForActiveChild(a) && !readAttendanceIds.includes(a.id)).length;
   const unreadAnnouncementsCount = filteredAnnouncements.filter(a => !readAnnouncementIds.includes(a.id)).length;
 
   // Grade badge helper
@@ -2442,33 +2575,48 @@ ${url}
       .replace(/\[مرفق_فيديو:\s*([^\]]+)\]/g, '')
       .trim();
 
-    // Check if this is a official grade report notification
-    if (cleanedContent.includes('📢 [إشعار رسمي: كشف درجات الطالب]') || cleanedContent.includes('كشف درجات الطالب')) {
+    // Check if this is an official grade report notification (matches all Director and Teacher formats)
+    const isGradeReportNotification = 
+      cleanedContent.includes('كشف درجات') || 
+      cleanedContent.includes('كشف رصد وتقرير درجات') || 
+      cleanedContent.includes('كشف نتائج ودرجات') || 
+      cleanedContent.includes('نتائج ودرجات المواد') ||
+      cleanedContent.includes('التقرير الشهري للدرجات') ||
+      cleanedContent.includes('📢 [إشعار رسمي: كشف درجات الطالب]');
+
+    if (isGradeReportNotification) {
       let parsedGrades: { subject: string; score: number }[] = [];
       let avgValue = '';
       let estimationValue = '';
       let monthValue = '';
 
-      // Match month: "لشهر (شهر)" or "لشهر شهر"
-      const monthMatch = cleanedContent.match(/لشهر\s*(?:\(([^)]+)\)|([^\s\n\(\)]+))/);
+      // Match month: "📅 الشهر: [شهر]" or "📅 شهر: [شهر]" or "لشهر شهر"
+      const monthMatch = cleanedContent.match(/📅\s*الشهر:\s*\[?([^\]\n|]+)\]?/) || 
+                         cleanedContent.match(/📅\s*شهر:\s*\[?([^\]\n|]+)\]?/) || 
+                         cleanedContent.match(/لشهر\s*(?:\(([^)]+)\)|([^\s\n\(\)]+))/);
       if (monthMatch) {
-        monthValue = monthMatch[1] || monthMatch[2];
+        monthValue = (monthMatch[1] || monthMatch[2] || '').trim();
       }
 
       const lines = cleanedContent.split('\n');
       lines.forEach(line => {
-        const matchGrade = line.match(/^\s*-\s*([^:]+):\s*(\d+)/);
+        // Matches "• 📘 الرياضيات: ❪ 95 / 100 ❫" or "- الرياضيات: 95" or "الرياضيات: 95"
+        const matchGrade = line.match(/[•\-*]?\s*(?:📘|📚)?\s*[*]?([^:：*]+)[*]?\s*[:：]\s*(?:❪\s*[*]?\s*(\d+)|(\d+))/);
         if (matchGrade) {
-          parsedGrades.push({
-            subject: matchGrade[1].trim(),
-            score: parseInt(matchGrade[2], 10)
-          });
+          const sub = matchGrade[1].trim();
+          const score = parseInt(matchGrade[2] || matchGrade[3], 10);
+          if (!isNaN(score) && !sub.includes('المعدل') && !sub.includes('حضور') && !sub.includes('غياب') && !sub.includes('تأخر') && !sub.includes('إجمالي') && !sub.includes('الطالب') && !sub.includes('الصف')) {
+            parsedGrades.push({
+              subject: sub,
+              score
+            });
+          }
         }
-        const matchAvg = line.match(/المعدل العام:\s*([\d.]+%?)/);
+        const matchAvg = line.match(/المعدل(?: العام)?:\s*❪?\s*[*]?\s*([0-9.]+%?)/);
         if (matchAvg) {
           avgValue = matchAvg[1].trim();
         }
-        const matchEst = line.match(/التقدير العام:\s*(.*)$/);
+        const matchEst = line.match(/التقدير(?: النهائي| العام)?:\s*❪?\s*[*]?\s*([^❫*\n|]+)/);
         if (matchEst) {
           estimationValue = matchEst[1].trim();
         }
@@ -3178,6 +3326,18 @@ ${url}
                 </button>
               )}
 
+              {/* زر تحديث البيانات اليدوي */}
+              <button
+                type="button"
+                onClick={handleParentManualRefresh}
+                disabled={isParentRefreshing}
+                className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 px-3 py-2 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs shrink-0"
+                title="تحديث البيانات والكشوفات والدرجات المستلمة فوراً"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 text-indigo-600 ${isParentRefreshing ? 'animate-spin' : ''}`} />
+                <span>{isParentRefreshing ? 'تحديث...' : parentRefreshSuccess ? 'تم التحديث ✓' : 'تحديث'}</span>
+              </button>
+
               <button
                 type="button"
                 onClick={handleLogout}
@@ -3243,15 +3403,42 @@ ${url}
                           ? parsedSubjects 
                           : ['الرياضيات', 'العلوم', 'اللغة العربية', 'التربية الإسلامية', 'اللغة الإنجليزية', 'الاجتماعيات'];
 
-                        // Get all months that have grades for this child or sent certified sheets
-                        const allChildGrades = grades.filter(g => g.studentId === selectedChildId);
-                        const childSentMonths = sentGradeSheets
-                          .filter(sheet => sheet.studentsSummary?.some(s => 
-                            s.studentId === selectedChildId || 
-                            (activeChild?.unifiedNo && (s.unifiedNo === activeChild.unifiedNo || s.rollNo === activeChild.unifiedNo)) ||
-                            (activeChild?.name && s.studentName === activeChild.name)
-                          ))
-                          .map(s => s.month);
+                        // Flexible student matching helper for sent grade sheets
+                        const doesSummaryContainStudent = (s: any, child: Student | null | undefined): boolean => {
+                          if (!s || !child) return false;
+                          const cId = String(child.id || '').trim();
+                          const cUnif = String(child.unifiedNo || '').trim();
+                          const cRoll = String(child.rollNo || '').trim();
+                          const cNat = String(child.nationalId || '').trim();
+                          const cName = String(child.name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+
+                          const sId = String(s.studentId || '').trim();
+                          const sUnif = String(s.unifiedNo || '').trim();
+                          const sRoll = String(s.rollNo || '').trim();
+                          const sNat = String(s.nationalId || '').trim();
+                          const sName = String(s.studentName || '').trim().toLowerCase().replace(/\s+/g, ' ');
+
+                          if (cId && sId && cId.toLowerCase() === sId.toLowerCase()) return true;
+                          if (cUnif && sUnif && cUnif === sUnif) return true;
+                          if (cUnif && sRoll && cUnif === sRoll) return true;
+                          if (cRoll && sRoll && cRoll === sRoll) return true;
+                          if (cRoll && sUnif && cRoll === sUnif) return true;
+                          if (cNat && sNat && cNat === sNat) return true;
+                          if (cNat && sUnif && cNat === sUnif) return true;
+                          if (cNat && sRoll && cNat === sRoll) return true;
+                          if (cName && sName && (cName === sName || cName.includes(sName) || sName.includes(cName))) return true;
+                          return false;
+                        };
+
+                        // 1. Get all grades for this child across all identifiers
+                        const allChildGrades = grades.filter(isGradeForActiveChild);
+
+                        // 2. Get all certified grade sheets sent for this student
+                        const studentSheets = sentGradeSheets.filter(sheet => 
+                          Array.isArray(sheet.studentsSummary) && sheet.studentsSummary.some(s => doesSummaryContainStudent(s, activeChild))
+                        );
+                        const childSentMonths = studentSheets.map(s => s.month).filter(Boolean);
+
                         const uniqueGradeMonths = Array.from(new Set([
                           ...allChildGrades.map(g => g.examName).filter(Boolean),
                           ...childSentMonths
@@ -3262,27 +3449,35 @@ ${url}
                         const studentGrades = allChildGrades.filter(g => g.examName === targetMonth);
 
                         // Find any certified sent grade sheet for this target month and this child
-                        const sentSheetForMonth = sentGradeSheets.find(sheet => 
-                          sheet.month === targetMonth && 
-                          sheet.studentsSummary?.some(s => 
-                            s.studentId === selectedChildId || 
-                            (activeChild?.unifiedNo && (String(s.unifiedNo).trim() === String(activeChild.unifiedNo).trim() || String(s.rollNo).trim() === String(activeChild.unifiedNo).trim())) ||
-                            (activeChild?.rollNo && (String(s.rollNo).trim() === String(activeChild.rollNo).trim() || String(s.unifiedNo).trim() === String(activeChild.rollNo).trim())) ||
-                            (activeChild?.name && s.studentName?.trim().toLowerCase() === activeChild.name.trim().toLowerCase())
-                          )
-                        );
-                        const sentStudentSummary = sentSheetForMonth?.studentsSummary?.find(s => 
-                          s.studentId === selectedChildId || 
-                          (activeChild?.unifiedNo && (String(s.unifiedNo).trim() === String(activeChild.unifiedNo).trim() || String(s.rollNo).trim() === String(activeChild.unifiedNo).trim())) ||
-                          (activeChild?.rollNo && (String(s.rollNo).trim() === String(activeChild.rollNo).trim() || String(s.unifiedNo).trim() === String(activeChild.rollNo).trim())) ||
-                          (activeChild?.name && s.studentName?.trim().toLowerCase() === activeChild.name.trim().toLowerCase())
-                        );
+                        const sentSheetForMonth = studentSheets.find(sheet => sheet.month === targetMonth);
+                        const sentStudentSummary = sentSheetForMonth?.studentsSummary?.find(s => doesSummaryContainStudent(s, activeChild));
 
-                        // If sent sheet contains subjects not in activeSubjects, include them so no grades are hidden
+                        // 3. Also parse any grades mentioned in teacher/director grade messages for this student & month
+                        const studentGradeMessages = messages.filter(m => isMessageForThisStudent(m) && isTeacherGradeMessage(m));
+                        const messageGradesMap: Record<string, number> = {};
+                        for (const msg of studentGradeMessages) {
+                          if (targetMonth && !msg.content.includes(targetMonth) && studentGradeMessages.length > 1) {
+                            continue;
+                          }
+                          const regex1 = /[•\-\*]?\s*(?:📘|📕|📗|📙|📐|🧪|🕌|🇬🇧|🌍)?\s*([^:\n\r]+?)\s*:\s*[❪\(]?\s*(\d+(?:\.\d+)?)\s*(?:\/|\s*من\s*)?\s*(?:\d+)?\s*[❫\)]?/g;
+                          let match: RegExpExecArray | null;
+                          while ((match = regex1.exec(msg.content)) !== null) {
+                            const sub = match[1].trim();
+                            const sc = parseFloat(match[2]);
+                            if (sub && !isNaN(sc) && !sub.includes('المعدل') && !sub.includes('النتيجة') && !sub.includes('التقييم') && !sub.includes('الشهر')) {
+                              if (messageGradesMap[sub] === undefined) {
+                                messageGradesMap[sub] = sc;
+                              }
+                            }
+                          }
+                        }
+
+                        // If sent sheet or messages contain subjects not in activeSubjects, include them so no grades are hidden
                         const subjectsFromSent = sentStudentSummary && Array.isArray(sentStudentSummary.scores)
                           ? sentStudentSummary.scores.map(sc => sc.subject).filter(Boolean)
                           : [];
-                        const combinedSubjects = Array.from(new Set([...activeSubjects, ...subjectsFromSent]));
+                        const subjectsFromMessages = Object.keys(messageGradesMap);
+                        const combinedSubjects = Array.from(new Set([...activeSubjects, ...subjectsFromSent, ...subjectsFromMessages]));
 
                         let totalScore = 0;
                         let scoredCount = 0;
@@ -3296,6 +3491,9 @@ ${url}
                             if (sentSub && sentSub.score !== null && sentSub.score !== undefined) {
                               finalScore = sentSub.score;
                             }
+                          }
+                          if (finalScore === null && messageGradesMap[sub] !== undefined) {
+                            finalScore = messageGradesMap[sub];
                           }
 
                           if (finalScore !== null) {
@@ -3422,11 +3620,12 @@ ${url}
                         };
 
                         return (
-                          <div
-                            id="parent-report-card-container"
-                            className="bg-white rounded-3xl border-2 border-indigo-200 shadow-xl overflow-hidden mb-6 text-right transition-all"
-                            style={{ direction: 'rtl' }}
-                          >
+                          <>
+                            <div
+                              id="parent-report-card-container"
+                              className="bg-white rounded-3xl border-2 border-indigo-200 shadow-xl overflow-hidden mb-6 text-right transition-all"
+                              style={{ direction: 'rtl' }}
+                            >
                             {/* 1. Official School Header Banner */}
                             <div className="bg-gradient-to-l from-indigo-950 via-slate-900 to-indigo-900 text-white p-5 sm:p-6 relative overflow-hidden">
                               <div className="absolute top-0 right-0 w-96 h-96 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none" />
@@ -3793,8 +3992,119 @@ ${url}
                               </div>
                             </div>
                           </div>
-                        );
-                      })()}
+
+                          {/* 7. Dedicated Archive of Sent Certified Grade Sheets */}
+                          <div className="mt-8 space-y-4 no-print">
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-200 pb-3">
+                              <div>
+                                <h4 className="text-sm font-black text-slate-800 flex items-center gap-2">
+                                  <FileSpreadsheet className="w-4 h-4 text-indigo-600" />
+                                  <span>📜 أرشيف وسجل كشوف الدرجات والشهادات المعتمدة</span>
+                                </h4>
+                                <p className="text-[11px] text-slate-500 mt-0.5">
+                                  جميع كشوفات الدرجات والتقارير الشهرية الرسمية المعتمدة الصادرة من الإدارة والمعلمين لهذا الطالب.
+                                </p>
+                              </div>
+                              <span className="text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-100 px-3 py-1 rounded-full self-start sm:self-auto">
+                                {studentSheets.length} كشف معتمد وموثق
+                              </span>
+                            </div>
+
+                            {studentSheets.length === 0 ? (
+                              <div className="bg-slate-50 border border-dashed border-slate-200 p-6 rounded-2xl text-center text-slate-500 text-xs space-y-2">
+                                <div className="w-10 h-10 bg-slate-100 text-slate-400 rounded-full flex items-center justify-center mx-auto text-lg">
+                                  📄
+                                </div>
+                                <div className="font-bold text-slate-700">لا توجد كشوف درجات مجمعة مرسلة بعد</div>
+                                <p className="text-[11px] text-slate-400 max-w-md mx-auto">
+                                  بمجرد اعتماد وإرسال كشف الدرجات الشهري من قبل الإدارة أو المعلم سيتم أرشفته وتوثيقه هنا تلقائياً، وتستطيع استعراضه وطباعته في أي وقت.
+                                </p>
+                              </div>
+                            ) : (
+                              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
+                                {studentSheets.map((sheet, sIdx) => {
+                                  const sSum = sheet.studentsSummary?.find(s => doesSummaryContainStudent(s, activeChild));
+                                  const isCurrentActive = targetMonth === sheet.month;
+                                  return (
+                                    <div
+                                      key={sheet.id || `${sheet.month}_${sIdx}`}
+                                      className={`p-4 rounded-2xl border transition-all text-right space-y-3 relative overflow-hidden ${
+                                        isCurrentActive
+                                          ? 'bg-gradient-to-br from-indigo-50/90 via-white to-amber-50/40 border-indigo-300 shadow-sm ring-2 ring-indigo-200'
+                                          : 'bg-white hover:bg-slate-50/80 border-slate-200 shadow-2xs hover:shadow-xs'
+                                      }`}
+                                    >
+                                      <div className="flex items-center justify-between gap-2 border-b border-slate-100 pb-2">
+                                        <span className="text-xs font-black text-indigo-950 flex items-center gap-1.5">
+                                          <span>📅</span>
+                                          <span>شهر: {sheet.month}</span>
+                                        </span>
+                                        <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200">
+                                          {sheet.className || 'كشف رسمي'}
+                                        </span>
+                                      </div>
+
+                                      <div className="space-y-1">
+                                        <div className="text-xs font-bold text-slate-800 line-clamp-1">
+                                          {sheet.title || `كشف درجات شهر ${sheet.month}`}
+                                        </div>
+                                        <div className="text-[10px] text-slate-400">
+                                          تاريخ الإرسال: {sheet.dateSent ? new Date(sheet.dateSent).toLocaleDateString('ar-SY', { year: 'numeric', month: 'short', day: 'numeric' }) : 'معتمد'}
+                                        </div>
+                                      </div>
+
+                                      {sSum && (
+                                        <div className="bg-slate-50/80 p-2.5 rounded-xl border border-slate-100 flex items-center justify-between text-xs">
+                                          <div>
+                                            <span className="text-[10px] text-slate-400 block font-bold">المعدل:</span>
+                                            <span className="font-black text-indigo-700 font-mono">
+                                              {sSum.average ? `${String(sSum.average).replace('%', '')}%` : '---'}
+                                            </span>
+                                          </div>
+                                          <div className="text-left">
+                                            <span className="text-[10px] text-slate-400 block font-bold">التقدير:</span>
+                                            <span className="font-bold text-emerald-700 text-[11px]">
+                                              {sSum.estimation || 'ناجح بتفوق 🌟'}
+                                            </span>
+                                          </div>
+                                        </div>
+                                      )}
+
+                                      <div className="flex items-center gap-2 pt-1 border-t border-slate-100">
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setParentSelectedMonth(sheet.month);
+                                            const el = document.getElementById('parent-report-card-container');
+                                            if (el) el.scrollIntoView({ behavior: 'smooth' });
+                                          }}
+                                          className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[11px] py-1.5 px-2.5 rounded-xl transition flex items-center justify-center gap-1 cursor-pointer shadow-2xs"
+                                        >
+                                          <span>عرض الكشف 👁️</span>
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setParentSelectedMonth(sheet.month);
+                                            setTimeout(() => {
+                                              printElementById('parent-report-card-container', `كشف درجات الطالب ${activeChild?.name || ''} - شهر ${sheet.month}`);
+                                            }, 150);
+                                          }}
+                                          className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-[11px] py-1.5 px-2.5 rounded-xl transition flex items-center justify-center gap-1 cursor-pointer border border-slate-200"
+                                          title="طباعة كشف هذا الشهر"
+                                        >
+                                          <Printer className="w-3.5 h-3.5" />
+                                        </button>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        </>
+                      );
+                    })()}
                     </>
                   )}
                 </motion.div>
