@@ -546,8 +546,9 @@ export default function App() {
           if (Array.isArray(parsedSheets) && parsedSheets.length > 0) {
             const reconstructedGrades: Grade[] = [];
             for (const sheet of parsedSheets) {
-              const month = sheet.month || 'شهر تشرين';
-              for (const res of sheet.studentResults || []) {
+              const month = sheet.month || 'التاسع';
+              const summaryList = sheet.studentsSummary || sheet.studentResults || [];
+              for (const res of summaryList) {
                 if (res.studentId && Array.isArray(res.scores)) {
                   for (const sc of res.scores) {
                     if (sc.subject && sc.score !== null && sc.score !== undefined) {
@@ -555,11 +556,11 @@ export default function App() {
                         id: `g_rec_${res.studentId}_${sc.subject}_${month}`.replace(/\s+/g, '_'),
                         studentId: res.studentId,
                         subject: sc.subject,
-                        examName: `اختبار ${month}`,
+                        examName: month,
                         score: Number(sc.score) || 0,
                         maxScore: Number(sc.maxScore) || 100,
                         date: sheet.dateSent ? sheet.dateSent.slice(0, 10) : new Date().toISOString().slice(0, 10),
-                        teacherId: '',
+                        teacherId: 'director',
                         examType: 'monthly'
                       });
                     }
@@ -569,7 +570,7 @@ export default function App() {
             }
             if (reconstructedGrades.length > 0) {
               setGrades(reconstructedGrades);
-              persistDirectToFirestore('school_grades', reconstructedGrades);
+              try { localStorage.setItem('school_grades', JSON.stringify(reconstructedGrades)); } catch {}
             }
           }
         } catch {}

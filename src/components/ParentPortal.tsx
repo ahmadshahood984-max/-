@@ -382,6 +382,113 @@ export default function ParentPortal({
     }
   });
 
+  const [directGrades, setDirectGrades] = useState<Grade[]>(() => {
+    try {
+      const saved = localStorage.getItem('school_grades');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const [directMessages, setDirectMessages] = useState<Message[]>(() => {
+    try {
+      const saved = localStorage.getItem('school_messages');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const effectiveGrades = (grades && grades.length > 0) ? grades : directGrades;
+  const effectiveMessages = (messages && messages.length > 0) ? messages : directMessages;
+
+  // Complete fetch function from Firestore directly to guarantee data on any new browser/device
+  const fetchAllParentDataFromFirestore = async () => {
+    try {
+      const { doc, getDoc } = await import('firebase/firestore');
+      const { db } = await import('../lib/firebase');
+      if (!db) return;
+
+      // 1. Sent Grade Sheets
+      try {
+        const sentSnap = await getDoc(doc(db, 'school_live_data', 'school_sent_grade_sheets'));
+        if (sentSnap.exists()) {
+          const data = sentSnap.data()?.data;
+          if (Array.isArray(data) && data.length > 0) {
+            setSentGradeSheets(deduplicateGradeSheets(data));
+            localStorage.setItem('school_sent_grade_sheets', JSON.stringify(data));
+          }
+        }
+      } catch (err) {
+        console.warn('Sent sheets firestore fetch notice:', err);
+      }
+
+      // 2. Grades
+      try {
+        const gradesSnap = await getDoc(doc(db, 'school_live_data', 'school_grades'));
+        if (gradesSnap.exists()) {
+          const data = gradesSnap.data()?.data;
+          if (Array.isArray(data) && data.length > 0) {
+            setDirectGrades(data);
+            localStorage.setItem('school_grades', JSON.stringify(data));
+          }
+        }
+      } catch (err) {
+        console.warn('Grades firestore fetch notice:', err);
+      }
+
+      // 3. Messages
+      try {
+        const msgsSnap = await getDoc(doc(db, 'school_live_data', 'school_messages'));
+        if (msgsSnap.exists()) {
+          const data = msgsSnap.data()?.data;
+          if (Array.isArray(data) && data.length > 0) {
+            setDirectMessages(data);
+            if (setMessages) setMessages(data);
+            localStorage.setItem('school_messages', JSON.stringify(data));
+          }
+        }
+      } catch (err) {
+        console.warn('Messages firestore fetch notice:', err);
+      }
+
+      // 4. Monthly Evaluations
+      try {
+        const evalSnap = await getDoc(doc(db, 'school_live_data', 'school_monthly_evaluations'));
+        if (evalSnap.exists()) {
+          const data = evalSnap.data()?.data;
+          if (data && typeof data === 'object') {
+            setMonthlyEvaluations(data);
+            localStorage.setItem('school_monthly_evaluations', JSON.stringify(data));
+          }
+        }
+      } catch (err) {
+        console.warn('Monthly eval firestore fetch notice:', err);
+      }
+
+      // 5. Current Evaluation Month
+      try {
+        const monthSnap = await getDoc(doc(db, 'school_live_data', 'school_evaluation_current_month'));
+        if (monthSnap.exists()) {
+          const data = monthSnap.data()?.data;
+          if (data && typeof data === 'string') {
+            setCurrentEvaluationMonth(data);
+            localStorage.setItem('school_evaluation_current_month', data);
+          }
+        }
+      } catch (err) {
+        console.warn('Month firestore fetch notice:', err);
+      }
+
+      window.dispatchEvent(new CustomEvent('school_storage_update', {
+        detail: { key: 'manual_refresh', value: String(Date.now()) }
+      }));
+    } catch (err) {
+      console.warn('Error fetching all parent data from Firestore on mount:', err);
+    }
+  };
+
   React.useEffect(() => {
     const handleStorageUpdate = (e?: any) => {
       const savedIcon = localStorage.getItem('school_app_icon');
@@ -396,28 +503,39 @@ export default function ParentPortal({
           setSentGradeSheets(deduplicateGradeSheets(JSON.parse(savedSent)));
         } catch {}
       }
+
+      const savedGrades = localStorage.getItem('school_grades');
+      if (savedGrades) {
+        try {
+          setDirectGrades(JSON.parse(savedGrades));
+        } catch {}
+      }
+
+      const savedMsgs = localStorage.getItem('school_messages');
+      if (savedMsgs) {
+        try {
+          setDirectMessages(JSON.parse(savedMsgs));
+        } catch {}
+      }
+
+      const savedEval = localStorage.getItem('school_monthly_evaluations');
+      if (savedEval) {
+        try {
+          setMonthlyEvaluations(JSON.parse(savedEval));
+        } catch {}
+      }
+
+      const savedMonth = localStorage.getItem('school_evaluation_current_month');
+      if (savedMonth) {
+        try {
+          setCurrentEvaluationMonth(savedMonth.startsWith('"') ? JSON.parse(savedMonth) : savedMonth);
+        } catch {}
+      }
     };
     window.addEventListener('school_storage_update', handleStorageUpdate);
 
-    // Direct Firestore fetch on mount to ensure fresh certified sheets appear on any device
-    (async () => {
-      try {
-        const { doc, getDoc } = await import('firebase/firestore');
-        const { db } = await import('../lib/firebase');
-        if (db) {
-          const sentSnap = await getDoc(doc(db, 'school_live_data', 'school_sent_grade_sheets'));
-          if (sentSnap.exists()) {
-            const data = sentSnap.data()?.data;
-            if (Array.isArray(data) && data.length > 0) {
-              setSentGradeSheets(deduplicateGradeSheets(data));
-              localStorage.setItem('school_sent_grade_sheets', JSON.stringify(data));
-            }
-          }
-        }
-      } catch (err) {
-        console.warn('Error fetching sent grade sheets from Firestore on mount:', err);
-      }
-    })();
+    // Initial direct Firestore sync on mount
+    fetchAllParentDataFromFirestore();
 
     return () => window.removeEventListener('school_storage_update', handleStorageUpdate);
   }, []);
@@ -429,45 +547,7 @@ export default function ParentPortal({
   const handleParentManualRefresh = async () => {
     setIsParentRefreshing(true);
     try {
-      // 1. Refresh sent grade sheets from localStorage
-      const savedSent = localStorage.getItem('school_sent_grade_sheets');
-      if (savedSent) {
-        try {
-          setSentGradeSheets(deduplicateGradeSheets(JSON.parse(savedSent)));
-        } catch {}
-      }
-
-      // 2. Refresh monthly evaluations
-      const savedEval = localStorage.getItem('school_monthly_evaluations');
-      if (savedEval) {
-        try {
-          setMonthlyEvaluations(JSON.parse(savedEval));
-        } catch {}
-      }
-
-      // 3. Dispatch storage update to trigger reloads
-      window.dispatchEvent(new CustomEvent('school_storage_update', {
-        detail: { key: 'manual_refresh', value: String(Date.now()) }
-      }));
-
-      // 4. Direct Firestore check if available
-      try {
-        const { doc, getDoc } = await import('firebase/firestore');
-        const { db } = await import('../lib/firebase');
-        if (db) {
-          const sentSnap = await getDoc(doc(db, 'school_live_data', 'school_sent_grade_sheets'));
-          if (sentSnap.exists()) {
-            const data = sentSnap.data()?.data;
-            if (Array.isArray(data) && data.length > 0) {
-              setSentGradeSheets(deduplicateGradeSheets(data));
-              localStorage.setItem('school_sent_grade_sheets', JSON.stringify(data));
-            }
-          }
-        }
-      } catch {
-        // quota or offline fallback
-      }
-
+      await fetchAllParentDataFromFirestore();
       setParentRefreshSuccess(true);
       setTimeout(() => setParentRefreshSuccess(false), 3000);
     } finally {
@@ -1779,7 +1859,7 @@ ${url}
     return false;
   }, [activeChild, selectedParentId]);
 
-  const childBehaviorMessages = messages.filter(m => {
+  const childBehaviorMessages = effectiveMessages.filter(m => {
     const isForChild = isMessageForThisStudent(m);
     const isFromStaff = m.senderRole === 'teacher' || m.senderRole === 'director';
     const isBehavior = m.category === 'behavior' ||
@@ -1796,7 +1876,7 @@ ${url}
 
   const unreadBehaviorCount = childBehaviorMessages.filter(m => !m.read).length;
 
-  const unreadMessagesCount = messages.filter(m => {
+  const unreadMessagesCount = effectiveMessages.filter(m => {
     const isTarget = isMessageForThisStudent(m);
     const isIncoming = m.senderRole !== 'parent' && m.senderId !== selectedParentId;
     return isTarget && isIncoming && !m.read;
@@ -2105,12 +2185,12 @@ ${url}
 
   const renderChatPanel = () => {
     // 1. Grade Notifications Messages
-    const teacherGradeMessages = messages.filter(m => 
+    const teacherGradeMessages = effectiveMessages.filter(m => 
       isMessageForThisStudent(m) && isTeacherGradeMessage(m)
     ).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
     // 2. Direct Messages (Incoming & Outgoing between parent, director, teacher)
-    const directMessages = messages.filter(m => 
+    const directMessages = effectiveMessages.filter(m => 
       isMessageForThisStudent(m) && !isTeacherGradeMessage(m)
     ).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
@@ -2506,7 +2586,7 @@ ${url}
 
   // Filter and sort child-specific grades
   const childGrades = React.useMemo(() => {
-    let list = grades.filter(isGradeForActiveChild);
+    let list = effectiveGrades.filter(isGradeForActiveChild);
 
     // Filter by type
     if (gradeTypeFilter !== 'all') {
@@ -2533,7 +2613,7 @@ ${url}
       }
       return 0;
     });
-  }, [grades, isGradeForActiveChild, gradeTypeFilter, gradeSortBy]);
+  }, [effectiveGrades, isGradeForActiveChild, gradeTypeFilter, gradeSortBy]);
 
   // Filter child-specific attendance
   const childAttendance = attendance.filter(isAttendanceForActiveChild);
@@ -2542,7 +2622,7 @@ ${url}
   const filteredAnnouncements = announcements.filter(a => a.target === 'parents' || a.target === 'all' || !a.target);
 
   // Track unread counts for grades, attendance, announcements
-  const unreadGradesCount = grades.filter(g => isGradeForActiveChild(g) && !readGradeIds.includes(g.id)).length;
+  const unreadGradesCount = effectiveGrades.filter(g => isGradeForActiveChild(g) && !readGradeIds.includes(g.id)).length;
   const isEvalUnread = !!(
     (monthlyEvaluations[selectedChildId] && monthlyEvaluations[selectedChildId].text.trim() && monthlyEvaluations[selectedChildId].text !== readMonthlyEval) ||
     (activeChild?.unifiedNo && monthlyEvaluations[activeChild.unifiedNo] && monthlyEvaluations[activeChild.unifiedNo].text.trim() && monthlyEvaluations[activeChild.unifiedNo].text !== readMonthlyEval)
@@ -3430,8 +3510,33 @@ ${url}
                           return false;
                         };
 
+                        const normalizeSubject = (str: string): string => {
+                          return (str || '')
+                            .trim()
+                            .toLowerCase()
+                            .replace(/^ال/, '')
+                            .replace(/^تربية\s+/, '')
+                            .replace(/^لغة\s+/, '')
+                            .replace(/ة$/, 'ه')
+                            .replace(/[أإآ]/g, 'ا')
+                            .replace(/\s+/g, '');
+                        };
+
+                        const matchSubject = (a: string, b: string): boolean => {
+                          if (!a || !b) return false;
+                          if (a.trim() === b.trim()) return true;
+                          const na = normalizeSubject(a);
+                          const nb = normalizeSubject(b);
+                          if (na === nb) return true;
+                          if (na.includes(nb) || nb.includes(na)) return true;
+                          if ((na === 'عربي' || na === 'عربيه' || na === 'لغه') && (nb === 'عربي' || nb === 'عربيه' || nb === 'لغه')) return true;
+                          if ((na === 'اسلاميه' || na === 'ديانه') && (nb === 'اسلاميه' || nb === 'ديانه')) return true;
+                          if (na === 'رياضيات' && nb === 'رياضيات') return true;
+                          return false;
+                        };
+
                         // 1. Get all grades for this child across all identifiers
-                        const allChildGrades = grades.filter(isGradeForActiveChild);
+                        const allChildGrades = effectiveGrades.filter(isGradeForActiveChild);
 
                         // 2. Get all certified grade sheets sent for this student
                         const studentSheets = sentGradeSheets.filter(sheet => 
@@ -3444,8 +3549,10 @@ ${url}
                           ...childSentMonths
                         ]));
                         
-                        // Default month to show: prefer explicit selection, or the latest available month
-                        const targetMonth = parentSelectedMonth || uniqueGradeMonths[0] || currentEvaluationMonth;
+                        // Default month to show: prefer explicit selection if available, or first month with actual recorded grades
+                        const targetMonth = (parentSelectedMonth && (uniqueGradeMonths.includes(parentSelectedMonth) || parentSelectedMonth === currentEvaluationMonth))
+                          ? parentSelectedMonth
+                          : (uniqueGradeMonths[0] || currentEvaluationMonth);
                         const studentGrades = allChildGrades.filter(g => g.examName === targetMonth);
 
                         // Find any certified sent grade sheet for this target month and this child
@@ -3453,7 +3560,7 @@ ${url}
                         const sentStudentSummary = sentSheetForMonth?.studentsSummary?.find(s => doesSummaryContainStudent(s, activeChild));
 
                         // 3. Also parse any grades mentioned in teacher/director grade messages for this student & month
-                        const studentGradeMessages = messages.filter(m => isMessageForThisStudent(m) && isTeacherGradeMessage(m));
+                        const studentGradeMessages = effectiveMessages.filter(m => isMessageForThisStudent(m) && isTeacherGradeMessage(m));
                         const messageGradesMap: Record<string, number> = {};
                         for (const msg of studentGradeMessages) {
                           if (targetMonth && !msg.content.includes(targetMonth) && studentGradeMessages.length > 1) {
@@ -3472,28 +3579,38 @@ ${url}
                           }
                         }
 
-                        // If sent sheet or messages contain subjects not in activeSubjects, include them so no grades are hidden
+                        // Collect all distinct subjects from active subjects, sent sheets, and messages
                         const subjectsFromSent = sentStudentSummary && Array.isArray(sentStudentSummary.scores)
                           ? sentStudentSummary.scores.map(sc => sc.subject).filter(Boolean)
                           : [];
                         const subjectsFromMessages = Object.keys(messageGradesMap);
-                        const combinedSubjects = Array.from(new Set([...activeSubjects, ...subjectsFromSent, ...subjectsFromMessages]));
+
+                        // Combine subjects without duplicates (using matchSubject)
+                        const combinedSubjects: string[] = [...activeSubjects];
+                        for (const sub of [...subjectsFromSent, ...subjectsFromMessages]) {
+                          if (!combinedSubjects.some(existing => matchSubject(existing, sub))) {
+                            combinedSubjects.push(sub);
+                          }
+                        }
 
                         let totalScore = 0;
                         let scoredCount = 0;
                         const gradeValues = combinedSubjects.map(sub => {
-                          const subGrade = studentGrades.find(g => g.subject === sub);
+                          const subGrade = studentGrades.find(g => matchSubject(g.subject, sub));
                           let finalScore: number | null = null;
                           if (subGrade && subGrade.score !== null && subGrade.score !== undefined) {
                             finalScore = subGrade.score;
                           } else if (sentStudentSummary && Array.isArray(sentStudentSummary.scores)) {
-                            const sentSub = sentStudentSummary.scores.find(sc => sc.subject === sub);
+                            const sentSub = sentStudentSummary.scores.find(sc => matchSubject(sc.subject, sub));
                             if (sentSub && sentSub.score !== null && sentSub.score !== undefined) {
                               finalScore = sentSub.score;
                             }
                           }
-                          if (finalScore === null && messageGradesMap[sub] !== undefined) {
-                            finalScore = messageGradesMap[sub];
+                          if (finalScore === null) {
+                            const msgMatchKey = Object.keys(messageGradesMap).find(k => matchSubject(k, sub));
+                            if (msgMatchKey && messageGradesMap[msgMatchKey] !== undefined) {
+                              finalScore = messageGradesMap[msgMatchKey];
+                            }
                           }
 
                           if (finalScore !== null) {
@@ -3672,9 +3789,14 @@ ${url}
                                       onChange={(e) => setParentSelectedMonth(e.target.value)}
                                       className="bg-transparent text-white text-xs font-black focus:outline-none cursor-pointer"
                                     >
-                                      {Array.from(new Set([currentEvaluationMonth, ...uniqueGradeMonths])).map(m => (
-                                        <option key={m} value={m} className="bg-slate-900 text-white">{m}</option>
-                                      ))}
+                                      {Array.from(new Set([...uniqueGradeMonths, currentEvaluationMonth])).map(m => {
+                                        const hasData = uniqueGradeMonths.includes(m);
+                                        return (
+                                          <option key={m} value={m} className="bg-slate-900 text-white">
+                                            {m} {hasData ? '🌟 (الكشف معتمد)' : ''}
+                                          </option>
+                                        );
+                                      })}
                                     </select>
                                   </div>
 
