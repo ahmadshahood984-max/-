@@ -7,6 +7,8 @@ import { Teacher, Student, Parent, Class, Attendance, Grade, Announcement, Messa
 
 import seedData from './seedData.json';
 
+import firestoreBackup from './firestoreBackup.json';
+
 export const INITIAL_CLASSES: Class[] = (seedData.classes || []) as Class[];
 
 export const INITIAL_TEACHERS: Teacher[] = (seedData.teachers || []) as Teacher[];
@@ -17,10 +19,17 @@ export const INITIAL_STUDENTS: Student[] = (seedData.students || []) as Student[
 
 export const INITIAL_ATTENDANCE: Attendance[] = [];
 
-export const INITIAL_GRADES: Grade[] = [];
+export const INITIAL_GRADES: Grade[] = (firestoreBackup.grades || []) as Grade[];
+
+export const INITIAL_SENT_GRADE_SHEETS: any[] = (firestoreBackup.sentGradeSheets || []) as any[];
+
+export const INITIAL_MONTHLY_EVALUATIONS: Record<string, any> = (firestoreBackup.monthlyEvaluations || {}) as Record<string, any>;
+
+export const DEFAULT_EVALUATION_MONTH: string = firestoreBackup.currentMonth || 'التاسع';
 
 export const INITIAL_ANNOUNCEMENTS: Announcement[] = [];
 
 export const INITIAL_MESSAGES: Message[] = [];
 
 export const INITIAL_EXCUSES: AbsenceExcuse[] = [];
+

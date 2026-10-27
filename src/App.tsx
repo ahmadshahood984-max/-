@@ -130,8 +130,14 @@ export default function App() {
   });
 
   const [grades, setGrades] = useState<Grade[]>(() => {
-    const saved = localStorage.getItem('school_grades');
-    return saved ? JSON.parse(saved) : INITIAL_GRADES;
+    try {
+      const saved = localStorage.getItem('school_grades');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {}
+    return INITIAL_GRADES;
   });
 
   const [announcements, setAnnouncements] = useState<Announcement[]>(() => {

@@ -736,11 +736,11 @@ export default function DirectorPortal({
     : parseFloat(effectivePassGrade) || null;
 
   const [currentEvaluationMonth, setCurrentEvaluationMonth] = useState<string>(() => {
-    return localStorage.getItem('school_evaluation_current_month') || 'تشرين الأول';
+    return localStorage.getItem('school_evaluation_current_month') || 'التاسع';
   });
   const [savedEvaluationMonths, setSavedEvaluationMonths] = useState<string[]>(() => {
     const saved = localStorage.getItem('school_saved_evaluation_months');
-    return saved ? JSON.parse(saved) : ['تشرين الأول', 'تشرين الثاني', 'كانون الأول', 'كانون الثاني', 'شباط', 'آذار', 'نيسان', 'أيار'];
+    return saved ? JSON.parse(saved) : ['التاسع', 'تشرين الأول', 'تشرين الثاني', 'كانون الأول', 'كانون الثاني', 'شباط', 'آذار', 'نيسان', 'أيار'];
   });
   const [isAddingNewMonth, setIsAddingNewMonth] = useState(false);
   const [newMonthName, setNewMonthName] = useState('');
@@ -1251,9 +1251,6 @@ ${lateDays > 0 ? `• 🟡 *أيام التأخر:* ❪ *${lateDays} يوم* ❫
 ${subjectsDetails}
 
 📊 *المعدل العام:* ❪ *${avgFormatted}* ❫ | 🌟 *التقدير النهائي:* *${estimation}*
-
-📌 *سجل الحضور والمواظبة:*
-• 🟢 *حضور:* ❪ *${presentDays} يوم* ❫ | 🔴 *غياب:* ❪ *${absentDays} يوم* ❫${lateDays > 0 ? ` | 🟡 *تأخر:* ❪ *${lateDays} يوم* ❫` : ''} | 📊 *إجمالي:* ❪ *${totalDays} يوم* ❫
 
 📝 *توجيهات وتقارير المتابعة:*
 ${directivesFormatted}
@@ -4586,9 +4583,6 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
 ${subjectsDetails}
 
 📊 المعدل العام: ❪ ${avgFormatted} ❫ | 🌟 التقدير العام: ${estimation}
-
-📌 سجل المواظبة والحضور:
-• 🟢 حضور: ❪ ${presentDays} يوم ❫ | 🔴 غياب: ❪ ${absentDays} يوم ❫ | 📊 إجمالي: ❪ ${totalDays} يوم ❫
 
 📝 توجيهات وتقارير المتابعة:
 ${directivesFormatted}
@@ -10230,9 +10224,6 @@ if __name__ == "__main__":
 ${sampleGrades}
 
 📊 *المعدل العام:* ❪ *${sampleAvg}* ❫ | 🌟 *التقدير النهائي:* *${sampleEst}*
-
-📌 *سجل الحضور والمواظبة:*
-• 🟢 *حضور:* ❪ *${samplePresent} يوم* ❫ | 🔴 *غياب:* ❪ *${sampleAbsent} يوم* ❫ | 📊 *إجمالي:* ❪ *${sampleTotalDays} يوم* ❫
 
 📝 *توجيهات وتقارير المتابعة:*
 ${sampleEval}

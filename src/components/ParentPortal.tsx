@@ -50,7 +50,7 @@ import {
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { Parent, Student, Attendance, Grade, Announcement, Message, AbsenceExcuse, Teacher, Class, SentGradeSheet } from '../types';
-import { INITIAL_STUDENTS, INITIAL_CLASSES, INITIAL_TEACHERS } from '../data';
+import { INITIAL_STUDENTS, INITIAL_CLASSES, INITIAL_TEACHERS, INITIAL_GRADES, INITIAL_SENT_GRADE_SHEETS, INITIAL_MONTHLY_EVALUATIONS, DEFAULT_EVALUATION_MONTH } from '../data';
 import { PortalDesignerBadge } from './PortalDesignerBadge';
 import { GradeSheetSignatures } from './GradeSheetSignatures';
 import { printElementById, downloadElementAsImage, exportElementAsPdf } from '../lib/printUtils';
@@ -60,6 +60,7 @@ import { getStoredWelcomeMessages, WelcomeMessagesConfig } from '../lib/welcomeM
 import { motion, AnimatePresence } from 'motion/react';
 import { trackActivityOperation } from '../lib/firestoreTracker';
 import { forceRefreshDataFromFirestore, fetchStudentsOnlyDirectly } from '../lib/firebaseSync';
+import { supabase, fetchStudentGradesByParent, fetchCertifiedGradeSheetsByParent } from '../lib/supabase';
 
 interface ParentPortalProps {
   parents: Parent[];
@@ -376,19 +377,27 @@ export default function ParentPortal({
   const [sentGradeSheets, setSentGradeSheets] = useState<SentGradeSheet[]>(() => {
     try {
       const saved = localStorage.getItem('school_sent_grade_sheets');
-      return saved ? deduplicateGradeSheets(JSON.parse(saved)) : [];
-    } catch {
-      return [];
-    }
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return deduplicateGradeSheets(parsed);
+        }
+      }
+    } catch {}
+    return deduplicateGradeSheets(INITIAL_SENT_GRADE_SHEETS as SentGradeSheet[]);
   });
 
   const [directGrades, setDirectGrades] = useState<Grade[]>(() => {
     try {
       const saved = localStorage.getItem('school_grades');
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed;
+        }
+      }
+    } catch {}
+    return INITIAL_GRADES;
   });
 
   const [directMessages, setDirectMessages] = useState<Message[]>(() => {
@@ -410,75 +419,88 @@ export default function ParentPortal({
       const { db } = await import('../lib/firebase');
       if (!db) return;
 
-      // 1. Sent Grade Sheets
-      try {
-        const sentSnap = await getDoc(doc(db, 'school_live_data', 'school_sent_grade_sheets'));
-        if (sentSnap.exists()) {
-          const data = sentSnap.data()?.data;
-          if (Array.isArray(data) && data.length > 0) {
-            setSentGradeSheets(deduplicateGradeSheets(data));
-            localStorage.setItem('school_sent_grade_sheets', JSON.stringify(data));
-          }
+      const fetchDocWithTimeout = async (docRef: any, ms = 1200): Promise<any> => {
+        try {
+          return await Promise.race([
+            getDoc(docRef),
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), ms))
+          ]);
+        } catch {
+          return null;
         }
-      } catch (err) {
-        console.warn('Sent sheets firestore fetch notice:', err);
+      };
+
+      // Run parallel fetches with strict 1.2s timeout so connections never hang in Syria without VPN
+      const [sentSnap, gradesSnap, msgsSnap, evalSnap, monthSnap] = await Promise.all([
+        fetchDocWithTimeout(doc(db, 'school_live_data', 'school_sent_grade_sheets')),
+        fetchDocWithTimeout(doc(db, 'school_live_data', 'school_grades')),
+        fetchDocWithTimeout(doc(db, 'school_live_data', 'school_messages')),
+        fetchDocWithTimeout(doc(db, 'school_live_data', 'school_monthly_evaluations')),
+        fetchDocWithTimeout(doc(db, 'school_live_data', 'school_evaluation_current_month'))
+      ]);
+
+      if (sentSnap && sentSnap.exists()) {
+        const data = sentSnap.data()?.data;
+        if (Array.isArray(data) && data.length > 0) {
+          setSentGradeSheets(deduplicateGradeSheets(data));
+          localStorage.setItem('school_sent_grade_sheets', JSON.stringify(data));
+        }
       }
 
-      // 2. Grades
-      try {
-        const gradesSnap = await getDoc(doc(db, 'school_live_data', 'school_grades'));
-        if (gradesSnap.exists()) {
-          const data = gradesSnap.data()?.data;
-          if (Array.isArray(data) && data.length > 0) {
-            setDirectGrades(data);
-            localStorage.setItem('school_grades', JSON.stringify(data));
-          }
+      if (gradesSnap && gradesSnap.exists()) {
+        const data = gradesSnap.data()?.data;
+        if (Array.isArray(data) && data.length > 0) {
+          setDirectGrades(data);
+          localStorage.setItem('school_grades', JSON.stringify(data));
         }
-      } catch (err) {
-        console.warn('Grades firestore fetch notice:', err);
       }
 
-      // 3. Messages
-      try {
-        const msgsSnap = await getDoc(doc(db, 'school_live_data', 'school_messages'));
-        if (msgsSnap.exists()) {
-          const data = msgsSnap.data()?.data;
-          if (Array.isArray(data) && data.length > 0) {
-            setDirectMessages(data);
-            if (setMessages) setMessages(data);
-            localStorage.setItem('school_messages', JSON.stringify(data));
-          }
+      if (msgsSnap && msgsSnap.exists()) {
+        const data = msgsSnap.data()?.data;
+        if (Array.isArray(data) && data.length > 0) {
+          setDirectMessages(data);
+          if (setMessages) setMessages(data);
+          localStorage.setItem('school_messages', JSON.stringify(data));
         }
-      } catch (err) {
-        console.warn('Messages firestore fetch notice:', err);
       }
 
-      // 4. Monthly Evaluations
-      try {
-        const evalSnap = await getDoc(doc(db, 'school_live_data', 'school_monthly_evaluations'));
-        if (evalSnap.exists()) {
-          const data = evalSnap.data()?.data;
-          if (data && typeof data === 'object') {
-            setMonthlyEvaluations(data);
-            localStorage.setItem('school_monthly_evaluations', JSON.stringify(data));
-          }
+      if (evalSnap && evalSnap.exists()) {
+        const data = evalSnap.data()?.data;
+        if (data && typeof data === 'object') {
+          setMonthlyEvaluations(data);
+          localStorage.setItem('school_monthly_evaluations', JSON.stringify(data));
         }
-      } catch (err) {
-        console.warn('Monthly eval firestore fetch notice:', err);
       }
 
-      // 5. Current Evaluation Month
+      if (monthSnap && monthSnap.exists()) {
+        const data = monthSnap.data()?.data;
+        if (data && typeof data === 'string') {
+          setCurrentEvaluationMonth(data);
+          localStorage.setItem('school_evaluation_current_month', data);
+        }
+      }
+
+      // 6. Supabase & Relational Database query for student grades by Parent / Student ID
       try {
-        const monthSnap = await getDoc(doc(db, 'school_live_data', 'school_evaluation_current_month'));
-        if (monthSnap.exists()) {
-          const data = monthSnap.data()?.data;
-          if (data && typeof data === 'string') {
-            setCurrentEvaluationMonth(data);
-            localStorage.setItem('school_evaluation_current_month', data);
+        if (activeChild) {
+          const [supaGrades, supaSheets] = await Promise.all([
+            fetchStudentGradesByParent(selectedParentId, activeChild.id, activeChild.unifiedNo),
+            fetchCertifiedGradeSheetsByParent(selectedParentId, activeChild.id, activeChild.unifiedNo)
+          ]);
+          if (Array.isArray(supaGrades) && supaGrades.length > 0) {
+            setDirectGrades(prev => {
+              const map = new Map<string, Grade>();
+              prev.forEach(g => map.set(g.id || `${g.studentId}_${g.subject}_${g.examName}`, g));
+              supaGrades.forEach(g => map.set(g.id || `${g.studentId}_${g.subject}_${g.examName}`, g));
+              return Array.from(map.values());
+            });
+          }
+          if (Array.isArray(supaSheets) && supaSheets.length > 0) {
+            setSentGradeSheets(prev => deduplicateGradeSheets([...prev, ...supaSheets]));
           }
         }
       } catch (err) {
-        console.warn('Month firestore fetch notice:', err);
+        console.warn('Supabase relational sync notice:', err);
       }
 
       window.dispatchEvent(new CustomEvent('school_storage_update', {
@@ -2020,7 +2042,7 @@ ${url}
 
   // Monthly Evaluation state for ParentPortal
   const [currentEvaluationMonth, setCurrentEvaluationMonth] = useState<string>(() => {
-    return localStorage.getItem('school_evaluation_current_month') || 'تشرين الأول';
+    return localStorage.getItem('school_evaluation_current_month') || DEFAULT_EVALUATION_MONTH;
   });
   const [parentSelectedMonth, setParentSelectedMonth] = useState<string>('');
   const [monthlyEvaluations, setMonthlyEvaluations] = useState<Record<string, { month?: string; text?: string; teacherText?: string; directorText?: string }>>(() => {
@@ -2032,7 +2054,7 @@ ${url}
         // ignore
       }
     }
-    return {};
+    return INITIAL_MONTHLY_EVALUATIONS;
   });
 
   // Blocked Grades state for ParentPortal
@@ -2133,7 +2155,7 @@ ${url}
   }, [activeTab, selectedParentId, selectedChildId, childBehaviorMessages, monthlyEvaluations, setMessages]);
 
   React.useEffect(() => {
-    const savedMonth = localStorage.getItem('school_evaluation_current_month') || 'تشرين الأول';
+    const savedMonth = localStorage.getItem('school_evaluation_current_month') || DEFAULT_EVALUATION_MONTH;
     setCurrentEvaluationMonth(savedMonth);
     const savedEval = localStorage.getItem('school_monthly_evaluations');
     if (savedEval) {
@@ -3549,10 +3571,25 @@ ${url}
                           ...childSentMonths
                         ]));
                         
-                        // Default month to show: prefer explicit selection if available, or first month with actual recorded grades
-                        const targetMonth = (parentSelectedMonth && (uniqueGradeMonths.includes(parentSelectedMonth) || parentSelectedMonth === currentEvaluationMonth))
-                          ? parentSelectedMonth
-                          : (uniqueGradeMonths[0] || currentEvaluationMonth);
+                        // Helper: check if a month has real recorded scores or sent sheet for this child
+                        const doesMonthHaveRecordedGrades = (m: string) => {
+                          if (!m) return false;
+                          const inGrades = allChildGrades.some(g => g.examName === m && g.score !== null && g.score !== undefined);
+                          const inSheets = studentSheets.some(s => s.month === m);
+                          return inGrades || inSheets;
+                        };
+
+                        // Auto-select the month:
+                        // 1. If user explicitly selected parentSelectedMonth AND (it has data OR no month has data)
+                        // 2. Otherwise pick the month with actual recorded grades (e.g. "التاسع")
+                        // 3. Fallback to uniqueGradeMonths[0] or currentEvaluationMonth
+                        let targetMonth = currentEvaluationMonth;
+                        if (parentSelectedMonth && (doesMonthHaveRecordedGrades(parentSelectedMonth) || !uniqueGradeMonths.some(doesMonthHaveRecordedGrades))) {
+                          targetMonth = parentSelectedMonth;
+                        } else {
+                          const monthWithData = uniqueGradeMonths.find(doesMonthHaveRecordedGrades);
+                          targetMonth = monthWithData || uniqueGradeMonths[0] || currentEvaluationMonth;
+                        }
                         const studentGrades = allChildGrades.filter(g => g.examName === targetMonth);
 
                         // Find any certified sent grade sheet for this target month and this child
@@ -3790,7 +3827,7 @@ ${url}
                                       className="bg-transparent text-white text-xs font-black focus:outline-none cursor-pointer"
                                     >
                                       {Array.from(new Set([...uniqueGradeMonths, currentEvaluationMonth])).map(m => {
-                                        const hasData = uniqueGradeMonths.includes(m);
+                                        const hasData = doesMonthHaveRecordedGrades(m);
                                         return (
                                           <option key={m} value={m} className="bg-slate-900 text-white">
                                             {m} {hasData ? '🌟 (الكشف معتمد)' : ''}
