@@ -3532,6 +3532,43 @@ ${url}
                           return false;
                         };
 
+                        const isEnglishSubject = (s: string): boolean => {
+                          const norm = (s || '').trim().toLowerCase().replace(/[أإآ]/g, 'ا').replace(/ة$/, 'ه');
+                          return norm.includes('انكليز') || 
+                                 norm.includes('انجليز') || 
+                                 norm.includes('اجنبي') || 
+                                 norm.includes('english') || 
+                                 norm === 'لغه' || 
+                                 norm === 'اللغه' || 
+                                 norm === 'لغة' || 
+                                 norm === 'اللغة';
+                        };
+
+                        const isArabicSubject = (s: string): boolean => {
+                          const norm = (s || '').trim().toLowerCase().replace(/[أإآ]/g, 'ا').replace(/ة$/, 'ه');
+                          return norm.includes('عرب') || norm === 'لغه عربيه' || norm === 'اللغه العربيه';
+                        };
+
+                        const isMathSubject = (s: string): boolean => {
+                          const norm = (s || '').trim().toLowerCase().replace(/[أإآ]/g, 'ا').replace(/ة$/, 'ه');
+                          return norm.includes('رياض') || norm.includes('حساب');
+                        };
+
+                        const isScienceSubject = (s: string): boolean => {
+                          const norm = (s || '').trim().toLowerCase().replace(/[أإآ]/g, 'ا').replace(/ة$/, 'ه');
+                          return norm.includes('علوم') || norm.includes('فيزيا') || norm.includes('كيميا') || norm.includes('احيا');
+                        };
+
+                        const isReligionSubject = (s: string): boolean => {
+                          const norm = (s || '').trim().toLowerCase().replace(/[أإآ]/g, 'ا').replace(/ة$/, 'ه');
+                          return norm.includes('اسلام') || norm.includes('ديان') || norm.includes('دين') || norm.includes('فقه') || norm.includes('توحيد') || norm.includes('قران');
+                        };
+
+                        const isSocialSubject = (s: string): boolean => {
+                          const norm = (s || '').trim().toLowerCase().replace(/[أإآ]/g, 'ا').replace(/ة$/, 'ه');
+                          return norm.includes('اجتماع') || norm.includes('تاريخ') || norm.includes('جغرافي') || norm.includes('وطني');
+                        };
+
                         const normalizeSubject = (str: string): string => {
                           return (str || '')
                             .trim()
@@ -3547,13 +3584,33 @@ ${url}
                         const matchSubject = (a: string, b: string): boolean => {
                           if (!a || !b) return false;
                           if (a.trim() === b.trim()) return true;
+
+                          // 1. English / Foreign language matching (e.g. 'لغة' <-> 'اللغة الإنجليزية')
+                          if (isEnglishSubject(a) && isEnglishSubject(b)) return true;
+                          // If one is explicitly Arabic and the other is English, they MUST NOT match!
+                          if ((isArabicSubject(a) && isEnglishSubject(b)) || (isEnglishSubject(a) && isArabicSubject(b))) return false;
+
+                          // 2. Arabic language matching (e.g. 'العربي' <-> 'اللغة العربية')
+                          if (isArabicSubject(a) && isArabicSubject(b)) return true;
+
+                          // 3. Math matching ('رياضيات' <-> 'الرياضيات')
+                          if (isMathSubject(a) && isMathSubject(b)) return true;
+
+                          // 4. Science matching ('علوم' <-> 'العلوم')
+                          if (isScienceSubject(a) && isScienceSubject(b)) return true;
+
+                          // 5. Islamic Studies / Religion matching ('اسلامية' <-> 'التربية الإسلامية')
+                          if (isReligionSubject(a) && isReligionSubject(b)) return true;
+
+                          // 6. Social studies matching ('اجتماعيات' <-> 'الاجتماعيات')
+                          if (isSocialSubject(a) && isSocialSubject(b)) return true;
+
+                          // 7. General fallback normalized substring match
                           const na = normalizeSubject(a);
                           const nb = normalizeSubject(b);
                           if (na === nb) return true;
-                          if (na.includes(nb) || nb.includes(na)) return true;
-                          if ((na === 'عربي' || na === 'عربيه' || na === 'لغه') && (nb === 'عربي' || nb === 'عربيه' || nb === 'لغه')) return true;
-                          if ((na === 'اسلاميه' || na === 'ديانه') && (nb === 'اسلاميه' || nb === 'ديانه')) return true;
-                          if (na === 'رياضيات' && nb === 'رياضيات') return true;
+                          if (na.length >= 3 && nb.length >= 3 && (na.includes(nb) || nb.includes(na))) return true;
+
                           return false;
                         };
 

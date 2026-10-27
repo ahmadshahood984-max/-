@@ -10375,6 +10375,9 @@ ${sampleEval}
                             <tr className="bg-slate-50 text-slate-600 text-xs font-semibold border-b border-slate-100">
                               <th className="p-4">الرقم الموحد</th>
                               <th className="p-4">اسم الطالب</th>
+                              <th className="p-4 text-center min-w-[200px] bg-emerald-50/70 text-emerald-900 border-x border-emerald-100 font-bold">
+                                إرسال التقييم عبر واتساب 📲
+                              </th>
                               {uniqueSubjects.map(sub => (
                                 <th key={sub} className="p-4 text-center">{sub}</th>
                               ))}
@@ -10382,7 +10385,6 @@ ${sampleEval}
                               <th className="p-4 text-center">التقدير</th>
                               <th className="p-4 text-center min-w-[180px]">توجيهات المعلم</th>
                               <th className="p-4 text-center min-w-[180px]">توجيهات الإدارة</th>
-                              <th className="p-4 text-center min-w-[210px]">إرسال التقييم عبر واتساب 📲</th>
                               <th className="p-4 text-center min-w-[320px]">
                                 <span className="text-slate-600 block text-xs">حجب كشف الدرجات للطلب</span>
                               </th>
@@ -10402,6 +10404,13 @@ ${sampleEval}
                               
                               let totalScore = 0;
                               let scoredCount = 0;
+                              uniqueSubjects.forEach(sub => {
+                                const subGrade = studentGrades.find(g => g.subject === sub);
+                                if (subGrade && typeof subGrade.score === 'number' && !isNaN(subGrade.score)) {
+                                  totalScore += subGrade.score;
+                                  scoredCount++;
+                                }
+                              });
                               
                               const evalForMonth = monthlyEvaluations[`${student.id}_${currentEvaluationMonth}`] || 
                                 (monthlyEvaluations[student.id]?.month === currentEvaluationMonth ? monthlyEvaluations[student.id] : null) ||
@@ -10415,12 +10424,74 @@ ${sampleEval}
                                 </span>
                               </td>
                               <td className="p-4 font-bold text-slate-800">{student.name}</td>
+                              {/* WhatsApp Send Column directly next to student's name */}
+                              <td className="p-2 text-center min-w-[200px] bg-emerald-50/20 border-x border-emerald-100/60">
+                                {(() => {
+                                  const waKey = `${student.id}_monthly_${currentEvaluationMonth}`;
+                                  const waRecord = whatsappSentRecords[waKey];
+                                  const parent = parents.find(p => p.childrenIds.includes(student.id) || p.id === student.parentId);
+                                  const parentPhone = parent?.phone || '';
+                                  const teacherText = evalForMonth?.teacherText !== undefined ? evalForMonth.teacherText : (evalForMonth?.text || '');
+                                  const directorText = evalForMonth?.directorText || '';
+
+                                  return (
+                                    <div className="flex flex-col items-center gap-1 w-full">
+                                      {waRecord ? (
+                                        <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 p-2 rounded-xl text-[10px] font-bold w-full text-center space-y-1.5 shadow-2xs">
+                                          <div className="flex items-center justify-center gap-1 text-emerald-700">
+                                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                                            <span>تم الإرسال عبر الواتس ✅</span>
+                                          </div>
+                                          <div className="text-[9px] text-emerald-600 font-mono dir-ltr text-center">
+                                            {waRecord.timeLabel} ({waRecord.dateLabel})
+                                          </div>
+                                          <div className="flex items-center gap-1 mt-1">
+                                            <button
+                                              type="button"
+                                              onClick={() => handleSendMonthlyWhatsApp(student, parentPhone, currentEvaluationMonth, evalForMonth?.text, studentGrades, uniqueSubjects, totalScore, scoredCount, teacherText, directorText, true)}
+                                              className="flex-1 text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-1 px-2 rounded-lg transition cursor-pointer flex items-center justify-center gap-1 shadow-2xs"
+                                              title="إعادة إرسال مباشرة عبر الواتساب ونسخ النص"
+                                            >
+                                              <MessageSquare className="w-3 h-3" />
+                                              <span>إعادة إرسال 📲</span>
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() => handleSendMonthlyWhatsApp(student, parentPhone, currentEvaluationMonth, evalForMonth?.text, studentGrades, uniqueSubjects, totalScore, scoredCount, teacherText, directorText, false)}
+                                              className="bg-white hover:bg-slate-100 text-slate-700 font-bold text-[10px] py-1 px-1.5 rounded-lg transition cursor-pointer border border-slate-300 shrink-0"
+                                              title="تعديل صياغة النص قبل الإرسال"
+                                            >
+                                              ✏️
+                                            </button>
+                                          </div>
+                                        </div>
+                                      ) : (
+                                        <div className="flex items-center gap-1 w-full">
+                                          <button
+                                            type="button"
+                                            onClick={() => handleSendMonthlyWhatsApp(student, parentPhone, currentEvaluationMonth, evalForMonth?.text, studentGrades, uniqueSubjects, totalScore, scoredCount, teacherText, directorText, true)}
+                                            className="flex-1 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white font-bold text-xs py-2 px-2.5 rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5 shadow-xs"
+                                            title="إرسال تقرير الدرجات مباشرة عبر الواتساب ونسخ النص تلقائياً"
+                                          >
+                                            <MessageSquare className="w-4 h-4" />
+                                            <span>إرسال عبر الواتس 📲</span>
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => handleSendMonthlyWhatsApp(student, parentPhone, currentEvaluationMonth, evalForMonth?.text, studentGrades, uniqueSubjects, totalScore, scoredCount, teacherText, directorText, false)}
+                                            className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs py-2 px-2 rounded-xl transition cursor-pointer border border-slate-300 shrink-0"
+                                            title="تعديل صياغة النص قبل الإرسال"
+                                          >
+                                            ✏️
+                                          </button>
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })()}
+                              </td>
                               {uniqueSubjects.map(sub => {
                                 const subGrade = studentGrades.find(g => g.subject === sub);
-                                if (subGrade) {
-                                  totalScore += subGrade.score;
-                                  scoredCount++;
-                                }
                                 return (
                                   <td key={sub} className="p-2 text-center font-semibold text-slate-700 min-w-[70px]">
                                     <input
@@ -10560,72 +10631,6 @@ ${sampleEval}
                                   className="w-full text-xs border border-slate-200 hover:border-indigo-400 focus:border-indigo-600 rounded-lg p-1.5 focus:outline-none text-right bg-amber-50/30 focus:bg-white"
                                   placeholder="توجيهات الإدارة..."
                                 />
-                              </td>
-                              {/* WhatsApp Send Column with Status Indicator */}
-                              <td className="p-2 text-center min-w-[180px]">
-                                {(() => {
-                                  const waKey = `${student.id}_monthly_${currentEvaluationMonth}`;
-                                  const waRecord = whatsappSentRecords[waKey];
-                                  const parent = parents.find(p => p.childrenIds.includes(student.id) || p.id === student.parentId);
-                                  const parentPhone = parent?.phone || '';
-                                  const teacherText = evalForMonth?.teacherText !== undefined ? evalForMonth.teacherText : (evalForMonth?.text || '');
-                                  const directorText = evalForMonth?.directorText || '';
-
-                                  return (
-                                    <div className="flex flex-col items-center gap-1 w-full">
-                                      {waRecord ? (
-                                        <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 p-2 rounded-xl text-[10px] font-bold w-full text-center space-y-1.5 shadow-2xs">
-                                          <div className="flex items-center justify-center gap-1 text-emerald-700">
-                                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                                            <span>تم الإرسال عبر الواتس ✅</span>
-                                          </div>
-                                          <div className="text-[9px] text-emerald-600 font-mono dir-ltr text-center">
-                                            {waRecord.timeLabel} ({waRecord.dateLabel})
-                                          </div>
-                                          <div className="flex items-center gap-1 mt-1">
-                                            <button
-                                              type="button"
-                                              onClick={() => handleSendMonthlyWhatsApp(student, parentPhone, currentEvaluationMonth, evalForMonth?.text, studentGrades, uniqueSubjects, totalScore, scoredCount, teacherText, directorText, true)}
-                                              className="flex-1 text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-1 px-2 rounded-lg transition cursor-pointer flex items-center justify-center gap-1 shadow-2xs"
-                                              title="إعادة إرسال مباشرة عبر الواتساب ونسخ النص"
-                                            >
-                                              <MessageSquare className="w-3 h-3" />
-                                              <span>إعادة إرسال 📲</span>
-                                            </button>
-                                            <button
-                                              type="button"
-                                              onClick={() => handleSendMonthlyWhatsApp(student, parentPhone, currentEvaluationMonth, evalForMonth?.text, studentGrades, uniqueSubjects, totalScore, scoredCount, teacherText, directorText, false)}
-                                              className="bg-white hover:bg-slate-100 text-slate-700 font-bold text-[10px] py-1 px-1.5 rounded-lg transition cursor-pointer border border-slate-300 shrink-0"
-                                              title="تعديل صياغة النص قبل الإرسال"
-                                            >
-                                              ✏️
-                                            </button>
-                                          </div>
-                                        </div>
-                                      ) : (
-                                        <div className="flex items-center gap-1 w-full">
-                                          <button
-                                            type="button"
-                                            onClick={() => handleSendMonthlyWhatsApp(student, parentPhone, currentEvaluationMonth, evalForMonth?.text, studentGrades, uniqueSubjects, totalScore, scoredCount, teacherText, directorText, true)}
-                                            className="flex-1 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white font-bold text-xs py-2 px-2.5 rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5 shadow-xs"
-                                            title="إرسال تقرير الدرجات مباشرة عبر الواتساب ونسخ النص تلقائياً"
-                                          >
-                                            <MessageSquare className="w-4 h-4" />
-                                            <span>إرسال عبر الواتس 📲</span>
-                                          </button>
-                                          <button
-                                            type="button"
-                                            onClick={() => handleSendMonthlyWhatsApp(student, parentPhone, currentEvaluationMonth, evalForMonth?.text, studentGrades, uniqueSubjects, totalScore, scoredCount, teacherText, directorText, false)}
-                                            className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs py-2 px-2 rounded-xl transition cursor-pointer border border-slate-300 shrink-0"
-                                            title="تعديل صياغة النص قبل الإرسال"
-                                          >
-                                            ✏️
-                                          </button>
-                                        </div>
-                                      )}
-                                    </div>
-                                  );
-                                })()}
                               </td>
                               {/* Block/Withhold Grades Column */}
                               <td className="p-4 text-center min-w-[320px]">
