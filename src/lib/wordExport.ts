@@ -156,12 +156,18 @@ export function exportExamPaperToWord(paper: ExamQuestionPaper, filename?: strin
           padding-top: 12px;
           color: #475569;
         }
+        .btn-delete-question, .no-print {
+          display: none !important;
+          mso-hide: all;
+        }
       </style>
     </head>
     <body dir="rtl">
       ${headerHtml}
       <div class="exam-body-content">
-        ${paper.contentHtml || '<p>لا توجد أسئلة مسجلة حتى الآن.</p>'}
+        ${(paper.contentHtml || '<p>لا توجد أسئلة مسجلة حتى الآن.</p>')
+          .replace(/<button[^>]*class="[^"]*btn-delete-question[^"]*"[^>]*>[\s\S]*?<\/button>/gi, '')
+          .replace(/<button[^>]*>[\s\S]*?<\/button>/gi, '')}
       </div>
       <div class="footer-note">
         ✨ انتهت الأسئلة - مع تمنياتنا لجميع الطلبة بدوام التوفيق والنجاح ✨

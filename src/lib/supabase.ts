@@ -45,7 +45,8 @@ export async function fetchStudentGradesByParent(
           score: row.score,
           maxScore: row.max_score || 100,
           examName: row.exam_name,
-          date: row.date || ''
+          date: row.date || '',
+          teacherId: row.teacher_id || 't1'
         }));
       }
     }
@@ -79,6 +80,7 @@ export async function fetchCertifiedGradeSheetsByParent(
         className: row.class_name,
         classId: row.class_id,
         dateSent: row.date_sent,
+        sentBy: row.sent_by || 'إدارة المدرسة',
         studentCount: row.student_count,
         studentsSummary: row.students_summary || []
       }));

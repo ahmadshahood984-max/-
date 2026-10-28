@@ -61,6 +61,12 @@ import { motion, AnimatePresence } from 'motion/react';
 import { trackActivityOperation } from '../lib/firestoreTracker';
 import { forceRefreshDataFromFirestore, fetchStudentsOnlyDirectly } from '../lib/firebaseSync';
 import { supabase, fetchStudentGradesByParent, fetchCertifiedGradeSheetsByParent } from '../lib/supabase';
+import { 
+  isFirestoreQuotaExceeded, 
+  markFirestoreQuotaExceeded, 
+  isQuotaError, 
+  registerActiveFirestoreListener 
+} from '../lib/quotaManager';
 
 interface ParentPortalProps {
   parents: Parent[];
@@ -414,18 +420,23 @@ export default function ParentPortal({
 
   // Complete fetch function from Firestore directly to guarantee data on any new browser/device
   const fetchAllParentDataFromFirestore = async () => {
+    if (isFirestoreQuotaExceeded()) return;
     try {
       const { doc, getDoc } = await import('firebase/firestore');
       const { db } = await import('../lib/firebase');
-      if (!db) return;
+      if (!db || isFirestoreQuotaExceeded()) return;
 
       const fetchDocWithTimeout = async (docRef: any, ms = 1200): Promise<any> => {
         try {
+          if (isFirestoreQuotaExceeded()) return null;
           return await Promise.race([
             getDoc(docRef),
             new Promise<null>((resolve) => setTimeout(() => resolve(null), ms))
           ]);
-        } catch {
+        } catch (err: any) {
+          if (isQuotaError(err)) {
+            markFirestoreQuotaExceeded(err);
+          }
           return null;
         }
       };
@@ -812,10 +823,11 @@ ${url}
 
     // D. If not found locally (fresh browser/phone session), immediately query Firestore cloud directly in the background
     (async () => {
+      if (isFirestoreQuotaExceeded()) return;
       try {
         const { doc, getDoc } = await import('firebase/firestore');
         const { db } = await import('../lib/firebase');
-        if (db) {
+        if (db && !isFirestoreQuotaExceeded()) {
           const snap = await getDoc(doc(db, 'school_live_data', 'school_students'));
           if (snap.exists()) {
             const allSt = snap.data()?.data;
@@ -837,8 +849,12 @@ ${url}
             }
           }
         }
-      } catch (err) {
-        console.warn('Auto URL student resolve from Firestore error:', err);
+      } catch (err: any) {
+        if (isQuotaError(err)) {
+          markFirestoreQuotaExceeded(err);
+        } else {
+          console.warn('Auto URL student resolve from Firestore error:', err);
+        }
       }
     })();
   }, [students, loggedInStudentId]);
@@ -1200,23 +1216,29 @@ ${url}
         }
 
         // 2. Always persist parent's active device registration in Firestore
-        try {
-          const { doc, setDoc } = await import('firebase/firestore');
-          const { db } = await import('../lib/firebase');
-          if (db) {
-            await setDoc(doc(db, 'fcm_tokens', selectedParentId), {
-              parentId: selectedParentId,
-              parentName: activeParent?.name || 'ولي أمر',
-              token: registeredToken || `device_${Date.now()}_push_ready`,
-              deviceInfo: typeof navigator !== 'undefined' ? navigator.userAgent.slice(0, 140) : 'Web Device',
-              platform: typeof navigator !== 'undefined' && /iPhone|iPad|iPod/.test(navigator.userAgent) ? 'iOS' : 'Android/Web',
-              permission: 'granted',
-              updatedAt: Date.now()
-            }, { merge: true });
-            console.log("[Push Registration] Device successfully registered for parent:", selectedParentId);
+        if (!isFirestoreQuotaExceeded()) {
+          try {
+            const { doc, setDoc } = await import('firebase/firestore');
+            const { db } = await import('../lib/firebase');
+            if (db && !isFirestoreQuotaExceeded()) {
+              await setDoc(doc(db, 'fcm_tokens', selectedParentId), {
+                parentId: selectedParentId,
+                parentName: activeParent?.name || 'ولي أمر',
+                token: registeredToken || `device_${Date.now()}_push_ready`,
+                deviceInfo: typeof navigator !== 'undefined' ? navigator.userAgent.slice(0, 140) : 'Web Device',
+                platform: typeof navigator !== 'undefined' && /iPhone|iPad|iPod/.test(navigator.userAgent) ? 'iOS' : 'Android/Web',
+                permission: 'granted',
+                updatedAt: Date.now()
+              }, { merge: true });
+              console.log("[Push Registration] Device successfully registered for parent:", selectedParentId);
+            }
+          } catch (storeErr: any) {
+            if (isQuotaError(storeErr)) {
+              markFirestoreQuotaExceeded(storeErr);
+            } else {
+              console.warn("[Push Registration] Could not save token to Firestore:", storeErr);
+            }
           }
-        } catch (storeErr) {
-          console.warn("[Push Registration] Could not save token to Firestore:", storeErr);
         }
 
         alert('🎉 تم تفعيل إشعارات الهاتف بنجاح 🔔! ستصلك تنبيهات الدرجات والملاحظات فور رصدها مباشرة.');
@@ -1297,12 +1319,12 @@ ${url}
       setPushPermissionStatus(currentPerm);
 
       // If already granted, auto-register/update device token silently in background
-      if (currentPerm === 'granted' && selectedParentId) {
+      if (currentPerm === 'granted' && selectedParentId && !isFirestoreQuotaExceeded()) {
         (async () => {
           try {
             const { doc, setDoc } = await import('firebase/firestore');
             const { db } = await import('../lib/firebase');
-            if (db) {
+            if (db && !isFirestoreQuotaExceeded()) {
               await setDoc(doc(db, 'fcm_tokens', selectedParentId), {
                 parentId: selectedParentId,
                 parentName: activeParent?.name || 'ولي أمر',
@@ -1312,8 +1334,10 @@ ${url}
                 updatedAt: Date.now()
               }, { merge: true });
             }
-          } catch (e) {
-            // silent catch
+          } catch (e: any) {
+            if (isQuotaError(e)) {
+              markFirestoreQuotaExceeded(e);
+            }
           }
         })();
       }
@@ -1341,9 +1365,20 @@ ${url}
     let unsubscribeFirestore: (() => void) | undefined;
 
     const setupSubscription = async () => {
+      if (isFirestoreQuotaExceeded()) {
+        setIsFirebaseLive(false);
+        setFirebaseErrorMsg('');
+        return;
+      }
+
       try {
         const { collection, onSnapshot, query, orderBy } = await import('firebase/firestore');
         const { db } = await import('../lib/firebase');
+
+        if (!db || isFirestoreQuotaExceeded()) {
+          setIsFirebaseLive(false);
+          return;
+        }
 
         const q = query(
           collection(db, 'notifications'),
@@ -1418,15 +1453,34 @@ ${url}
             }
           });
         }, (error) => {
-          console.error("Firestore subscription error:", error);
+          if (isQuotaError(error)) {
+            markFirestoreQuotaExceeded(error);
+            if (unsubscribeFirestore) {
+              try { unsubscribeFirestore(); } catch {}
+              unsubscribeFirestore = undefined;
+            }
+            console.warn("Firestore subscription quota reached. Notifications functioning in offline local mode.");
+            setIsFirebaseLive(false);
+            setFirebaseErrorMsg('');
+            return;
+          }
+          console.warn("Firestore subscription notice:", error?.message || error);
           setIsFirebaseLive(false);
           setFirebaseErrorMsg('⚠️ انقطع الاتصال المباشر بقاعدة البيانات. تصفح الإشعارات محلياً.');
         });
 
-      } catch (err) {
-        console.error("Error starting Firestore subscription:", err);
+        if (unsubscribeFirestore) {
+          registerActiveFirestoreListener(unsubscribeFirestore);
+        }
+
+      } catch (err: any) {
+        if (isQuotaError(err)) {
+          markFirestoreQuotaExceeded(err);
+        } else {
+          console.warn("Notice starting Firestore subscription:", err?.message || err);
+        }
         setIsFirebaseLive(false);
-        setFirebaseErrorMsg('⚠️ خطأ في تهيئة الاتصال السحابي بالخادم.');
+        setFirebaseErrorMsg('');
       }
     };
 
@@ -1637,29 +1691,35 @@ ${url}
     await dismissNotification(`notif_${msgId}`);
 
     // Update in Firestore notifications collection
-    try {
-      const { doc, updateDoc, collection, query, where, getDocs } = await import('firebase/firestore');
-      const { db } = await import('../lib/firebase');
-      if (db) {
-        // Direct document update
-        updateDoc(doc(db, 'notifications', msgId), {
-          read: true,
-          status: 'read'
-        }).catch(() => {});
-
-        // Query documents where id field matches
-        const q = query(collection(db, 'notifications'), where('id', '==', msgId));
-        getDocs(q).then(snap => {
-          snap.forEach(d => {
-            updateDoc(doc(db, 'notifications', d.id), {
-              read: true,
-              status: 'read'
-            }).catch(() => {});
+    if (!isFirestoreQuotaExceeded()) {
+      try {
+        const { doc, updateDoc, collection, query, where, getDocs } = await import('firebase/firestore');
+        const { db } = await import('../lib/firebase');
+        if (db && !isFirestoreQuotaExceeded()) {
+          // Direct document update
+          updateDoc(doc(db, 'notifications', msgId), {
+            read: true,
+            status: 'read'
+          }).catch((err: any) => {
+            if (isQuotaError(err)) markFirestoreQuotaExceeded(err);
           });
-        }).catch(() => {});
+
+          // Query documents where id field matches
+          const q = query(collection(db, 'notifications'), where('id', '==', msgId));
+          getDocs(q).then(snap => {
+            snap.forEach(d => {
+              updateDoc(doc(db, 'notifications', d.id), {
+                read: true,
+                status: 'read'
+              }).catch(() => {});
+            });
+          }).catch((err: any) => {
+            if (isQuotaError(err)) markFirestoreQuotaExceeded(err);
+          });
+        }
+      } catch {
+        // ignore
       }
-    } catch {
-      // ignore
     }
 
     // If all messages targeting this parent are read, dismiss all notifications completely

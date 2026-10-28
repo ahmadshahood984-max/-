@@ -46,7 +46,7 @@ export const ExamQuestionsManager: React.FC<ExamQuestionsManagerProps> = ({
   examQuestions,
   onSavePaper,
   onDeletePaper,
-  availableSubjects = ['اللغة العربية', 'الرياضيات', 'العلوم', 'التربية الإسلامية', 'اللغة الإنجليزية', 'الاجتماعيات']
+  availableSubjects = ['الرياضيات', 'اللغة العربية', 'العلوم', 'التربية الإسلامية', 'اللغة الإنجليزية', 'الاجتماعيات']
 }) => {
   const [editingPaper, setEditingPaper] = useState<ExamQuestionPaper | null>(null);
   const [isCreatingNew, setIsCreatingNew] = useState<boolean>(false);
@@ -123,7 +123,7 @@ export const ExamQuestionsManager: React.FC<ExamQuestionsManagerProps> = ({
           currentUserRole={currentUserRole}
           currentTeacherName={currentTeacher?.name || 'المعلم'}
           currentTeacherId={currentTeacher?.id || 't1'}
-          defaultSubject={currentTeacher?.subject || availableSubjects[0] || 'اللغة العربية'}
+          defaultSubject={currentTeacher?.subject || availableSubjects[0] || 'الرياضيات'}
           defaultClassName={currentClass?.name || 'الصف الأول'}
           defaultClassId={currentClass?.id || 'c1'}
           availableClasses={classes.map(c => ({ id: c.id, name: c.name }))}

@@ -7,6 +7,12 @@
 
 import { db } from './firebase';
 import { doc, setDoc, increment, onSnapshot } from 'firebase/firestore';
+import { 
+  isFirestoreQuotaExceeded, 
+  markFirestoreQuotaExceeded, 
+  isQuotaError, 
+  registerActiveFirestoreListener 
+} from './quotaManager';
 
 export interface FirestoreMetrics {
   date: string;       // YYYY-MM-DD
@@ -49,7 +55,7 @@ export function loadFirestoreMetrics(): FirestoreMetrics {
       }
     }
   } catch (e) {
-    console.error("Failed to load firestore metrics:", e);
+    console.warn("Notice loading firestore metrics:", e);
   }
 
   // Create new blank metric for today
@@ -85,6 +91,12 @@ export async function incrementFirestoreUsage(reads: number, writes: number) {
   pendingReads += reads;
   pendingWrites += writes;
 
+  if (isFirestoreQuotaExceeded()) {
+    pendingReads = 0;
+    pendingWrites = 0;
+    return;
+  }
+
   if (!usageSyncTimer) {
     usageSyncTimer = setTimeout(async () => {
       const toSyncReads = pendingReads;
@@ -94,6 +106,8 @@ export async function incrementFirestoreUsage(reads: number, writes: number) {
       usageSyncTimer = null;
 
       if (toSyncReads === 0 && toSyncWrites === 0) return;
+      if (isFirestoreQuotaExceeded()) return;
+
       try {
         const today = getTodayDateString();
         const docRef = doc(db, 'system_usage', today);
@@ -105,8 +119,12 @@ export async function incrementFirestoreUsage(reads: number, writes: number) {
           updateData.daily_write_count = increment(toSyncWrites);
         }
         await setDoc(docRef, updateData, { merge: true });
-      } catch (err) {
-        console.warn("Could not sync Firestore usage counters (offline or preview mode):", err);
+      } catch (err: any) {
+        if (isQuotaError(err)) {
+          markFirestoreQuotaExceeded(err);
+        } else {
+          console.warn("Could not sync Firestore usage counters (offline or preview mode):", err);
+        }
       }
     }, 30000); // Batch every 30 seconds
   }
@@ -156,10 +174,13 @@ export function simulateBackgroundTraffic() {
 
 // Subscribe to real-time Firestore DB system_usage count
 export function subscribeToFirebaseSystemUsage(callback: (usage: { reads: number; writes: number }) => void) {
+  if (isFirestoreQuotaExceeded()) {
+    return () => {};
+  }
   try {
     const today = getTodayDateString();
     const docRef = doc(db, 'system_usage', today);
-    return onSnapshot(docRef, (snapshot) => {
+    const unsub = onSnapshot(docRef, (snapshot) => {
       if (snapshot.exists()) {
         const data = snapshot.data();
         const reads = data?.daily_read_count || 0;
@@ -176,10 +197,17 @@ export function subscribeToFirebaseSystemUsage(callback: (usage: { reads: number
         callback({ reads: 0, writes: 0 });
       }
     }, (error) => {
-      console.warn("Error listening to firebase system_usage:", error);
+      if (isQuotaError(error)) {
+        markFirestoreQuotaExceeded(error);
+        return;
+      }
+      console.warn("Notice listening to firebase system_usage:", error);
     });
-  } catch (e) {
-    console.warn("Firestore not initialized for system_usage:", e);
+    return registerActiveFirestoreListener(unsub);
+  } catch (e: any) {
+    if (isQuotaError(e)) {
+      markFirestoreQuotaExceeded(e);
+    }
     return () => {};
   }
 }

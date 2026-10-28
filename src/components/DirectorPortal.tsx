@@ -83,6 +83,7 @@ import { db } from '../lib/firebase';
 import { collection, addDoc, setDoc, deleteDoc, doc, serverTimestamp, writeBatch, getDocs } from 'firebase/firestore';
 import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead } from '../lib/firestoreTracker';
 import { forceRefreshDataFromFirestore, persistDirectToFirestore, persistGradeReportBatchDirect } from '../lib/firebaseSync';
+import { isFirestoreQuotaExceeded, markFirestoreQuotaExceeded, isQuotaError } from '../lib/quotaManager';
 import { getStoredWelcomeMessages, saveWelcomeMessages, DEFAULT_WELCOME_MESSAGES, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { Bell, Activity, Info, Smartphone } from 'lucide-react';
 import { sendParentPushNotification, sendBroadcastPushNotification, getRegisteredPushDevicesCount } from '../lib/pushDispatcher';
@@ -361,6 +362,7 @@ export default function DirectorPortal({
 
   // Function to send a physical FCM Push Notification via REST API
   const sendPushNotificationViaFCM = async (parentId: string, title: string, body: string) => {
+    if (isFirestoreQuotaExceeded()) return;
     try {
       const { doc, getDoc } = await import('firebase/firestore');
       const tokenDoc = await getDoc(doc(db, 'fcm_tokens', parentId));
@@ -435,16 +437,29 @@ export default function DirectorPortal({
     };
 
     try {
-      if (!navigator.onLine) {
-        throw new Error('Offline');
+      if (!navigator.onLine || isFirestoreQuotaExceeded()) {
+        setMessages(prev => {
+          const updated = [...prev, newMsg];
+          localStorage.setItem('school_messages', JSON.stringify(updated));
+          return updated;
+        });
+        return newMsg;
       }
 
-      await setDoc(doc(db, 'notifications', newMsg.id), {
-        ...newMsg,
-        timestamp: serverTimestamp(),
-        status: 'unread'
-      });
-      trackFirestoreWrite(1);
+      try {
+        await setDoc(doc(db, 'notifications', newMsg.id), {
+          ...newMsg,
+          timestamp: serverTimestamp(),
+          status: 'unread'
+        });
+        trackFirestoreWrite(1);
+      } catch (writeErr: any) {
+        if (isQuotaError(writeErr)) {
+          markFirestoreQuotaExceeded(writeErr);
+        } else {
+          console.warn("Could not write notification to Firestore:", writeErr);
+        }
+      }
 
       setMessages(prev => {
         const updated = [...prev, newMsg];
@@ -5082,7 +5097,7 @@ ${directivesFormatted}
           setMessages(remaining);
           localStorage.setItem('school_messages', JSON.stringify(remaining));
           window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_messages', value: JSON.stringify(remaining) } }));
-          if (db) {
+          if (db && !isFirestoreQuotaExceeded()) {
             getDocs(collection(db, 'notifications')).then(snap => {
               let b = writeBatch(db);
               let c = 0;
@@ -5094,7 +5109,9 @@ ${directivesFormatted}
                 }
               });
               if (c % 400 !== 0) b.commit();
-            }).catch(() => {});
+            }).catch((err: any) => {
+              if (isQuotaError(err)) markFirestoreQuotaExceeded(err);
+            });
           }
         } else if (category === 'excuses') {
           const remaining = excuses.filter(e => !matchesCohort(e));
