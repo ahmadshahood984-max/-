@@ -4,7 +4,12 @@
  */
 
 import { initializeApp } from 'firebase/app';
-import { initializeFirestore, setLogLevel } from 'firebase/firestore';
+import { 
+  initializeFirestore, 
+  persistentLocalCache, 
+  persistentMultipleTabManager, 
+  setLogLevel 
+} from 'firebase/firestore';
 import { getAuth } from 'firebase/auth';
 import firebaseConfigJson from '../../firebase-applet-config.json';
 
@@ -29,9 +34,13 @@ try {
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 
-// Initialize Cloud Firestore with forced long polling for 100% reliable connection stability in sandboxed / iframe environments
+// Initialize Cloud Firestore with forced long polling and IndexedDB persistent cache
+// This reuses cached documents across tab reloads and saves tens of thousands of daily reads
 export const db = initializeFirestore(app, {
   experimentalForceLongPolling: true,
+  localCache: persistentLocalCache({
+    tabManager: persistentMultipleTabManager()
+  })
 }, databaseId);
 
 // Initialize Firebase Authentication

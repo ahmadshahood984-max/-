@@ -13,8 +13,29 @@ import {
   isQuotaError, 
   registerActiveFirestoreListener 
 } from './quotaManager';
+import { seedGradesToStudentCollection } from './studentGradesQuery';
 
-const SYNC_KEYS = [
+export const PARENT_STUDENT_KEYS = [
+  'school_students',
+  'school_grades',
+  'school_attendance',
+  'school_announcements',
+  'school_messages',
+  'school_excuses',
+  'school_classes',
+  'school_teachers',
+  'school_parents',
+  'school_tuitions',
+  'school_monthly_evaluations',
+  'school_evaluation_current_month',
+  'school_blocked_grades',
+  'school_custom_subjects',
+  'school_active_academic_year',
+  'school_seal_and_signatures_config',
+  'school_app_icon'
+];
+
+export const SYNC_KEYS = [
   'school_teachers',
   'school_classes',
   'school_parents',
@@ -121,6 +142,11 @@ export async function persistDirectToFirestore(key: string, data: any): Promise<
         await setDoc(docRef, { data, updatedAt: now }, { merge: true });
         trackFirestoreWrite(1);
         initialLoadCompletedKeys.add(key);
+
+        // When grades are persisted, sync to student_grades collection for on-demand student queries
+        if (key === 'school_grades' && Array.isArray(data)) {
+          seedGradesToStudentCollection(data).catch(() => {});
+        }
       } catch (writeErr: any) {
         if (isQuotaError(writeErr)) {
           markFirestoreQuotaExceeded(writeErr);
@@ -323,6 +349,33 @@ export async function forceRefreshDataFromFirestore(): Promise<boolean> {
   }
 }
 
+/**
+ * Checks if current browser tab/session belongs to a Student or Parent.
+ * Student and Parent sessions NEVER establish continuous onSnapshot connections,
+ * eliminating concurrent connection exhaustion and keeping the system lightning fast for the director.
+ */
+export function isStudentOrParentPortal(): boolean {
+  try {
+    if (typeof window === 'undefined') return false;
+    const params = new URLSearchParams(window.location.search);
+    const portal = params.get('portal');
+    if (portal === 'parent' || portal === 'student') return true;
+    if (params.get('unified') || params.get('roll') || params.get('student') || params.get('studentId') || params.get('no')) return true;
+    
+    const activePortal = localStorage.getItem('school_active_portal');
+    if (activePortal === 'parent' || activePortal === 'student') return true;
+    
+    const isTeacher = localStorage.getItem('school_teacher_is_logged_in') === 'true';
+    const isDirector = localStorage.getItem('school_director_is_logged_in') === 'true' || activePortal === 'director';
+    if (!isTeacher && !isDirector && (localStorage.getItem('parent_portal_student_id') || localStorage.getItem('parent_portal_unified_no'))) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 export function setupFirebaseSync() {
   if (isFirestoreQuotaExceeded()) {
     console.log('[Firestore Sync] Quota limit is active; running in pure offline / broadcast local mode.');
@@ -396,7 +449,18 @@ export function setupFirebaseSync() {
     originalRemoveItem(key);
   };
 
-  // 3. Set up Firestore Real-time Listeners for all SYNC_KEYS
+  // 3. Set up Firestore Real-time Listeners
+  // CRITICAL QUOTA & CONNECTION SAFEGUARD:
+  // Completely CANCEL onSnapshot listeners for Student and Parent portals!
+  // Students and parents fetch on-demand only (getDocs / getDoc) scoped to their ID.
+  // This completely eliminates open real-time connections from students,
+  // freeing up Firebase quotas and allowing the Director & Teachers to send and manage grades smoothly.
+  if (isStudentOrParentPortal()) {
+    console.log('[Firestore Sync] Student/Parent session active: Real-time onSnapshot listeners are CANCELLED to prevent connection exhaustion. Using on-demand getDocs queries.');
+    return;
+  }
+
+  // Teacher & Director portals maintain full real-time sync for immediate grade publishing & school management
   SYNC_KEYS.forEach(key => {
     if (isFirestoreQuotaExceeded()) return;
     try {

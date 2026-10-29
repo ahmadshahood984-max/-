@@ -29,12 +29,33 @@
           "description": "Unix timestamp in milliseconds"
         }
       }
+    },
+    "StudentGrade": {
+      "title": "Student Grade",
+      "description": "Individual student grade record scoped by studentId",
+      "type": "object",
+      "properties": {
+        "studentId": { "type": "string" },
+        "subject": { "type": "string" },
+        "examName": { "type": "string" },
+        "score": { "type": "number" },
+        "maxScore": { "type": "number" },
+        "term": { "type": "string" },
+        "date": { "type": "string" },
+        "classId": { "type": "string" },
+        "teacherId": { "type": "string" },
+        "updatedAt": { "type": "number" }
+      }
     }
   },
   "firestore": {
     "/school_live_data/{key}": {
       "schema": "SchoolLiveData",
       "description": "Collection for school dataset key-value syncing"
+    },
+    "/student_grades/{gradeId}": {
+      "schema": "StudentGrade",
+      "description": "Collection for scoped student grades"
     },
     "/fcm_tokens/{parentId}": {
       "schema": "FCMToken",

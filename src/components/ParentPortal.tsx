@@ -61,6 +61,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { trackActivityOperation } from '../lib/firestoreTracker';
 import { forceRefreshDataFromFirestore, fetchStudentsOnlyDirectly } from '../lib/firebaseSync';
 import { supabase, fetchStudentGradesByParent, fetchCertifiedGradeSheetsByParent } from '../lib/supabase';
+import { fetchStudentGradesOnDemand } from '../lib/studentGradesQuery';
 import { 
   isFirestoreQuotaExceeded, 
   markFirestoreQuotaExceeded, 
@@ -441,29 +442,26 @@ export default function ParentPortal({
         }
       };
 
-      // Run parallel fetches with strict 1.2s timeout so connections never hang in Syria without VPN
-      const [sentSnap, gradesSnap, msgsSnap, evalSnap, monthSnap] = await Promise.all([
+      // Run parallel fetches with strict 1.2s timeout so connections never hang
+      // CRITICAL: Student grades query is strictly scoped to this student via where("studentId", "==", currentUserId)
+      const targetStudentId = activeChild?.id || loggedInStudentId;
+      const targetUnifiedNo = activeChild?.unifiedNo || activeChild?.rollNo;
+
+      const [sentSnap, msgsSnap, evalSnap, monthSnap, studentGrades] = await Promise.all([
         fetchDocWithTimeout(doc(db, 'school_live_data', 'school_sent_grade_sheets')),
-        fetchDocWithTimeout(doc(db, 'school_live_data', 'school_grades')),
         fetchDocWithTimeout(doc(db, 'school_live_data', 'school_messages')),
         fetchDocWithTimeout(doc(db, 'school_live_data', 'school_monthly_evaluations')),
-        fetchDocWithTimeout(doc(db, 'school_live_data', 'school_evaluation_current_month'))
+        fetchDocWithTimeout(doc(db, 'school_live_data', 'school_evaluation_current_month')),
+        targetStudentId ? fetchStudentGradesOnDemand(targetStudentId, undefined, targetUnifiedNo) : Promise.resolve([])
       ]);
 
-      if (sentSnap && sentSnap.exists()) {
-        const data = sentSnap.data()?.data;
-        if (Array.isArray(data) && data.length > 0) {
-          setSentGradeSheets(deduplicateGradeSheets(data));
-          localStorage.setItem('school_sent_grade_sheets', JSON.stringify(data));
-        }
-      }
-
-      if (gradesSnap && gradesSnap.exists()) {
-        const data = gradesSnap.data()?.data;
-        if (Array.isArray(data) && data.length > 0) {
-          setDirectGrades(data);
-          localStorage.setItem('school_grades', JSON.stringify(data));
-        }
+      if (Array.isArray(studentGrades) && studentGrades.length > 0) {
+        setDirectGrades(prev => {
+          const map = new Map<string, Grade>();
+          prev.forEach(g => map.set(g.id || `${g.studentId}_${g.subject}_${g.examName}`, g));
+          studentGrades.forEach(g => map.set(g.id || `${g.studentId}_${g.subject}_${g.examName}`, g));
+          return Array.from(map.values());
+        });
       }
 
       if (msgsSnap && msgsSnap.exists()) {
@@ -1362,9 +1360,9 @@ ${url}
     window.addEventListener('offline', updateOnlineStatus);
     updateOnlineStatus(); // Check initial
 
-    let unsubscribeFirestore: (() => void) | undefined;
-
-    const setupSubscription = async () => {
+    // ON-DEMAND FETCH: Switched from continuous onSnapshot to on-demand getDocs
+    // This closes persistent connection streams from students and eliminates quota drain.
+    const fetchNotificationsOnDemand = async () => {
       if (isFirestoreQuotaExceeded()) {
         setIsFirebaseLive(false);
         setFirebaseErrorMsg('');
@@ -1372,7 +1370,7 @@ ${url}
       }
 
       try {
-        const { collection, onSnapshot, query, orderBy } = await import('firebase/firestore');
+        const { collection, getDocs, query, limit, where } = await import('firebase/firestore');
         const { db } = await import('../lib/firebase');
 
         if (!db || isFirestoreQuotaExceeded()) {
@@ -1380,118 +1378,67 @@ ${url}
           return;
         }
 
-        const q = query(
-          collection(db, 'notifications'),
-          orderBy('date', 'asc') // Sort by date ascending to match messages flow
-        );
+        // Fetch on-demand scoped specifically to notifications for this parent/student
+        const q = selectedParentId 
+          ? query(
+              collection(db, 'notifications'),
+              where('receiverId', 'in', [selectedParentId, 'all', 'all_cohort_parents']),
+              limit(40)
+            )
+          : query(
+              collection(db, 'notifications'),
+              limit(25)
+            );
 
-        unsubscribeFirestore = onSnapshot(q, (snapshot) => {
+        const snapshot = await Promise.race([
+          getDocs(q),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 2500))
+        ]);
+
+        if (snapshot && !snapshot.empty) {
           setIsFirebaseLive(true);
-          setFirebaseErrorMsg('');
-          
-          snapshot.docChanges().forEach((change) => {
-            if (change.type === "added") {
-              const data = change.doc.data();
-              const newMsg: Message = {
-                id: data.id || change.doc.id,
-                senderId: data.senderId,
-                senderName: data.senderName,
-                senderRole: data.senderRole,
-                receiverId: data.receiverId,
-                receiverName: data.receiverName,
-                receiverRole: data.receiverRole,
-                content: data.content,
-                date: data.date || new Date().toISOString(),
-                read: data.read || false,
-                studentId: data.studentId
-              };
-
-              // Only show alerts and system pushes for incoming notifications targeting this parent
-              const isTargetParent = newMsg.receiverId === selectedParentId || 
-                newMsg.receiverId === 'all' || 
-                newMsg.receiverId === 'all_cohort_parents' || 
-                (newMsg.receiverId?.startsWith('all_class_') && activeChild?.classId === newMsg.receiverId.replace('all_class_', '')) ||
-                newMsg.receiverRole === 'parent';
-              
-              setMessages(prev => {
-                if (prev.some(m => m.id === newMsg.id)) {
-                  return prev;
-                }
-                
-                // Trigger native push notification
-                if (isTargetParent && !newMsg.read) {
-                  const notifTitle = data.title || newMsg.senderName || 'إشعار مدرسي جديد 🔔';
-                  const notifBody = data.body || newMsg.content;
-                  safeShowNotification(notifTitle, {
-                    body: notifBody,
-                    icon: '/icon.png',
-                    tag: `notif_${newMsg.id}`,
-                    // @ts-ignore
-                    renotify: false,
-                    data: {
-                      msgId: newMsg.id,
-                      url: `/?portal=parent&tab=messages&msgId=${newMsg.id}`
-                    }
-                  });
-                }
-
-                const updated = [...prev, newMsg];
-                localStorage.setItem('school_messages', JSON.stringify(updated));
-                return updated;
-              });
-            } else if (change.type === "modified") {
-              const data = change.doc.data();
-              if (data.read) {
-                const docId = data.id || change.doc.id;
-                dismissNotification(docId);
-                setMessages(prev => {
-                  const updated = prev.map(m => m.id === docId ? { ...m, read: true } : m);
-                  localStorage.setItem('school_messages', JSON.stringify(updated));
-                  return updated;
-                });
-              }
-            }
+          const incomingMsgs: Message[] = [];
+          snapshot.forEach((docSnap) => {
+            const data = docSnap.data();
+            incomingMsgs.push({
+              id: data.id || docSnap.id,
+              senderId: data.senderId,
+              senderName: data.senderName,
+              senderRole: data.senderRole,
+              receiverId: data.receiverId,
+              receiverName: data.receiverName,
+              receiverRole: data.receiverRole,
+              content: data.content,
+              date: data.date || new Date().toISOString(),
+              read: data.read || false,
+              studentId: data.studentId
+            });
           });
-        }, (error) => {
-          if (isQuotaError(error)) {
-            markFirestoreQuotaExceeded(error);
-            if (unsubscribeFirestore) {
-              try { unsubscribeFirestore(); } catch {}
-              unsubscribeFirestore = undefined;
-            }
-            console.warn("Firestore subscription quota reached. Notifications functioning in offline local mode.");
-            setIsFirebaseLive(false);
-            setFirebaseErrorMsg('');
-            return;
+
+          if (setMessages && incomingMsgs.length > 0) {
+            setMessages(prev => {
+              const map = new Map<string, Message>();
+              prev.forEach(m => map.set(m.id, m));
+              incomingMsgs.forEach(m => map.set(m.id, m));
+              const updated = Array.from(map.values());
+              localStorage.setItem('school_messages', JSON.stringify(updated));
+              return updated;
+            });
           }
-          console.warn("Firestore subscription notice:", error?.message || error);
-          setIsFirebaseLive(false);
-          setFirebaseErrorMsg('⚠️ انقطع الاتصال المباشر بقاعدة البيانات. تصفح الإشعارات محلياً.');
-        });
-
-        if (unsubscribeFirestore) {
-          registerActiveFirestoreListener(unsubscribeFirestore);
         }
-
       } catch (err: any) {
         if (isQuotaError(err)) {
           markFirestoreQuotaExceeded(err);
-        } else {
-          console.warn("Notice starting Firestore subscription:", err?.message || err);
         }
         setIsFirebaseLive(false);
-        setFirebaseErrorMsg('');
       }
     };
 
-    setupSubscription();
+    fetchNotificationsOnDemand();
 
     return () => {
       window.removeEventListener('online', updateOnlineStatus);
       window.removeEventListener('offline', updateOnlineStatus);
-      if (unsubscribeFirestore) {
-        unsubscribeFirestore();
-      }
     };
   }, [setMessages, selectedParentId]);
 
@@ -1634,6 +1581,18 @@ ${url}
         localStorage.setItem('parent_portal_saved_login_input', cleanInput);
         localStorage.setItem('parent_portal_auto_login', rememberMe ? 'true' : 'false');
         setLoginError('');
+
+        // On-demand fetch scoped strictly to this student: where("studentId", "==", currentUserId)
+        fetchStudentGradesOnDemand(foundStudent.id, undefined, foundStudent.unifiedNo || foundStudent.rollNo).then(gList => {
+          if (Array.isArray(gList) && gList.length > 0) {
+            setDirectGrades(prev => {
+              const map = new Map<string, Grade>();
+              prev.forEach(g => map.set(g.id || `${g.studentId}_${g.subject}_${g.examName}`, g));
+              gList.forEach(g => map.set(g.id || `${g.studentId}_${g.subject}_${g.examName}`, g));
+              return Array.from(map.values());
+            });
+          }
+        }).catch(() => {});
       } else {
         if (!isAuto) {
           setLoginError(
@@ -1652,6 +1611,18 @@ ${url}
         localStorage.setItem('parent_portal_student_id', fallback.id);
         localStorage.setItem('parent_portal_unified_no', fallback.unifiedNo || fallback.rollNo || '');
         setLoginError('');
+
+        // Scoped on-demand fetch
+        fetchStudentGradesOnDemand(fallback.id, undefined, fallback.unifiedNo || fallback.rollNo).then(gList => {
+          if (Array.isArray(gList) && gList.length > 0) {
+            setDirectGrades(prev => {
+              const map = new Map<string, Grade>();
+              prev.forEach(g => map.set(g.id || `${g.studentId}_${g.subject}_${g.examName}`, g));
+              gList.forEach(g => map.set(g.id || `${g.studentId}_${g.subject}_${g.examName}`, g));
+              return Array.from(map.values());
+            });
+          }
+        }).catch(() => {});
       } else if (!isAuto) {
         setLoginError(`تعذر التحقق من الرقم الموحد (${cleanInput}). يرجى التأكد من كتابة الرقم بشكل صحيح والمحاولة مجدداً.`);
       }
@@ -3538,6 +3509,17 @@ ${url}
                       </h3>
                       <p className="text-slate-500 text-xs mt-0.5">كشوف التقارير والتقييمات الشهريّة المعتمدة والموقعة إلكترونياً من إدارة المدرسة.</p>
                     </div>
+
+                    <button
+                      type="button"
+                      onClick={handleParentManualRefresh}
+                      disabled={isParentRefreshing}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-bold transition cursor-pointer self-start md:self-auto shrink-0 shadow-2xs"
+                      title="جلب وتحديث درجات الطالب عند الطلب دون إبقاء اتصال مستمر"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${isParentRefreshing ? 'animate-spin' : ''}`} />
+                      <span>{isParentRefreshing ? 'جاري جلب الدرجات...' : parentRefreshSuccess ? 'تم التحديث ✓' : '🔄 تحديث كشف درجات الطالب'}</span>
+                    </button>
                   </div>
 
 

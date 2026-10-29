@@ -41,6 +41,7 @@ import {
 import { safeShowNotification } from './lib/notificationHelper';
 import { sendParentPushNotification, sendBroadcastPushNotification } from './lib/pushDispatcher';
 import { persistDirectToFirestore, forceRefreshDataFromFirestore } from './lib/firebaseSync';
+import { syncSingleGradeToFirestore } from './lib/studentGradesQuery';
 import { 
   Building, 
   Users, 
@@ -1182,6 +1183,7 @@ export default function App() {
       const updated = [newGrade, ...prev];
       localStorage.setItem('school_grades', JSON.stringify(updated));
       persistDirectToFirestore('school_grades', updated);
+      syncSingleGradeToFirestore(newGrade).catch(() => {});
       return updated;
     });
     const student = students.find(s => s.id === gradeData.studentId);

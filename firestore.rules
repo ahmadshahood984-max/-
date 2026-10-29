@@ -13,6 +13,11 @@ service cloud.firestore {
       allow read, write: if true;
     }
 
+    // Rules for scoped student grades collection (on-demand query by studentId)
+    match /student_grades/{gradeId} {
+      allow read, write: if true;
+    }
+
     // Rules for FCM registration tokens
     match /fcm_tokens/{parentId} {
       allow read, write: if true;

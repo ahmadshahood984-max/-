@@ -88,6 +88,8 @@ export interface Grade {
   date: string;
   teacherId: string;
   examType?: 'special' | 'monthly' | 'general';
+  term?: string;
+  classId?: string;
   notes?: string;
   attachedMedia?: string;
   attachedMediaType?: 'image' | 'video';
@@ -189,6 +191,8 @@ export interface ExamQuestionPaper {
   dateCreated: string;
   dateUpdated?: string;
   headerConfig: ExamHeaderConfig;
+  showHeader?: boolean;
+  showFooter?: boolean;
   contentHtml: string;
   status: 'draft' | 'submitted' | 'approved' | 'revision_requested';
   directorNotes?: string;
