@@ -161,6 +161,8 @@ export interface SentGradeSheet {
   cohort?: string;
   dateSent: string;
   sentBy: string;
+  teacherId?: string;
+  status?: 'draft' | 'submitted' | 'approved';
   studentCount: number;
   studentsSummary: SentGradeSheetStudentSummary[];
 }

@@ -1131,6 +1131,129 @@ export default function DirectorPortal({
     return () => window.removeEventListener('school_storage_update', handleStorage);
   }, []);
 
+  const handleApproveTeacherGradeSheet = async (sheet: SentGradeSheet) => {
+    if (!sheet) return;
+
+    const nowIso = new Date().toISOString();
+    const newMessagesList: Message[] = [];
+
+    // Dispatch messages and push notifications to parents for all students in the sheet
+    for (const stSummary of sheet.studentsSummary) {
+      const studentClass = sheet.className || 'الصف الدراسي';
+      const studentParent = parents.find(p => p.id === stSummary.parentId || p.childrenIds.includes(stSummary.studentId));
+      const receiverParentId = stSummary.parentId || studentParent?.id || 'parent';
+      const receiverParentName = stSummary.parentName || studentParent?.name || 'ولي الأمر';
+
+      const scoresDetails = stSummary.scores.map(sc => {
+        const scoreVal = sc.score !== null && sc.score !== undefined ? sc.score : 'لم ترصد';
+        return `• 📘 *${sc.subject}:* ❪ *${scoreVal}* ${sc.score !== null ? '/100' : ''} ❫`;
+      }).join('\n');
+
+      let directivesFormatted = '';
+      if (stSummary.teacherNotes && stSummary.directorNotes) {
+        directivesFormatted = `👨‍🏫 *توجيهات المعلم:* ❪ ${stSummary.teacherNotes} ❫\n🏫 *توجيهات الإدارة:* ❪ ${stSummary.directorNotes} ❫`;
+      } else if (stSummary.teacherNotes) {
+        directivesFormatted = `👨‍🏫 *توجيهات المعلم:* ❪ ${stSummary.teacherNotes} ❫`;
+      } else if (stSummary.directorNotes) {
+        directivesFormatted = `🏫 *توجيهات الإدارة:* ❪ ${stSummary.directorNotes} ❫`;
+      } else {
+        directivesFormatted = `✨ نتمنى للطالب دوام التوفيق والتميز العلمي.`;
+      }
+
+      const formattedMessage = `💚 المدرسة الدولية الخاصة 💚
+📜 كشف التقييم والنتائج المعتمد لشهر [${sheet.month}]
+─────────────────────────
+👤 الطالب: ${stSummary.studentName} | 🏫 الصف: ${studentClass}
+🔢 الرقم الموحد: #${stSummary.unifiedNo || stSummary.rollNo || '---'}
+
+📚 نتائج المواد الدراسية:
+${scoresDetails}
+
+📊 المعدل العام: ❪ ${stSummary.average} ❫ | 🌟 التقدير العام: ${stSummary.estimation}
+
+📝 توجيهات وتقارير المتابعة:
+${directivesFormatted}
+─────────────────────────
+🏛️ كشف معتمد وموثق إلكترونياً من الإدارة العامة للمدرسة`;
+
+      const msgId = 'm_grades_appr_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
+      const gradeMsg: Message = {
+        id: msgId,
+        senderId: 'director',
+        senderName: 'المدير العام (إدارة المدرسة)',
+        senderRole: 'director',
+        receiverId: receiverParentId,
+        receiverName: receiverParentName,
+        receiverRole: 'parent',
+        content: formattedMessage,
+        date: nowIso,
+        read: false,
+        studentId: stSummary.studentId,
+        category: 'grade_report',
+        shift: sheet.cohort === 'evening' ? 'evening' : 'morning'
+      };
+
+      newMessagesList.push(gradeMsg);
+
+      if (studentParent?.id) {
+        sendParentPushNotification(studentParent.id, {
+          title: `📊 كشف درجات معتمد: ${stSummary.studentName} - ${sheet.month}`,
+          body: `اعتمدت إدارة المدرسة كشف الدرجات لشهر (${sheet.month}) بمعدل (${stSummary.average}) وتقدير (${stSummary.estimation}). اضغط للمعاينة.`,
+          tag: `grades_${stSummary.studentId}_${sheet.month}`,
+          url: `/?portal=parent&tab=grades&unified=${encodeURIComponent(stSummary.unifiedNo || stSummary.rollNo || stSummary.studentId)}`,
+          msgId: msgId,
+          studentId: stSummary.studentId,
+          studentName: stSummary.studentName,
+          category: 'grades'
+        });
+      }
+    }
+
+    // Notify the teacher that their sheet was approved
+    if (sheet.teacherId) {
+      const teacher = teachers.find(t => t.id === sheet.teacherId);
+      if (teacher) {
+        newMessagesList.push({
+          id: 'm_t_appr_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
+          senderId: 'director',
+          senderName: 'المدير العام',
+          senderRole: 'director',
+          receiverId: teacher.id,
+          receiverName: teacher.name,
+          receiverRole: 'teacher',
+          content: `🎉 [اعتماد كشف الدرجات]\nتم بحمد الله وتوفيقه اعتماد وتوثيق كشف درجات (${sheet.className}) لشهر (${sheet.month}) وإرسال النتائج والتقارير الرسمية لكافة أولياء الأمور بنجاح! شكراً لجهودكم المتميزة 🌟`,
+          date: nowIso,
+          read: false
+        });
+      }
+    }
+
+    // Update the sheet status to 'approved'
+    const updatedSheet: SentGradeSheet = {
+      ...sheet,
+      status: 'approved',
+      sentBy: sheet.sentBy?.includes('(معتمد)') ? sheet.sentBy : `${sheet.sentBy} (معتمد من الإدارة ✅)`
+    };
+
+    const updatedSentSheets = sentGradeSheets.map(s => s.id === sheet.id ? updatedSheet : s);
+    setSentGradeSheets(updatedSentSheets);
+    setSelectedSentSheetToView(updatedSheet);
+
+    const updatedMessages = [...newMessagesList, ...messages];
+    setMessages(updatedMessages);
+
+    // Persist
+    await persistGradeReportBatchDirect({
+      grades,
+      messages: updatedMessages,
+      sentSheets: updatedSentSheets,
+      monthlyEvaluations,
+      currentMonth: sheet.month
+    });
+
+    alert(`🎉 تم بنجاح اعتماد كشف درجات المعلم وإرسال النتائج لجميع أولياء الأمور!\n\n🏫 الصف: ${sheet.className}\n📅 الشهر: ${sheet.month}\n👨‍🎓 عدد الطلاب: ${sheet.studentCount} طالب وطالبة\n\n✅ تم إرسال الإشعارات والرسائل لكافة أولياء الأمور وإشعار المعلم بالاعتماد! 🚀`);
+  };
+
   const handleSendMonthlyWhatsApp = (
     student: Student,
     parentPhone: string,
@@ -9923,6 +10046,39 @@ if __name__ == "__main__":
                 </div>
               </div>
 
+              {/* Notification Card for Grade Sheets Submitted by Teachers */}
+              {sentGradeSheets.some(s => s.status === 'submitted') && (
+                <div className="bg-gradient-to-r from-amber-500 via-indigo-600 to-purple-600 text-white p-4 rounded-2xl shadow-md flex flex-col sm:flex-row sm:items-center justify-between gap-3 animate-pulse">
+                  <div className="flex items-center gap-3">
+                    <span className="w-10 h-10 rounded-2xl bg-white/20 flex items-center justify-center text-xl shrink-0">
+                      📬
+                    </span>
+                    <div>
+                      <h4 className="font-extrabold text-sm sm:text-base">
+                        يوجد كشوفات درجات مرسلة حديثاً من المعلمين بانتظار الاعتماد! ({sentGradeSheets.filter(s => s.status === 'submitted').length} كشف)
+                      </h4>
+                      <p className="text-[11px] text-amber-100">
+                        {sentGradeSheets.filter(s => s.status === 'submitted').map(s => `${s.title} (${s.sentBy})`).join(' • ')}
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const firstSubmitted = sentGradeSheets.find(s => s.status === 'submitted');
+                      if (firstSubmitted) {
+                        setSelectedSentSheetToView(firstSubmitted);
+                        setIsSentSheetsModalOpen(true);
+                      }
+                    }}
+                    className="bg-white text-indigo-900 hover:bg-amber-50 font-black text-xs px-4 py-2.5 rounded-xl transition cursor-pointer shadow-md shrink-0 flex items-center gap-1.5 self-end sm:self-auto"
+                  >
+                    <Eye className="w-4 h-4 text-indigo-700" />
+                    <span>معاينة واعتماد كشف المعلم 👁️</span>
+                  </button>
+                </div>
+              )}
+
               {/* Grade Scale & Limits Customizer Panel (الدرجة العظمى ودرجة النجاح) */}
               <div className="bg-gradient-to-r from-indigo-900 via-slate-900 to-indigo-950 text-white p-5 rounded-2xl border border-indigo-800 shadow-md">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 border-b border-indigo-800/60 pb-3">
@@ -16345,6 +16501,17 @@ ${sampleEval}
                           </p>
                         </div>
                         <div className="flex items-center gap-2">
+                          {selectedSentSheetToView.status === 'submitted' && (
+                            <button
+                              type="button"
+                              onClick={() => handleApproveTeacherGradeSheet(selectedSentSheetToView)}
+                              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-black flex items-center gap-1.5 transition cursor-pointer shadow-md shadow-emerald-200"
+                              title="اعتماد كشف درجات المعلم وإرسال التقارير والنتائج فوراً لأولياء الأمور"
+                            >
+                              <CheckCircle2 className="w-4 h-4 text-emerald-200" />
+                              <span>اعتماد كشف درجات المعلم وإرسال النتائج لأولياء الأمور 🚀</span>
+                            </button>
+                          )}
                           <button
                             type="button"
                             onClick={() => printElementById('sent-sheet-detail-print', selectedSentSheetToView.title)}
@@ -16467,9 +16634,15 @@ ${sampleEval}
                               <div className="space-y-1">
                                 <div className="flex flex-wrap items-center gap-2">
                                   <h4 className="font-extrabold text-slate-800 text-sm">{sheet.title}</h4>
-                                  <span className="bg-emerald-50 text-emerald-700 text-[11px] font-bold px-2 py-0.5 rounded-full border border-emerald-200">
-                                    معتمد وموثق ✅
-                                  </span>
+                                  {sheet.status === 'submitted' ? (
+                                    <span className="bg-amber-100 text-amber-900 text-[11px] font-extrabold px-2.5 py-0.5 rounded-full border border-amber-300 animate-pulse">
+                                      مرسل من {sheet.sentBy} ⏳ (بانتظار الاعتماد)
+                                    </span>
+                                  ) : (
+                                    <span className="bg-emerald-50 text-emerald-700 text-[11px] font-bold px-2 py-0.5 rounded-full border border-emerald-200">
+                                      معتمد وموثق ✅ {sheet.sentBy?.includes('المعلم') ? `(${sheet.sentBy})` : ''}
+                                    </span>
+                                  )}
                                 </div>
                                 <div className="text-xs text-slate-400 flex flex-wrap items-center gap-x-3 gap-y-1">
                                   <span>📅 شهر: <strong className="text-slate-600">{sheet.month}</strong></span>

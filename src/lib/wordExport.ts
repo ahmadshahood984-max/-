@@ -3,87 +3,97 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ExamQuestionPaper, ExamHeaderConfig } from '../types';
+import { ExamQuestionPaper } from '../types';
 
 /**
  * Exports an exam question paper as a rich Microsoft Word document (.doc)
- * with complete RTL support, embedded images, tables, header borders, and styling.
+ * with complete RTL support, embedded images, tables, header borders, and styling
+ * that matches the screen display 100% without distortion.
  */
 export function exportExamPaperToWord(paper: ExamQuestionPaper, filename?: string) {
   const header = paper.headerConfig;
   const docTitle = filename || `${paper.title || 'أسئلة_امتحان'}_${paper.subject}_${paper.className}`.replace(/\s+/g, '_');
 
-  // Build the official exam top table/header
+  // Build custom header fields if present
   const customFieldsHtml = header.customFields && header.customFields.length > 0 
     ? header.customFields.map(f => `
-        <td style="padding: 6px 10px; border: 1px solid #1e293b; font-size: 11pt;">
+        <td style="padding: 6px 10px; border: 1px solid #1e293b; font-size: 11pt; text-align: center;">
           <strong>${f.label}:</strong> ${f.value}
         </td>
       `).join('')
     : '';
 
-  const isEnglish = (header.subject || paper.subject || '').includes('إنكليز') || 
-                    (header.subject || paper.subject || '').includes('انجليز') || 
-                    (header.subject || paper.subject || '').toLowerCase().includes('english') ||
-                    (header.instructions || '').toLowerCase().includes('answer all');
-
+  // Official Exam Header Box for Word
   const headerHtml = `
-    <div style="border: 2px solid #0f172a; padding: 12px; margin-bottom: 20px; background-color: #f8fafc; direction: ${isEnglish ? 'ltr' : 'rtl'}; text-align: ${isEnglish ? 'left' : 'right'};">
-      <table style="width: 100%; border-collapse: collapse; border: none; margin-bottom: 8px;" dir="${isEnglish ? 'ltr' : 'rtl'}">
+    <div style="border: 2pt solid #0f172a; padding: 12px; margin-bottom: 20px; background-color: #f8fafc; direction: rtl; text-align: right;">
+      <table style="width: 100%; border-collapse: collapse; border: none; margin-bottom: 8px;" dir="rtl">
         <tr style="border: none;">
-          <td style="width: 33%; border: none; text-align: ${isEnglish ? 'left' : 'right'}; vertical-align: top; font-size: 11pt;">
-            <p style="margin: 0; font-weight: bold;">${header.ministryText || (isEnglish ? 'Ministry of Education' : 'وزارة التربية والتعليم')}</p>
-            <p style="margin: 2px 0 0 0; font-weight: bold; color: #4338ca;">${header.schoolName || (isEnglish ? 'International Private School' : 'المدرسة الدولية الخاصة')}</p>
-            <p style="margin: 2px 0 0 0; font-size: 10pt;">${isEnglish ? 'Academic Year' : 'العام الدراسي'}: ${header.academicYear || '2025 - 2026'}</p>
+          <td style="width: 33%; border: none; text-align: right; vertical-align: top; font-size: 11pt;">
+            <p style="margin: 0; font-weight: bold;">${header.ministryText || 'وزارة التربية والتعليم'}</p>
+            <p style="margin: 2px 0 0 0; font-weight: bold; color: #4338ca;">${header.schoolName || 'المدرسة الدولية الخاصة'}</p>
+            <p style="margin: 2px 0 0 0; font-size: 10pt;">العام الدراسي: ${header.academicYear || '2025 - 2026 م'}</p>
           </td>
           <td style="width: 34%; border: none; text-align: center; vertical-align: top;">
-            <h2 style="margin: 0; font-size: 16pt; color: #0f172a; font-weight: 900;">${header.examTitle || (isEnglish ? 'Examination Paper' : 'أسئلة المذاكرة والاختبار')}</h2>
-            <p style="margin: 4px 0 0 0; font-size: 12pt; font-weight: bold; color: #1e293b;">${isEnglish ? 'Subject' : 'مادة'}: ${header.subject || paper.subject}</p>
+            <h2 style="margin: 0; font-size: 16pt; color: #0f172a; font-weight: 900; text-decoration: underline;">${header.examTitle || 'أسئلة المذاكرة والاختبار'}</h2>
+            <p style="margin: 4px 0 0 0; font-size: 12pt; font-weight: bold; color: #1e293b;">مادة: ${header.subject || paper.subject}</p>
             <p style="margin: 2px 0 0 0; font-size: 11pt; font-weight: bold;">${header.className || paper.className}</p>
           </td>
-          <td style="width: 33%; border: none; text-align: ${isEnglish ? 'right' : 'left'}; vertical-align: top; font-size: 11pt; direction: ${isEnglish ? 'ltr' : 'rtl'};">
-            <p style="margin: 0;"><strong>${isEnglish ? 'Time' : 'زمن الامتحان'}:</strong> ${header.duration || (isEnglish ? '90 mins' : 'ساعة ونصف')}</p>
-            <p style="margin: 2px 0 0 0;"><strong>${isEnglish ? 'Marks' : 'الدرجة الكلية'}:</strong> ${header.totalMarks || (isEnglish ? '100 Marks' : '100 درجة')}</p>
-            <p style="margin: 2px 0 0 0;"><strong>${isEnglish ? 'Date' : 'تاريخ الاختبار'}:</strong> ${header.examDate || new Date().toISOString().split('T')[0]}</p>
-            <p style="margin: 2px 0 0 0;"><strong>${isEnglish ? 'Teacher' : 'معلم المادة'}:</strong> ${header.teacherName || paper.teacherName}</p>
+          <td style="width: 33%; border: none; text-align: left; vertical-align: top; font-size: 11pt; direction: rtl;">
+            <p style="margin: 0;"><strong>زمن الامتحان:</strong> ${header.duration || 'ساعة ونصف'}</p>
+            <p style="margin: 2px 0 0 0;"><strong>الدرجة الكلية:</strong> ${header.totalMarks || '100 درجة'}</p>
+            <p style="margin: 2px 0 0 0;"><strong>تاريخ الاختبار:</strong> ${header.examDate || new Date().toISOString().split('T')[0]}</p>
+            <p style="margin: 2px 0 0 0;"><strong>معلم المادة:</strong> ${header.teacherName || paper.teacherName}</p>
           </td>
         </tr>
       </table>
 
-      <!-- Student Name & Roll line -->
-      <table style="width: 100%; border-collapse: collapse; border-top: 1px solid #94a3b8; margin-top: 8px; padding-top: 6px;" dir="${isEnglish ? 'ltr' : 'rtl'}">
+      <!-- Student Name & Seat line -->
+      <table style="width: 100%; border-collapse: collapse; border-top: 1pt solid #94a3b8; margin-top: 8px; padding-top: 6px;" dir="rtl">
         <tr style="border: none;">
-          <td style="width: 60%; border: none; text-align: ${isEnglish ? 'left' : 'right'}; font-size: 11pt;">
-            <strong>${isEnglish ? 'Student Name' : 'اسم الطالب/ـة'}:</strong> ..........................................................................
+          <td style="width: 60%; border: none; text-align: right; font-size: 11pt;">
+            <strong>اسم الطالب/ـة:</strong> ..........................................................................
           </td>
-          <td style="width: 25%; border: none; text-align: ${isEnglish ? 'left' : 'right'}; font-size: 11pt;">
-            <strong>${isEnglish ? 'ID / Seat No' : 'الرقم الموحد / القيد'}:</strong> .....................
+          <td style="width: 25%; border: none; text-align: right; font-size: 11pt;">
+            <strong>الرقم الموحد / القيد:</strong> .....................
           </td>
-          <td style="width: 15%; border: none; text-align: ${isEnglish ? 'right' : 'left'}; font-size: 11pt;">
-            <strong>${isEnglish ? 'Section' : 'الشعبة'}:</strong> [ ...... ]
+          <td style="width: 15%; border: none; text-align: left; font-size: 11pt;">
+            <strong>الشعبة:</strong> [ ...... ]
           </td>
         </tr>
       </table>
 
       ${customFieldsHtml ? `
-        <table style="width: 100%; border-collapse: collapse; margin-top: 6px;" dir="${isEnglish ? 'ltr' : 'rtl'}">
+        <table style="width: 100%; border-collapse: collapse; margin-top: 6px;" dir="rtl">
           <tr>${customFieldsHtml}</tr>
         </table>
       ` : ''}
 
       ${header.instructions ? `
-        <div style="margin-top: 8px; padding: 6px 10px; background-color: #fff; border: 1px dashed #cbd5e1; font-size: 10pt; color: #334155; text-align: ${isEnglish ? 'left' : 'right'};">
-          <strong>📌 ${isEnglish ? 'Instructions' : 'ملاحظات وتعليمات هامة'}:</strong> ${header.instructions}
+        <div style="margin-top: 8px; padding: 6px 10px; background-color: #fff; border: 1pt dashed #cbd5e1; font-size: 10.5pt; color: #334155; text-align: right;">
+          <strong>📌 تعليمات هامة:</strong> ${header.instructions}
         </div>
       ` : ''}
     </div>
   `;
 
-  // HTML content for Word document
+  // Clean exam content to be 100% native Word compatible
+  let cleanContent = (paper.contentHtml || '<p>لا توجد أسئلة مسجلة حتى الآن.</p>')
+    // Strip interactive delete buttons
+    .replace(/<button[^>]*class="[^"]*btn-delete-question[^"]*"[^>]*>[\s\S]*?<\/button>/gi, '')
+    .replace(/<button[^>]*>[\s\S]*?<\/button>/gi, '')
+    // Strip contenteditable attributes
+    .replace(/\s+contenteditable="[^"]*"/gi, '')
+    .replace(/\s+suppresscontenteditablewarning="[^"]*"/gi, '');
+
+  // Complete Word Document HTML with MSO namespaces
   const wordDocumentContent = `
-    <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
+    <html xmlns:v="urn:schemas-microsoft-com:vml"
+          xmlns:o="urn:schemas-microsoft-com:office:office"
+          xmlns:w="urn:schemas-microsoft-com:office:word"
+          xmlns:m="http://schemas.microsoft.com/office/2004/12/omml"
+          xmlns="http://www.w3.org/TR/REC-html40">
     <head>
-      <meta charset='utf-8'>
+      <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
       <title>${paper.title}</title>
       <!--[if gte mso 9]>
       <xml>
@@ -91,6 +101,7 @@ export function exportExamPaperToWord(paper: ExamQuestionPaper, filename?: strin
           <w:View>Print</w:View>
           <w:Zoom>100</w:Zoom>
           <w:DoNotOptimizeForBrowser/>
+          <w:AllowPNG/>
         </w:WordDocument>
       </xml>
       <![endif]-->
@@ -100,83 +111,98 @@ export function exportExamPaperToWord(paper: ExamQuestionPaper, filename?: strin
           margin: 1.5cm 1.5cm 1.5cm 1.5cm;
           mso-header-margin: 1cm;
           mso-footer-margin: 1cm;
+          mso-page-orientation: portrait;
         }
         body {
-          font-family: ${isEnglish ? "'Calibri', 'Arial', 'Times New Roman', sans-serif" : "'Traditional Arabic', 'Amiri', 'Arial', 'Tahoma', 'Times New Roman', sans-serif"};
-          direction: ${isEnglish ? 'ltr' : 'rtl'};
-          text-align: ${isEnglish ? 'left' : 'right'};
+          font-family: 'Traditional Arabic', 'Amiri', 'Arial', 'Tahoma', sans-serif;
+          direction: rtl;
+          text-align: right;
           font-size: 12pt;
           line-height: 1.8;
           color: #0f172a;
           background-color: #ffffff;
         }
         h1, h2, h3, h4 {
-          font-family: ${isEnglish ? "'Calibri', 'Arial', sans-serif" : "'Traditional Arabic', 'Amiri', 'Arial', sans-serif"};
-          margin-top: 14px;
-          margin-bottom: 8px;
+          font-family: 'Traditional Arabic', 'Amiri', 'Arial', sans-serif;
+          margin-top: 10pt;
+          margin-bottom: 6pt;
           color: #0f172a;
         }
         p {
-          margin: 6px 0;
+          margin: 4pt 0;
         }
         table {
-          width: 100%;
           border-collapse: collapse;
-          margin: 12px 0;
-          direction: ${isEnglish ? 'ltr' : 'rtl'};
-        }
-        table, th, td {
-          border: 1px solid #1e293b;
-        }
-        th, td {
-          padding: 8px 12px;
-          text-align: ${isEnglish ? 'left' : 'right'};
-        }
-        th {
-          background-color: #f1f5f9;
-          font-weight: bold;
-        }
-        img {
-          max-width: 100%;
-          height: auto;
-          display: inline-block;
-          margin: 8px 0;
+          direction: rtl;
+          text-align: right;
+          mso-table-lspace: 0pt;
+          mso-table-rspace: 0pt;
         }
         .question-block {
-          margin-bottom: 18px;
+          margin-top: 12pt;
+          margin-bottom: 16pt;
           page-break-inside: avoid;
+          mso-pagination: widow-orphan;
+          clear: both;
+          width: 100%;
+        }
+        .question-header-table {
+          width: 100%;
+          border-collapse: collapse;
+          border: none;
+          border-bottom: 2pt solid #0f172a;
+          margin-bottom: 8pt;
+          padding-bottom: 3pt;
+        }
+        .exam-items-table {
+          width: 100%;
+          border-collapse: separate;
+          border-spacing: 6pt;
+          margin-top: 6pt;
+          margin-bottom: 8pt;
         }
         .marks-badge {
-          float: ${isEnglish ? 'right' : 'left'};
+          float: left;
           font-weight: bold;
           color: #4338ca;
           font-size: 11pt;
         }
         .footer-note {
-          margin-top: 30px;
+          margin-top: 24pt;
           text-align: center;
           font-weight: bold;
           font-size: 12pt;
-          border-top: 1px solid #cbd5e1;
-          padding-top: 12px;
-          color: #475569;
+          border-top: 1.5pt solid #0f172a;
+          padding-top: 10pt;
+          color: #334155;
+          clear: both;
         }
-        .btn-delete-question, .no-print {
+        .btn-delete-question, .no-print, button {
           display: none !important;
           mso-hide: all;
         }
+        img {
+          max-width: 100%;
+          height: auto;
+          display: inline-block;
+          margin: 6pt 0;
+        }
       </style>
     </head>
-    <body dir="${isEnglish ? 'ltr' : 'rtl'}">
-      ${paper.showHeader !== false ? headerHtml : ''}
-      <div class="exam-body-content">
-        ${(paper.contentHtml || '<p>لا توجد أسئلة مسجلة حتى الآن.</p>')
-          .replace(/<button[^>]*class="[^"]*btn-delete-question[^"]*"[^>]*>[\s\S]*?<\/button>/gi, '')
-          .replace(/<button[^>]*>[\s\S]*?<\/button>/gi, '')}
+    <body dir="rtl">
+      ${paper.showHeader === true ? headerHtml : ''}
+      <div class="exam-body-content" dir="rtl">
+        ${cleanContent}
       </div>
-      ${paper.showFooter !== false ? `
-        <div class="footer-note">
-          ${isEnglish ? '✨ End of Questions - Best of Luck to All Students ✨' : '✨ انتهت الأسئلة - مع تمنياتنا لجميع الطلبة بدوام التوفيق والنجاح ✨'}
+      ${paper.showFooter === true ? `
+        <div class="footer-note" dir="rtl">
+          <table style="width: 100%; border: none; border-collapse: collapse;">
+            <tr style="border: none;">
+              <td style="width: 30%; border: none; text-align: right; font-size: 11pt;">المدرسة الدولية الخاصة - نموذج معتمد</td>
+              <td style="width: 40%; border: none; text-align: center; font-weight: bold; font-size: 12pt;">✨ انتهت الأسئلة - مع تمنياتنا لجميع الطلبة بالنجاح والتفوق ✨</td>
+              <td style="width: 30%; border: none; text-align: left; font-size: 11pt;">توقيع المعلم: ........................</td>
+            </tr>
+          </table>
         </div>
       ` : ''}
     </body>
@@ -197,3 +223,4 @@ export function exportExamPaperToWord(paper: ExamQuestionPaper, filename?: strin
   document.body.removeChild(downloadLink);
   URL.revokeObjectURL(url);
 }
+

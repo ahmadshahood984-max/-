@@ -67,21 +67,6 @@ const QUESTION_NUMBERS = [
   'السؤال الثاني عشر',
 ];
 
-const QUESTION_NUMBERS_EN = [
-  'Question One',
-  'Question Two',
-  'Question Three',
-  'Question Four',
-  'Question Five',
-  'Question Six',
-  'Question Seven',
-  'Question Eight',
-  'Question Nine',
-  'Question Ten',
-  'Question Eleven',
-  'Question Twelve',
-];
-
 export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = ({
   paper,
   currentUserRole,
@@ -93,7 +78,7 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
   onSave,
   onClose,
   availableClasses = [],
-  availableSubjects = ['الرياضيات', 'اللغة العربية', 'العلوم', 'التربية الإسلامية', 'اللغة الإنجليزية', 'الاجتماعيات']
+  availableSubjects = ['الرياضيات', 'اللغة العربية', 'العلوم', 'التربية الإسلامية', 'الاجتماعيات']
 }) => {
   // Document state
   const [paperId] = useState<string>(paper?.id || `exam_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`);
@@ -134,24 +119,21 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
   const [highlightColor, setHighlightColor] = useState<string>('#ffffff');
   const [savedSuccessMessage, setSavedSuccessMessage] = useState<string>('');
 
-  // Math, English & Templates Navigation State
+  // Math & Templates Navigation State (Pure Arabic)
   const isMathSubject = headerConfig.subject.includes('رياضيات') || headerConfig.subject.includes('حساب');
-  const isEnglishSubject = headerConfig.subject.includes('إنكليز') || 
-                           headerConfig.subject.includes('انجليز') || 
-                           headerConfig.subject.toLowerCase().includes('english');
-  const [activeTabType, setActiveTabType] = useState<'math' | 'general' | 'english'>(
-    isMathSubject ? 'math' : isEnglishSubject ? 'english' : 'general'
+  const [activeTabType, setActiveTabType] = useState<'math' | 'general'>(
+    isMathSubject ? 'math' : 'general'
   );
   const [activeMathCategory, setActiveMathCategory] = useState<
     'all' | 'division' | 'addition' | 'subtraction' | 'fractions' | 'multiplication' | 'word_problems' | 'geometry' | 'missing_compare'
   >('division');
 
-  // Document Text Direction (RTL for Arabic, LTR for English)
-  const [docDirection, setDocDirection] = useState<'rtl' | 'ltr'>(isEnglishSubject ? 'ltr' : 'rtl');
+  // Document Text Direction (Always RTL)
+  const docDirection = 'rtl';
 
   // Open & Customizable Question Title State
   const [openQuestionTitle, setOpenQuestionTitle] = useState<string>('');
-  const [customQuestionMarks, setCustomQuestionMarks] = useState<string>(isEnglishSubject ? '20 Marks' : '20 درجة');
+  const [customQuestionMarks, setCustomQuestionMarks] = useState<string>('20 درجة');
 
   // Two-step clear page confirmation state (no window.confirm needed)
   const [confirmClearActive, setConfirmClearActive] = useState<boolean>(false);
@@ -164,14 +146,10 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
   const editorRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Sync tab and direction with subject change
+  // Sync tab with subject change
   useEffect(() => {
     if (headerConfig.subject.includes('رياضيات') || headerConfig.subject.includes('حساب')) {
       setActiveTabType('math');
-    } else if (headerConfig.subject.includes('إنكليز') || headerConfig.subject.includes('انجليز') || headerConfig.subject.toLowerCase().includes('english')) {
-      setActiveTabType('english');
-      setDocDirection('ltr');
-      setActiveFont('Arial');
     }
   }, [headerConfig.subject]);
 
@@ -202,9 +180,6 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
   // Next auto question number based on existing questions
   const getNextAutoQuestionNumber = (): string => {
     const currentCount = editorRef.current?.querySelectorAll('.question-block').length || 0;
-    if (docDirection === 'ltr' || activeTabType === 'english') {
-      return QUESTION_NUMBERS_EN[currentCount] || `Question ${currentCount + 1}`;
-    }
     return QUESTION_NUMBERS[currentCount] || `السؤال رقم (${currentCount + 1})`;
   };
 
@@ -216,20 +191,44 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
     return getNextAutoQuestionNumber();
   };
 
-  // Helper to build a question header with integrated delete button and LTR/RTL support
-  const buildQuestionHeader = (qLabel: string, subTitle: string, qMarks: string, isLtr: boolean = docDirection === 'ltr') => `
-    <div class="question-header-row" dir="${isLtr ? 'ltr' : 'rtl'}" style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; border-bottom: 1.5px solid #0f172a; padding-bottom: 3px; gap: 8px; direction: ${isLtr ? 'ltr' : 'rtl'}; text-align: ${isLtr ? 'left' : 'right'};">
-      <div style="font-weight: bold; font-size: 12pt; color: #0f172a; flex: 1;">
-        <span>${qLabel}: ${subTitle}</span>
-      </div>
-      <div style="display: flex; align-items: center; gap: 6px;" contenteditable="false" class="no-print">
-        <span style="color: #4338ca; font-size: 10.5pt; background: #e0e7ff; padding: 1px 6px; border-radius: 4px; font-weight: bold; white-space: nowrap;">[ ${qMarks} ]</span>
-        <button type="button" class="btn-delete-question" style="background: #fee2e2; color: #b91c1c; border: 1px solid #fca5a5; border-radius: 4px; padding: 1px 6px; font-size: 10pt; font-weight: bold; cursor: pointer; display: inline-flex; align-items: center; gap: 2px;" title="${isLtr ? 'Delete this question' : 'حذف هذا السؤال من الورقة'}">
-          <span>🗑️ ${isLtr ? 'Delete' : 'حذف'}</span>
-        </button>
-      </div>
-    </div>
+  // Helper to build a question header - Table-based for 100% Microsoft Word and Browser fidelity
+  const buildQuestionHeader = (qLabel: string, subTitle: string, qMarks: string) => `
+    <table class="question-header-table" dir="rtl" style="width: 100%; border-collapse: collapse; border: none; border-bottom: 2pt solid #0f172a; margin-bottom: 8px; padding-bottom: 4px; direction: rtl; text-align: right;">
+      <tr style="border: none;">
+        <td style="border: none; text-align: right; font-weight: bold; font-size: 12pt; color: #0f172a; vertical-align: middle; padding: 2px 0;">
+          <span>${qLabel}: ${subTitle}</span>
+        </td>
+        <td style="border: none; text-align: left; width: 140px; vertical-align: middle; padding: 2px 0;" class="no-print" contenteditable="false">
+          <span class="marks-badge" style="color: #4338ca; font-size: 10.5pt; background: #e0e7ff; padding: 1px 6px; border-radius: 4px; font-weight: bold; white-space: nowrap;">[ ${qMarks} ]</span>
+          <button type="button" class="btn-delete-question" style="background: #fee2e2; color: #b91c1c; border: 1px solid #fca5a5; border-radius: 4px; padding: 1px 6px; font-size: 10pt; font-weight: bold; cursor: pointer; display: inline-flex; align-items: center; gap: 2px; margin-right: 4px;" title="حذف هذا السؤال من الورقة">
+            <span>🗑️ حذف</span>
+          </button>
+        </td>
+      </tr>
+    </table>
   `;
+
+  // Helper to render multiple items in a clean table grid that Word renders natively without breaking
+  const renderWordCompatibleGrid = (items: string[], maxPerCol: number = 5) => {
+    let rowsHtml = '';
+    for (let i = 0; i < items.length; i += maxPerCol) {
+      const chunk = items.slice(i, i + maxPerCol);
+      rowsHtml += `<tr style="border: none;">`;
+      chunk.forEach(item => {
+        rowsHtml += `
+          <td style="border: 1px solid #cbd5e1; border-radius: 6px; padding: 6px 8px; background-color: #ffffff; text-align: center; vertical-align: middle; font-size: 12pt;">
+            ${item}
+          </td>
+        `;
+      });
+      rowsHtml += `</tr>`;
+    }
+    return `
+      <table class="exam-items-table" style="width: 100%; border-collapse: separate; border-spacing: 6px; border: none; margin: 6px 0;" dir="rtl">
+        ${rowsHtml}
+      </table>
+    `;
+  };
 
   // Handle click delegation inside editor for question deletion
   const handleEditorClick = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -307,8 +306,8 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
     }
   };
 
-  // Insert HTML into editor sheet (at caret or appended)
-  const insertHtmlSnippet = (snippetHtml: string) => {
+  // Insert question block - ALWAYS descends below previous questions cleanly and smoothly
+  const insertQuestionBlock = (questionHtml: string) => {
     if (!editorRef.current) return;
 
     // Save for undo
@@ -320,29 +319,71 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
       editorRef.current.innerHTML = '';
     }
 
+    // Parse the new question container
+    const tempContainer = document.createElement('div');
+    tempContainer.innerHTML = questionHtml.trim();
+
+    // Append cleanly to the bottom of the document
+    while (tempContainer.firstChild) {
+      editorRef.current.appendChild(tempContainer.firstChild);
+    }
+
+    // Append a comfortable spacing paragraph below it for cursor placement
+    const spacerP = document.createElement('p');
+    spacerP.className = 'question-spacer';
+    spacerP.style.margin = '8px 0';
+    spacerP.innerHTML = '<br>';
+    editorRef.current.appendChild(spacerP);
+
+    setIsDocEmpty(false);
+
+    // Scroll the newly added question into view smoothly
+    const blocks = editorRef.current.querySelectorAll('.question-block');
+    if (blocks.length > 0) {
+      const lastBlock = blocks[blocks.length - 1];
+      lastBlock.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
+    setSavedSuccessMessage('تم إدراج السؤال تلقائياً تحت السؤال السابق وتنسيقه تماماً ✨');
+    setTimeout(() => setSavedSuccessMessage(''), 2500);
+  };
+
+  // Insert HTML into editor sheet (dispatches to insertQuestionBlock if question-block)
+  const insertHtmlSnippet = (snippetHtml: string) => {
+    if (snippetHtml.includes('question-block')) {
+      insertQuestionBlock(snippetHtml);
+      return;
+    }
+
+    if (!editorRef.current) return;
+
+    // Save for undo
+    setUndoBufferHtml(editorRef.current.innerHTML);
+
+    const currentHtml = editorRef.current.innerHTML.trim();
+    if (currentHtml === '<p><br></p>' || currentHtml === '<br>') {
+      editorRef.current.innerHTML = '';
+    }
+
     editorRef.current.focus();
     const selection = window.getSelection();
     let insertedAtCaret = false;
 
     if (selection && selection.rangeCount > 0 && editorRef.current.contains(selection.anchorNode)) {
       try {
-        document.execCommand('insertHTML', false, snippetHtml + '<p><br></p>');
+        document.execCommand('insertHTML', false, snippetHtml);
         insertedAtCaret = true;
       } catch (err) {
-        console.warn('execCommand failed, appending to sheet:', err);
+        console.warn('execCommand failed:', err);
       }
     }
 
     if (!insertedAtCaret) {
-      editorRef.current.innerHTML += snippetHtml + '<p><br></p>';
+      editorRef.current.innerHTML += snippetHtml;
     }
 
     setIsDocEmpty(false);
     editorRef.current.focus();
-
-    // If an open custom title was used, we can keep or reset it
-    setSavedSuccessMessage('تم إدراج السؤال في الورقة بنجاح ✨');
-    setTimeout(() => setSavedSuccessMessage(''), 2500);
   };
 
   // Font family change
@@ -440,28 +481,34 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
 
     // 1. EQUATION TEMPLATE: إدراج معادلة مثل هذه (كسر بمربعات منقطة مثل الوورد)
     if (type === 'equation_fraction') {
-      let itemsHtml = '';
+      const items: string[] = [];
       for (let i = 0; i < count; i++) {
         const lbl = SUB_EXAMPLE_LABELS[i] || `(${i + 1})`;
-        itemsHtml += `
-          <div style="flex: 1 1 180px; max-width: 240px; padding: 5px 8px; background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; display: inline-flex; align-items: center; justify-content: space-between; gap: 4px; font-size: 12pt;">
-            <span style="font-weight: bold; color: #4338ca; font-size: 11pt;">${lbl}</span>
-            <div style="display: inline-flex; flex-direction: column; align-items: center; vertical-align: middle;">
-              <div contenteditable="true" style="min-width: 24px; height: 22px; border: 1.5px dashed #475569; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 12pt; padding: 0 3px; background: #f8fafc; text-align: center; color: #0f172a;"></div>
-              <div style="width: 100%; min-width: 28px; height: 1.5px; background-color: #0f172a; margin: 2px 0;"></div>
-              <div contenteditable="true" style="min-width: 24px; height: 22px; border: 1.5px dashed #475569; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 12pt; padding: 0 3px; background: #f8fafc; text-align: center; color: #0f172a;"></div>
-            </div>
-            <span style="font-size: 12pt; font-weight: bold; color: #334155;">=</span>
-            <span style="border-bottom: 1.5px dotted #475569; min-width: 45px; display: inline-block; text-align: center; color: #94a3b8; font-size: 11pt;">.......</span>
-          </div>
-        `;
+        items.push(`
+          <div style="font-weight: bold; color: #4338ca; font-size: 10.5pt; margin-bottom: 3px; text-align: right;">${lbl}</div>
+          <table style="margin: 0 auto; border-collapse: collapse; border: none;" dir="rtl">
+            <tr style="border: none;">
+              <td style="border: none; padding: 1px 3px; text-align: center;">
+                <span contenteditable="true" style="display: inline-block; min-width: 24px; height: 20px; line-height: 18px; border: 1.5px dashed #475569; border-radius: 4px; font-weight: bold; font-size: 12pt; background: #f8fafc; color: #0f172a; text-align: center;"></span>
+              </td>
+              <td rowspan="3" style="border: none; padding: 0 4px; font-size: 13pt; font-weight: bold; color: #334155; vertical-align: middle;">=</td>
+              <td rowspan="3" style="border: none; padding: 0 4px; border-bottom: 1.5px dotted #475569; min-width: 40px; text-align: center; color: #94a3b8; font-size: 11pt; vertical-align: middle;">.......</td>
+            </tr>
+            <tr style="border: none;">
+              <td style="border: none; border-top: 2px solid #0f172a; padding: 0; height: 1px;"></td>
+            </tr>
+            <tr style="border: none;">
+              <td style="border: none; padding: 1px 3px; text-align: center;">
+                <span contenteditable="true" style="display: inline-block; min-width: 24px; height: 20px; line-height: 18px; border: 1.5px dashed #475569; border-radius: 4px; font-weight: bold; font-size: 12pt; background: #f8fafc; color: #0f172a; text-align: center;"></span>
+              </td>
+            </tr>
+          </table>
+        `);
       }
       snippet = `
-        <div class="question-block" style="margin-bottom: 12px; page-break-inside: avoid; font-size: 12pt;">
+        <div class="question-block" dir="rtl" style="margin-top: 10pt; margin-bottom: 14pt; page-break-inside: avoid; font-size: 12pt; width: 100%; clear: both;">
           ${buildQuestionHeader(qLabel, openQuestionTitle || 'احسب ناتج المعادلات والكسور الآتية:', qMarks)}
-          <div style="display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-start; margin: 8px 0; font-size: 12pt;" dir="rtl">
-            ${itemsHtml}
-          </div>
+          ${renderWordCompatibleGrid(items, count > 6 ? 4 : (count <= 3 ? count : 4))}
         </div>
       `;
     }
@@ -482,27 +529,24 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
         { a: '٩٤', b: '٤٨' },
         { a: '٣٨٠', b: '٢٩٠' }
       ];
-      let itemsHtml = '';
+      const items: string[] = [];
       for (let i = 0; i < count; i++) {
         const pair = additionPairs[i % additionPairs.length];
         const lbl = SUB_EXAMPLE_LABELS[i] || `(${i + 1})`;
-        itemsHtml += `
-          <div style="padding: 4px 10px; background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; display: inline-flex; align-items: center; gap: 4px; font-size: 12pt; min-width: 130px;">
-            <span style="font-weight: bold; color: #047857; font-size: 11pt;">${lbl}</span>
-            <span contenteditable="true" style="font-weight: bold; font-size: 12pt; padding: 1px 3px; min-width: 16px; text-align: center;">${pair.a}</span>
-            <span style="font-weight: bold; color: #047857; font-size: 13pt;">+</span>
-            <span contenteditable="true" style="font-weight: bold; font-size: 12pt; padding: 1px 3px; min-width: 16px; text-align: center;">${pair.b}</span>
-            <span style="font-weight: bold; font-size: 12pt;">=</span>
-            <span style="border-bottom: 1.5px dotted #475569; min-width: 45px; display: inline-block; text-align: center; color: #94a3b8; font-size: 11pt;">........</span>
-          </div>
-        `;
+        items.push(`
+          <span style="font-weight: bold; color: #047857; font-size: 11pt;">${lbl}</span>
+          &nbsp;
+          <span contenteditable="true" style="font-weight: bold; font-size: 12pt; padding: 1px 3px;">${pair.a}</span>
+          <span style="font-weight: bold; color: #047857; font-size: 13pt;"> + </span>
+          <span contenteditable="true" style="font-weight: bold; font-size: 12pt; padding: 1px 3px;">${pair.b}</span>
+          <span style="font-weight: bold; font-size: 12pt;"> = </span>
+          <span style="border-bottom: 1.5px dotted #475569; min-width: 45px; display: inline-block; text-align: center; color: #94a3b8; font-size: 11pt;">........</span>
+        `);
       }
       snippet = `
-        <div class="question-block" style="margin-bottom: 12px; page-break-inside: avoid; font-size: 12pt;">
+        <div class="question-block" dir="rtl" style="margin-top: 10pt; margin-bottom: 14pt; page-break-inside: avoid; font-size: 12pt; width: 100%; clear: both;">
           ${buildQuestionHeader(qLabel, openQuestionTitle || 'احسب ناتج الجمع الأفقي في كل مما يأتي:', qMarks)}
-          <div style="display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-start; margin: 8px 0; font-size: 12pt;" dir="rtl">
-            ${itemsHtml}
-          </div>
+          ${renderWordCompatibleGrid(items, count > 6 ? 4 : (count <= 3 ? count : 4))}
         </div>
       `;
     }
@@ -521,37 +565,33 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
         { a: '٩٣', b: '٥٤' },
         { a: '٦١٥', b: '٢٧٠' }
       ];
-      let itemsHtml = '';
+      const items: string[] = [];
       for (let i = 0; i < count; i++) {
         const pair = verticalAddPairs[i % verticalAddPairs.length];
         const lbl = SUB_EXAMPLE_LABELS[i] || `(${i + 1})`;
-        itemsHtml += `
-          <div style="background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; padding: 5px 8px; flex: 1 1 80px; max-width: 130px; min-width: 75px; text-align: center; font-size: 12pt;">
-            <div style="font-weight: bold; font-size: 10pt; color: #047857; margin-bottom: 2px; text-align: right;">${lbl}</div>
-            <table style="border-collapse: collapse; margin: 0 auto; font-size: 13pt; font-weight: bold; text-align: center;" dir="rtl">
-              <tr>
-                <td style="width: 18px;"></td>
-                <td contenteditable="true" style="padding: 1px 4px; text-align: center; min-width: 32px; font-size: 13pt;">${pair.a}</td>
-              </tr>
-              <tr>
-                <td style="color: #047857; padding: 1px 3px; font-weight: bold; font-size: 13pt;">+</td>
-                <td contenteditable="true" style="padding: 1px 4px; text-align: center; min-width: 32px; font-size: 13pt;">${pair.b}</td>
-              </tr>
-              <tr>
-                <td colspan="2" style="border-top: 2px solid #0f172a; padding-top: 3px;">
-                  <div style="border-bottom: 1.5px dotted #64748b; height: 16px; min-width: 42px; margin: 0 auto;"></div>
-                </td>
-              </tr>
-            </table>
-          </div>
-        `;
+        items.push(`
+          <div style="font-weight: bold; font-size: 10.5pt; color: #047857; margin-bottom: 2px; text-align: right;">${lbl}</div>
+          <table style="border-collapse: collapse; margin: 0 auto; font-size: 13pt; font-weight: bold; text-align: center; border: none;" dir="rtl">
+            <tr style="border: none;">
+              <td style="width: 18px; border: none;"></td>
+              <td contenteditable="true" style="border: none; padding: 1px 4px; text-align: center; min-width: 32px; font-size: 13pt;">${pair.a}</td>
+            </tr>
+            <tr style="border: none;">
+              <td style="border: none; color: #047857; padding: 1px 3px; font-weight: bold; font-size: 13pt;">+</td>
+              <td contenteditable="true" style="border: none; padding: 1px 4px; text-align: center; min-width: 32px; font-size: 13pt;">${pair.b}</td>
+            </tr>
+            <tr style="border: none;">
+              <td colspan="2" style="border: none; border-top: 2px solid #0f172a; padding-top: 3px;">
+                <div style="border-bottom: 1.5px dotted #64748b; height: 16px; min-width: 42px; margin: 0 auto;"></div>
+              </td>
+            </tr>
+          </table>
+        `);
       }
       snippet = `
-        <div class="question-block" style="margin-bottom: 12px; page-break-inside: avoid; font-size: 12pt;">
+        <div class="question-block" dir="rtl" style="margin-top: 10pt; margin-bottom: 14pt; page-break-inside: avoid; font-size: 12pt; width: 100%; clear: both;">
           ${buildQuestionHeader(qLabel, openQuestionTitle || 'أوجد ناتج الجمع العمودي في كل مما يأتي:', qMarks)}
-          <div style="display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; margin: 8px 0; font-size: 12pt;" dir="rtl">
-            ${itemsHtml}
-          </div>
+          ${renderWordCompatibleGrid(items, count > 6 ? 5 : (count <= 4 ? count : 5))}
         </div>
       `;
     }
@@ -570,27 +610,24 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
         { a: '٣٠٠', b: '١٢٥' },
         { a: '٩٢', b: '٤٨' }
       ];
-      let itemsHtml = '';
+      const items: string[] = [];
       for (let i = 0; i < count; i++) {
         const pair = subPairs[i % subPairs.length];
         const lbl = SUB_EXAMPLE_LABELS[i] || `(${i + 1})`;
-        itemsHtml += `
-          <div style="padding: 4px 10px; background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; display: inline-flex; align-items: center; gap: 4px; font-size: 12pt; min-width: 130px;">
-            <span style="font-weight: bold; color: #b91c1c; font-size: 11pt;">${lbl}</span>
-            <span contenteditable="true" style="font-weight: bold; font-size: 12pt; padding: 1px 3px; min-width: 16px; text-align: center;">${pair.a}</span>
-            <span style="font-weight: bold; color: #b91c1c; font-size: 13pt;">-</span>
-            <span contenteditable="true" style="font-weight: bold; font-size: 12pt; padding: 1px 3px; min-width: 16px; text-align: center;">${pair.b}</span>
-            <span style="font-weight: bold; font-size: 12pt;">=</span>
-            <span style="border-bottom: 1.5px dotted #475569; min-width: 45px; display: inline-block; text-align: center; color: #94a3b8; font-size: 11pt;">........</span>
-          </div>
-        `;
+        items.push(`
+          <span style="font-weight: bold; color: #b91c1c; font-size: 11pt;">${lbl}</span>
+          &nbsp;
+          <span contenteditable="true" style="font-weight: bold; font-size: 12pt; padding: 1px 3px;">${pair.a}</span>
+          <span style="font-weight: bold; color: #b91c1c; font-size: 13pt;"> - </span>
+          <span contenteditable="true" style="font-weight: bold; font-size: 12pt; padding: 1px 3px;">${pair.b}</span>
+          <span style="font-weight: bold; font-size: 12pt;"> = </span>
+          <span style="border-bottom: 1.5px dotted #475569; min-width: 45px; display: inline-block; text-align: center; color: #94a3b8; font-size: 11pt;">........</span>
+        `);
       }
       snippet = `
-        <div class="question-block" style="margin-bottom: 12px; page-break-inside: avoid; font-size: 12pt;">
+        <div class="question-block" dir="rtl" style="margin-top: 10pt; margin-bottom: 14pt; page-break-inside: avoid; font-size: 12pt; width: 100%; clear: both;">
           ${buildQuestionHeader(qLabel, openQuestionTitle || 'احسب ناتج الطرح الأفقي في كل مما يأتي:', qMarks)}
-          <div style="display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-start; margin: 8px 0; font-size: 12pt;" dir="rtl">
-            ${itemsHtml}
-          </div>
+          ${renderWordCompatibleGrid(items, count > 6 ? 4 : (count <= 3 ? count : 4))}
         </div>
       `;
     }
@@ -609,37 +646,33 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
         { a: '٩٠', b: '٤٣' },
         { a: '٧٢٥', b: '٣٦٨' }
       ];
-      let itemsHtml = '';
+      const items: string[] = [];
       for (let i = 0; i < count; i++) {
         const pair = verticalSubPairs[i % verticalSubPairs.length];
         const lbl = SUB_EXAMPLE_LABELS[i] || `(${i + 1})`;
-        itemsHtml += `
-          <div style="background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; padding: 5px 8px; flex: 1 1 80px; max-width: 130px; min-width: 75px; text-align: center; font-size: 12pt;">
-            <div style="font-weight: bold; font-size: 10pt; color: #b91c1c; margin-bottom: 2px; text-align: right;">${lbl}</div>
-            <table style="border-collapse: collapse; margin: 0 auto; font-size: 13pt; font-weight: bold; text-align: center;" dir="rtl">
-              <tr>
-                <td style="width: 18px;"></td>
-                <td contenteditable="true" style="padding: 1px 4px; text-align: center; min-width: 32px; font-size: 13pt;">${pair.a}</td>
-              </tr>
-              <tr>
-                <td style="color: #b91c1c; padding: 1px 3px; font-weight: bold; font-size: 13pt;">-</td>
-                <td contenteditable="true" style="padding: 1px 4px; text-align: center; min-width: 32px; font-size: 13pt;">${pair.b}</td>
-              </tr>
-              <tr>
-                <td colspan="2" style="border-top: 2px solid #0f172a; padding-top: 3px;">
-                  <div style="border-bottom: 1.5px dotted #64748b; height: 16px; min-width: 42px; margin: 0 auto;"></div>
-                </td>
-              </tr>
-            </table>
-          </div>
-        `;
+        items.push(`
+          <div style="font-weight: bold; font-size: 10.5pt; color: #b91c1c; margin-bottom: 2px; text-align: right;">${lbl}</div>
+          <table style="border-collapse: collapse; margin: 0 auto; font-size: 13pt; font-weight: bold; text-align: center; border: none;" dir="rtl">
+            <tr style="border: none;">
+              <td style="width: 18px; border: none;"></td>
+              <td contenteditable="true" style="border: none; padding: 1px 4px; text-align: center; min-width: 32px; font-size: 13pt;">${pair.a}</td>
+            </tr>
+            <tr style="border: none;">
+              <td style="border: none; color: #b91c1c; padding: 1px 3px; font-weight: bold; font-size: 13pt;">-</td>
+              <td contenteditable="true" style="border: none; padding: 1px 4px; text-align: center; min-width: 32px; font-size: 13pt;">${pair.b}</td>
+            </tr>
+            <tr style="border: none;">
+              <td colspan="2" style="border: none; border-top: 2px solid #0f172a; padding-top: 3px;">
+                <div style="border-bottom: 1.5px dotted #64748b; height: 16px; min-width: 42px; margin: 0 auto;"></div>
+              </td>
+            </tr>
+          </table>
+        `);
       }
       snippet = `
-        <div class="question-block" style="margin-bottom: 12px; page-break-inside: avoid; font-size: 12pt;">
+        <div class="question-block" dir="rtl" style="margin-top: 10pt; margin-bottom: 14pt; page-break-inside: avoid; font-size: 12pt; width: 100%; clear: both;">
           ${buildQuestionHeader(qLabel, openQuestionTitle || 'أوجد ناتج الطرح العمودي في كل مما يأتي:', qMarks)}
-          <div style="display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; margin: 8px 0; font-size: 12pt;" dir="rtl">
-            ${itemsHtml}
-          </div>
+          ${renderWordCompatibleGrid(items, count > 6 ? 5 : (count <= 4 ? count : 5))}
         </div>
       `;
     }
@@ -658,27 +691,24 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
         { a: '٩٠', b: '٩' },
         { a: '٦٤', b: '٨' }
       ];
-      let itemsHtml = '';
+      const items: string[] = [];
       for (let i = 0; i < count; i++) {
         const pair = divPairs[i % divPairs.length];
         const lbl = SUB_EXAMPLE_LABELS[i] || `(${i + 1})`;
-        itemsHtml += `
-          <div style="padding: 4px 10px; background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; display: inline-flex; align-items: center; gap: 4px; font-size: 12pt; min-width: 130px;">
-            <span style="font-weight: bold; color: #0284c7; font-size: 11pt;">${lbl}</span>
-            <span contenteditable="true" style="font-weight: bold; font-size: 12pt; padding: 1px 3px; min-width: 16px; text-align: center;">${pair.a}</span>
-            <span style="font-weight: bold; color: #0284c7; font-size: 13pt;">÷</span>
-            <span contenteditable="true" style="font-weight: bold; font-size: 12pt; padding: 1px 3px; min-width: 16px; text-align: center;">${pair.b}</span>
-            <span style="font-weight: bold; font-size: 12pt;">=</span>
-            <span style="border-bottom: 1.5px dotted #475569; min-width: 45px; display: inline-block; text-align: center; color: #94a3b8; font-size: 11pt;">........</span>
-          </div>
-        `;
+        items.push(`
+          <span style="font-weight: bold; color: #0284c7; font-size: 11pt;">${lbl}</span>
+          &nbsp;
+          <span contenteditable="true" style="font-weight: bold; font-size: 12pt; padding: 1px 3px;">${pair.a}</span>
+          <span style="font-weight: bold; color: #0284c7; font-size: 13pt;"> ÷ </span>
+          <span contenteditable="true" style="font-weight: bold; font-size: 12pt; padding: 1px 3px;">${pair.b}</span>
+          <span style="font-weight: bold; font-size: 12pt;"> = </span>
+          <span style="border-bottom: 1.5px dotted #475569; min-width: 45px; display: inline-block; text-align: center; color: #94a3b8; font-size: 11pt;">........</span>
+        `);
       }
       snippet = `
-        <div class="question-block" style="margin-bottom: 12px; page-break-inside: avoid; font-size: 12pt;">
+        <div class="question-block" dir="rtl" style="margin-top: 10pt; margin-bottom: 14pt; page-break-inside: avoid; font-size: 12pt; width: 100%; clear: both;">
           ${buildQuestionHeader(qLabel, openQuestionTitle || 'احسب ناتج عمليات القسمة الأفقية الآتية:', qMarks)}
-          <div style="display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-start; margin: 8px 0; font-size: 12pt;" dir="rtl">
-            ${itemsHtml}
-          </div>
+          ${renderWordCompatibleGrid(items, count > 6 ? 4 : (count <= 3 ? count : 4))}
         </div>
       `;
     }
@@ -695,42 +725,38 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
         { dividend: '٦ ٤', divisor: '٤' },
         { dividend: '٨ ٥', divisor: '٥' }
       ];
-      let itemsHtml = '';
+      const items: string[] = [];
       for (let i = 0; i < count; i++) {
         const pair = longDivPairs[i % longDivPairs.length];
         const lbl = SUB_EXAMPLE_LABELS[i] || `(${i + 1})`;
-        itemsHtml += `
-          <div style="background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; padding: 6px 10px; flex: 1 1 130px; max-width: 175px; min-width: 120px; font-size: 12pt;">
-            <div style="font-weight: bold; font-size: 10pt; color: #0284c7; margin-bottom: 3px; text-align: right;">${lbl}</div>
-            <table style="border-collapse: collapse; margin: 0 auto; font-size: 12pt;" dir="rtl">
-              <tr>
-                <td style="width: 35px; font-size: 9.5pt; color: #64748b; font-weight: bold; text-align: center;">الناتج:</td>
-                <td style="border-bottom: 2px solid #0f172a; padding: 1px 6px; text-align: center; min-width: 65px;">
-                  <span contenteditable="true" style="color: #1e3a8a; font-weight: bold;">[ &nbsp; &nbsp; ]</span>
-                </td>
-              </tr>
-              <tr>
-                <td contenteditable="true" style="border-left: 2px solid #0f172a; padding: 3px 6px; font-weight: bold; font-size: 13pt; text-align: center; background: #f8fafc;">${pair.divisor}</td>
-                <td contenteditable="true" style="padding: 3px 6px; font-weight: bold; font-size: 13pt; letter-spacing: 3px; text-align: center;">${pair.dividend}</td>
-              </tr>
-              <tr>
-                <td style="border-left: 2px solid #0f172a; height: 30px;"></td>
-                <td style="color: #94a3b8; font-size: 9.5pt; padding-top: 4px; border-bottom: 1px dotted #cbd5e1; text-align: center;">(خطوات الحل)</td>
-              </tr>
-              <tr>
-                <td style="border-left: 2px solid #0f172a;"></td>
-                <td style="padding: 3px 2px; font-size: 9.5pt; font-weight: bold; color: #16a34a; text-align: center;">الباقي = [ &nbsp; ]</td>
-              </tr>
-            </table>
-          </div>
-        `;
+        items.push(`
+          <div style="font-weight: bold; font-size: 10.5pt; color: #0284c7; margin-bottom: 3px; text-align: right;">${lbl}</div>
+          <table style="border-collapse: collapse; margin: 0 auto; font-size: 12pt; border: none;" dir="rtl">
+            <tr style="border: none;">
+              <td style="width: 35px; font-size: 9.5pt; color: #64748b; font-weight: bold; text-align: center; border: none;">الناتج:</td>
+              <td style="border: none; border-bottom: 2px solid #0f172a; padding: 1px 6px; text-align: center; min-width: 60px;">
+                <span contenteditable="true" style="color: #1e3a8a; font-weight: bold;">[ &nbsp; &nbsp; ]</span>
+              </td>
+            </tr>
+            <tr style="border: none;">
+              <td contenteditable="true" style="border: none; border-left: 2px solid #0f172a; padding: 3px 6px; font-weight: bold; font-size: 13pt; text-align: center; background: #f8fafc;">${pair.divisor}</td>
+              <td contenteditable="true" style="border: none; padding: 3px 6px; font-weight: bold; font-size: 13pt; letter-spacing: 3px; text-align: center;">${pair.dividend}</td>
+            </tr>
+            <tr style="border: none;">
+              <td style="border: none; border-left: 2px solid #0f172a; height: 26px;"></td>
+              <td style="border: none; color: #94a3b8; font-size: 9pt; padding-top: 3px; border-bottom: 1px dotted #cbd5e1; text-align: center;">(خطوات الحل)</td>
+            </tr>
+            <tr style="border: none;">
+              <td style="border: none; border-left: 2px solid #0f172a;"></td>
+              <td style="border: none; padding: 3px 2px; font-size: 9.5pt; font-weight: bold; color: #16a34a; text-align: center;">الباقي = [ &nbsp; ]</td>
+            </tr>
+          </table>
+        `);
       }
       snippet = `
-        <div class="question-block" style="margin-bottom: 12px; page-break-inside: avoid; font-size: 12pt;">
+        <div class="question-block" dir="rtl" style="margin-top: 10pt; margin-bottom: 14pt; page-break-inside: avoid; font-size: 12pt; width: 100%; clear: both;">
           ${buildQuestionHeader(qLabel, openQuestionTitle || 'أوجد ناتج وباقي القسمة المطولة موضحاً خطوات الحل:', qMarks)}
-          <div style="display: flex; flex-wrap: wrap; justify-content: flex-start; gap: 6px; margin: 8px 0; font-size: 12pt;" dir="rtl">
-            ${itemsHtml}
-          </div>
+          ${renderWordCompatibleGrid(items, count > 6 ? 4 : (count <= 3 ? count : 4))}
         </div>
       `;
     }
@@ -747,39 +773,49 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
         { n1: '٥', d1: '١٢', op: '+', n2: '٤', d2: '١٢' },
         { n1: '٨', d1: '٩', op: '-', n2: '٥', d2: '٩' }
       ];
-      let itemsHtml = '';
+      const items: string[] = [];
       for (let i = 0; i < count; i++) {
         const item = fractionPairs[i % fractionPairs.length];
         const lbl = SUB_EXAMPLE_LABELS[i] || `(${i + 1})`;
-        itemsHtml += `
-          <div style="display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12pt; min-width: 130px;">
-            <span style="font-weight: bold; color: #7c3aed; font-size: 11pt;">${lbl}</span>
-            <div style="display: inline-flex; flex-direction: column; align-items: center;">
-              <span contenteditable="true" style="font-weight: bold; font-size: 12pt; padding: 0 2px; min-width: 14px; text-align: center;">${item.n1}</span>
-              <span style="width: 100%; min-width: 18px; height: 1.5px; background: #0f172a;"></span>
-              <span contenteditable="true" style="font-weight: bold; font-size: 12pt; padding: 0 2px; min-width: 14px; text-align: center;">${item.d1}</span>
-            </div>
-            <span style="font-size: 13pt; font-weight: bold; color: ${item.op === '+' ? '#047857' : '#b91c1c'};">${item.op}</span>
-            <div style="display: inline-flex; flex-direction: column; align-items: center;">
-              <span contenteditable="true" style="font-weight: bold; font-size: 12pt; padding: 0 2px; min-width: 14px; text-align: center;">${item.n2}</span>
-              <span style="width: 100%; min-width: 18px; height: 1.5px; background: #0f172a;"></span>
-              <span contenteditable="true" style="font-weight: bold; font-size: 12pt; padding: 0 2px; min-width: 14px; text-align: center;">${item.d2}</span>
-            </div>
-            <span style="font-size: 12pt; font-weight: bold;">=</span>
-            <div style="display: inline-flex; flex-direction: column; align-items: center;">
-              <span style="border-bottom: 1.5px dotted #64748b; min-width: 20px; display: inline-block; height: 12px;"></span>
-              <span style="width: 100%; min-width: 20px; height: 1.5px; background: #0f172a;"></span>
-              <span style="border-bottom: 1.5px dotted #64748b; min-width: 20px; display: inline-block; height: 12px;"></span>
-            </div>
-          </div>
-        `;
+        items.push(`
+          <div style="font-weight: bold; color: #7c3aed; font-size: 10.5pt; margin-bottom: 2px; text-align: right;">${lbl}</div>
+          <table style="margin: 0 auto; border-collapse: collapse; border: none; font-size: 12pt;" dir="rtl">
+            <tr style="border: none;">
+              <td style="border: none; text-align: center; padding: 0 3px;">
+                <span contenteditable="true" style="font-weight: bold; font-size: 12pt;">${item.n1}</span>
+              </td>
+              <td rowspan="3" style="border: none; padding: 0 4px; font-size: 13pt; font-weight: bold; color: ${item.op === '+' ? '#047857' : '#b91c1c'}; vertical-align: middle;">${item.op}</td>
+              <td style="border: none; text-align: center; padding: 0 3px;">
+                <span contenteditable="true" style="font-weight: bold; font-size: 12pt;">${item.n2}</span>
+              </td>
+              <td rowspan="3" style="border: none; padding: 0 4px; font-size: 12pt; font-weight: bold; vertical-align: middle;">=</td>
+              <td style="border: none; text-align: center; padding: 0 3px;">
+                <span style="border-bottom: 1.5px dotted #64748b; min-width: 20px; display: inline-block; height: 14px;"></span>
+              </td>
+            </tr>
+            <tr style="border: none;">
+              <td style="border: none; border-top: 1.5px solid #0f172a; height: 1px;"></td>
+              <td style="border: none; border-top: 1.5px solid #0f172a; height: 1px;"></td>
+              <td style="border: none; border-top: 1.5px solid #0f172a; height: 1px;"></td>
+            </tr>
+            <tr style="border: none;">
+              <td style="border: none; text-align: center; padding: 0 3px;">
+                <span contenteditable="true" style="font-weight: bold; font-size: 12pt;">${item.d1}</span>
+              </td>
+              <td style="border: none; text-align: center; padding: 0 3px;">
+                <span contenteditable="true" style="font-weight: bold; font-size: 12pt;">${item.d2}</span>
+              </td>
+              <td style="border: none; text-align: center; padding: 0 3px;">
+                <span style="border-bottom: 1.5px dotted #64748b; min-width: 20px; display: inline-block; height: 14px;"></span>
+              </td>
+            </tr>
+          </table>
+        `);
       }
       snippet = `
-        <div class="question-block" style="margin-bottom: 12px; page-break-inside: avoid; font-size: 12pt;">
+        <div class="question-block" dir="rtl" style="margin-top: 10pt; margin-bottom: 14pt; page-break-inside: avoid; font-size: 12pt; width: 100%; clear: both;">
           ${buildQuestionHeader(qLabel, openQuestionTitle || 'احسب ناتج جمع وطرح الكسور الآتية:', qMarks)}
-          <div style="display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-start; margin: 8px 0; font-size: 12pt;" dir="rtl">
-            ${itemsHtml}
-          </div>
+          ${renderWordCompatibleGrid(items, count > 6 ? 4 : (count <= 3 ? count : 4))}
         </div>
       `;
     }
@@ -1360,412 +1396,7 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
     insertHtmlSnippet(snippet);
   };
 
-  // ==========================================
-  // ENGLISH LANGUAGE EXAM QUESTION TEMPLATES SUITE
-  // ==========================================
-  const insertEnglishSnippet = (type: string, overrideCount?: number) => {
-    const qLabel = getNextQuestionLabel();
-    const qMarks = customQuestionMarks || '20 Marks';
-    const count = overrideCount || insertCount || 5;
-    let snippet = '';
-
-    // Standard English letters for sub-items
-    const EN_LETTERS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'];
-
-    // 1. READING COMPREHENSION
-    if (type === 'reading') {
-      snippet = `
-        <div class="question-block" dir="ltr" style="margin-bottom: 22px; page-break-inside: avoid; direction: ltr; text-align: left; font-size: 12pt;">
-          ${buildQuestionHeader(qLabel, 'Reading Comprehension', qMarks, true)}
-          <div style="font-weight: bold; margin-bottom: 6px; color: #1e293b; font-size: 12pt;">
-            Read the following passage carefully, then answer the questions below:
-          </div>
-          <div style="background: #f8fafc; border: 1.5px solid #cbd5e1; border-left: 4px solid #3b82f6; border-radius: 6px; padding: 10px 14px; margin-bottom: 12px; line-height: 1.8; color: #1e293b; font-size: 11.5pt;">
-            <p style="margin: 0 0 6px 0;">
-              Tom and his family decided to spend their summer vacation in a peaceful village near the mountains. Every morning, Tom woke up early to hear the birds singing and to breathe the fresh air. His grandfather taught him how to plant vegetables and take care of the sheep on the farm. In the afternoons, they enjoyed walking along the quiet river. Tom took many colorful photos to show his friends at school. It was one of the most memorable vacations in his life because he learned many useful skills and enjoyed the beauty of nature.
-            </p>
-          </div>
-
-          <div style="margin-bottom: 10px;">
-            <div style="font-weight: bold; color: #1e40af; margin-bottom: 4px; font-size: 11.5pt;">A) Answer the following questions:</div>
-            ${Array.from({ length: Math.min(count, 3) }).map((_, idx) => `
-              <div style="margin-bottom: 6px; line-height: 1.6;">
-                <strong>${idx + 1}.</strong> ${
-                  idx === 0 ? 'Where did Tom and his family spend their summer vacation?' :
-                  idx === 1 ? 'What did Tom learn from his grandfather on the farm?' :
-                  'Why was this vacation so memorable for Tom?'
-                }<br>
-                <span style="color: #64748b;">Answer: ........................................................................................................................................</span>
-              </div>
-            `).join('')}
-          </div>
-
-          <div>
-            <div style="font-weight: bold; color: #1e40af; margin-bottom: 4px; font-size: 11.5pt;">B) Choose the correct answer:</div>
-            <div style="line-height: 1.8;">
-              <div><strong>1.</strong> The underlined word <em>"memorable"</em> means: (<strong>a)</strong> unforgettable &nbsp;&nbsp; <strong>b)</strong> boring &nbsp;&nbsp; <strong>c)</strong> noisy &nbsp;&nbsp; <strong>d)</strong> scary)</div>
-              <div><strong>2.</strong> Tom took many photos to show them to his: (<strong>a)</strong> grandfather &nbsp;&nbsp; <strong>b)</strong> school friends &nbsp;&nbsp; <strong>c)</strong> neighbors &nbsp;&nbsp; <strong>d)</strong> doctor)</div>
-            </div>
-          </div>
-        </div>
-      `;
-    }
-
-    // 2. GRAMMAR & STRUCTURES (CHOOSE THE CORRECT VERB/WORD)
-    else if (type === 'grammar') {
-      const grammarPool = [
-        { text: 'She ...................... to school by bus every morning.', options: 'goes / go / went / going' },
-        { text: 'They have been living in this city ...................... five years.', options: 'for / since / from / in' },
-        { text: 'If it rains tomorrow, we ...................... at home.', options: 'will stay / stayed / stay / would stay' },
-        { text: 'The famous palace was ...................... in 1890.', options: 'built / build / building / builds' },
-        { text: 'Look! The students ...................... in the playground.', options: 'are playing / play / played / plays' },
-        { text: 'This mathematical puzzle is ...................... than the previous one.', options: 'more difficult / most difficult / difficult / as difficult' },
-        { text: 'You ...................... wear a seatbelt while driving.', options: 'must / can / might / could' },
-        { text: 'I ...................... seen that exciting documentary before.', options: 'have / has / had / having' },
-        { text: 'While Ali was reading a book, the lights ...................... out.', options: 'went / go / was going / gone' },
-        { text: 'He did not ...................... to the party yesterday evening.', options: 'come / came / coming / comes' },
-      ];
-
-      snippet = `
-        <div class="question-block" dir="ltr" style="margin-bottom: 22px; page-break-inside: avoid; direction: ltr; text-align: left; font-size: 12pt;">
-          ${buildQuestionHeader(qLabel, 'Grammar & Structures', qMarks, true)}
-          <div style="font-weight: bold; margin-bottom: 8px; color: #1e293b;">
-            Choose the correct word or phrase between brackets:
-          </div>
-          <div style="line-height: 2;">
-            ${Array.from({ length: count }).map((_, idx) => {
-              const item = grammarPool[idx % grammarPool.length];
-              return `
-                <div style="margin-bottom: 6px; padding: 2px 4px;">
-                  <strong>${idx + 1}.</strong> ${item.text} &nbsp; 
-                  <strong style="color: #4338ca; background: #f1f5f9; padding: 2px 6px; border-radius: 4px; border: 1px solid #e2e8f0;">[ ${item.options} ]</strong>
-                </div>
-              `;
-            }).join('')}
-          </div>
-        </div>
-      `;
-    }
-
-    // 3. VOCABULARY & WORD BANK (FILL IN THE BLANKS)
-    else if (type === 'vocab') {
-      const vocabWords = ['ancient', 'protect', 'delicious', 'invented', 'dangerous', 'library', 'adventure', 'curious', 'friendly', 'celebrate'];
-      const currentBank = vocabWords.slice(0, count + 1);
-
-      const sentencesPool = [
-        'Thomas Edison ...................... the electric light bulb in 1879.',
-        'We should always wear helmets to ...................... our heads from injury.',
-        'The students went to the public ...................... to borrow science books.',
-        'Walking alone in the desert without water can be very ...................... .',
-        'My mother prepared a ...................... chocolate cake for the birthday party.',
-        'Scientists are exploring the ...................... ruins discovered under the sea.',
-        'Traveling around the world is an exciting ...................... for young explorers.',
-        'The newly enrolled student has a very ...................... and polite personality.'
-      ];
-
-      snippet = `
-        <div class="question-block" dir="ltr" style="margin-bottom: 22px; page-break-inside: avoid; direction: ltr; text-align: left; font-size: 12pt;">
-          ${buildQuestionHeader(qLabel, 'Vocabulary in Context', qMarks, true)}
-          <div style="font-weight: bold; margin-bottom: 6px; color: #1e293b;">
-            Fill in the blanks with the suitable words from the word bank:
-          </div>
-          <div style="background: #f1f5f9; border: 1.5px dashed #475569; border-radius: 6px; padding: 6px 12px; margin-bottom: 10px; font-weight: bold; color: #0f172a; text-align: center; letter-spacing: 0.5px;">
-            [ ${currentBank.join(' &nbsp;•&nbsp; ')} ]
-          </div>
-          <div style="line-height: 2.1;">
-            ${Array.from({ length: count }).map((_, idx) => {
-              const sent = sentencesPool[idx % sentencesPool.length];
-              return `
-                <div style="margin-bottom: 4px;">
-                  <strong>${idx + 1}.</strong> ${sent}
-                </div>
-              `;
-            }).join('')}
-          </div>
-        </div>
-      `;
-    }
-
-    // 4. MULTIPLE CHOICE QUESTIONS (A, B, C, D)
-    else if (type === 'mcq') {
-      const mcqPool = [
-        { q: 'What is the opposite of the word "brave"?', a: 'coward', b: 'strong', c: 'clever', d: 'happy' },
-        { q: 'Which of the following is a renewable energy source?', a: 'solar energy', b: 'coal', c: 'crude oil', d: 'natural gas' },
-        { q: 'The doctor advised the patient to drink ...................... water every day.', a: 'plenty of', b: 'many', c: 'a few', d: 'too' },
-        { q: 'Where do camels usually live?', a: 'in the desert', b: 'in the ocean', c: 'in the Arctic', d: 'in the forest' },
-        { q: 'Sara has already finished ...................... homework.', a: 'her', b: 'his', c: 'their', d: 'its' },
-        { q: 'The airplane landed safely ...................... the runway.', a: 'on', b: 'in', c: 'at', d: 'between' }
-      ];
-
-      snippet = `
-        <div class="question-block" dir="ltr" style="margin-bottom: 22px; page-break-inside: avoid; direction: ltr; text-align: left; font-size: 12pt;">
-          ${buildQuestionHeader(qLabel, 'Multiple Choice Questions', qMarks, true)}
-          <div style="font-weight: bold; margin-bottom: 8px; color: #1e293b;">
-            Choose the correct answer (A, B, C, or D):
-          </div>
-          <div>
-            ${Array.from({ length: count }).map((_, idx) => {
-              const item = mcqPool[idx % mcqPool.length];
-              return `
-                <div style="margin-bottom: 10px; line-height: 1.6;">
-                  <div style="font-weight: bold; margin-bottom: 2px;">
-                    ${idx + 1}. ${item.q}
-                  </div>
-                  <div style="display: flex; gap: 16px; flex-wrap: wrap; margin-left: 14px; font-size: 11pt; color: #334155;">
-                    <span><strong>A)</strong> ${item.a}</span>
-                    <span><strong>B)</strong> ${item.b}</span>
-                    <span><strong>C)</strong> ${item.c}</span>
-                    <span><strong>D)</strong> ${item.d}</span>
-                  </div>
-                </div>
-              `;
-            }).join('')}
-          </div>
-        </div>
-      `;
-    }
-
-    // 5. TRUE OR FALSE STATEMENTS
-    else if (type === 'true_false') {
-      const tfPool = [
-        'The sun rises in the east and sets in the west.',
-        'Plants require sunlight, water, and air to produce food.',
-        'Whales are classified as fish because they live under water.',
-        'Water freezes into ice at zero degrees Celsius (0°C).',
-        'English is one of the most widely spoken international languages.',
-        'Lions are herbivores that feed exclusively on green grass and leaves.'
-      ];
-
-      snippet = `
-        <div class="question-block" dir="ltr" style="margin-bottom: 22px; page-break-inside: avoid; direction: ltr; text-align: left; font-size: 12pt;">
-          ${buildQuestionHeader(qLabel, 'True or False Statements', qMarks, true)}
-          <div style="font-weight: bold; margin-bottom: 8px; color: #1e293b;">
-            Write (True) or (False) in the brackets next to each statement:
-          </div>
-          <div style="line-height: 2.1;">
-            ${Array.from({ length: count }).map((_, idx) => {
-              const statement = tfPool[idx % tfPool.length];
-              return `
-                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; border-bottom: 1px dotted #e2e8f0; padding-bottom: 2px;">
-                  <span><strong>${idx + 1}.</strong> ${statement}</span>
-                  <strong style="color: #4338ca; font-size: 11pt; white-space: nowrap;">( &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; )</strong>
-                </div>
-              `;
-            }).join('')}
-          </div>
-        </div>
-      `;
-    }
-
-    // 6. MATCHING (COLUMN A & COLUMN B)
-    else if (type === 'matching') {
-      const colA = [
-        '1. An astronaut',
-        '2. A thermometer',
-        '3. A dictionary',
-        '4. A library',
-        '5. A baker'
-      ];
-      const colB = [
-        'a) is a place where books and journals are kept.',
-        'b) travels and conducts scientific experiments in space.',
-        'c) makes fresh bread, rolls, and delicious pastries.',
-        'd) measures body or air temperature precisely.',
-        'e) gives the definitions and pronunciations of words.'
-      ];
-
-      snippet = `
-        <div class="question-block" dir="ltr" style="margin-bottom: 22px; page-break-inside: avoid; direction: ltr; text-align: left; font-size: 12pt;">
-          ${buildQuestionHeader(qLabel, 'Matching Columns', qMarks, true)}
-          <div style="font-weight: bold; margin-bottom: 6px; color: #1e293b;">
-            Match each item in Column (A) with its suitable completion in Column (B):
-          </div>
-          <table style="width: 100%; border-collapse: collapse; border: 1.5px solid #0f172a; font-size: 11.5pt;" dir="ltr">
-            <tr style="background: #f1f5f9;">
-              <th style="border: 1px solid #0f172a; padding: 6px 10px; width: 45%; text-align: left;">Column (A)</th>
-              <th style="border: 1px solid #0f172a; padding: 6px 10px; width: 10%; text-align: center;">Ans</th>
-              <th style="border: 1px solid #0f172a; padding: 6px 10px; width: 45%; text-align: left;">Column (B)</th>
-            </tr>
-            ${Array.from({ length: Math.min(count, 5) }).map((_, idx) => `
-              <tr>
-                <td style="border: 1px solid #0f172a; padding: 6px 10px;">${colA[idx] || `${idx + 1}. Item ${idx + 1}`}</td>
-                <td style="border: 1px solid #0f172a; padding: 6px 10px; text-align: center; font-weight: bold; color: #4338ca;">( &nbsp;&nbsp;&nbsp; )</td>
-                <td style="border: 1px solid #0f172a; padding: 6px 10px;">${colB[idx] || `${EN_LETTERS[idx].toLowerCase()}) Description ${idx + 1}`}</td>
-              </tr>
-            `).join('')}
-          </table>
-        </div>
-      `;
-    }
-
-    // 7. DIALOGUE COMPLETION
-    else if (type === 'dialogue') {
-      snippet = `
-        <div class="question-block" dir="ltr" style="margin-bottom: 22px; page-break-inside: avoid; direction: ltr; text-align: left; font-size: 12pt;">
-          ${buildQuestionHeader(qLabel, 'Dialogue Completion', qMarks, true)}
-          <div style="font-weight: bold; margin-bottom: 6px; color: #1e293b;">
-            Complete the following dialogue between Ali and Omar:
-          </div>
-          <div style="background: #fafafa; border: 1px solid #cbd5e1; border-radius: 8px; padding: 12px; line-height: 2;">
-            <div><strong>Ali:</strong> Good morning, Omar! Where did you go last weekend?</div>
-            <div><strong>Omar:</strong> Good morning! I went to ........................................................................................ (1)</div>
-            <div><strong>Ali:</strong> Wonderful! How did you get there?</div>
-            <div><strong>Omar:</strong> We went there by .................................................................................................... (2)</div>
-            <div><strong>Ali:</strong> What interesting activities did you do with your family?</div>
-            <div><strong>Omar:</strong> We .......................................................................................................................... (3)</div>
-            <div><strong>Ali:</strong> Did you enjoy your time?</div>
-            <div><strong>Omar:</strong> Yes, absolutely! Because ....................................................................................... (4)</div>
-          </div>
-        </div>
-      `;
-    }
-
-    // 8. REORDER WORDS TO FORM SENTENCES
-    else if (type === 'reorder') {
-      const reorderPool = [
-        { scrambled: '( always / breakfast / healthy / eats / he )', tip: 'Start with: He' },
-        { scrambled: '( museum / visited / students / the / yesterday / the )', tip: 'Start with: The' },
-        { scrambled: '( important / English / is / language / an / international )', tip: 'Start with: English' },
-        { scrambled: '( you / help / can / with / homework / your / me )', tip: 'Start with: Can' },
-        { scrambled: '( library / quiet / keep / should / in / we / the )', tip: 'Start with: We' }
-      ];
-
-      snippet = `
-        <div class="question-block" dir="ltr" style="margin-bottom: 22px; page-break-inside: avoid; direction: ltr; text-align: left; font-size: 12pt;">
-          ${buildQuestionHeader(qLabel, 'Sentence Reordering', qMarks, true)}
-          <div style="font-weight: bold; margin-bottom: 8px; color: #1e293b;">
-            Reorder the scrambled words to make complete, meaningful sentences:
-          </div>
-          <div style="line-height: 2.2;">
-            ${Array.from({ length: count }).map((_, idx) => {
-              const item = reorderPool[idx % reorderPool.length];
-              return `
-                <div style="margin-bottom: 6px;">
-                  <div><strong>${idx + 1}.</strong> <strong style="color: #4338ca;">${item.scrambled}</strong></div>
-                  <div style="margin-left: 18px; color: #475569;">
-                    Answer: ........................................................................................................................................
-                  </div>
-                </div>
-              `;
-            }).join('')}
-          </div>
-        </div>
-      `;
-    }
-
-    // 9. DO AS SHOWN BETWEEN BRACKETS
-    else if (type === 'brackets_tasks') {
-      const tasksPool = [
-        { text: 'Kareem cleans his bedroom every Friday.', task: 'Change into Negative' },
-        { text: 'They arrived at the central airport at 6:30 AM.', task: 'Ask a question using "When"' },
-        { text: 'Nour studied diligently. She scored top marks on the exam.', task: 'Join using: "because"' },
-        { text: 'Leonardo da Vinci painted the Mona Lisa.', task: 'Change into Passive Voice' },
-        { text: '"I will travel to Cairo next week," said Tarek.', task: 'Change into Reported Speech' }
-      ];
-
-      snippet = `
-        <div class="question-block" dir="ltr" style="margin-bottom: 22px; page-break-inside: avoid; direction: ltr; text-align: left; font-size: 12pt;">
-          ${buildQuestionHeader(qLabel, 'Language Functions & Transformation', qMarks, true)}
-          <div style="font-weight: bold; margin-bottom: 8px; color: #1e293b;">
-            Do as shown between brackets:
-          </div>
-          <div style="line-height: 2.2;">
-            ${Array.from({ length: count }).map((_, idx) => {
-              const item = tasksPool[idx % tasksPool.length];
-              return `
-                <div style="margin-bottom: 8px;">
-                  <div>
-                    <strong>${idx + 1}.</strong> ${item.text} &nbsp; 
-                    <strong style="color: #b91c1c; background: #fef2f2; border: 1px solid #fecaca; padding: 2px 6px; border-radius: 4px; font-size: 11pt;">[ ${item.task} ]</strong>
-                  </div>
-                  <div style="margin-left: 18px; color: #475569;">
-                    Answer: ........................................................................................................................................
-                  </div>
-                </div>
-              `;
-            }).join('')}
-          </div>
-        </div>
-      `;
-    }
-
-    // 10. GUIDED COMPOSITION / WRITING
-    else if (type === 'composition') {
-      snippet = `
-        <div class="question-block" dir="ltr" style="margin-bottom: 24px; page-break-inside: avoid; direction: ltr; text-align: left; font-size: 12pt;">
-          ${buildQuestionHeader(qLabel, 'Composition & Writing', qMarks, true)}
-          <div style="font-weight: bold; margin-bottom: 6px; color: #1e293b;">
-            Write a well-structured paragraph (6 to 8 sentences) about ONE of the following topics:
-          </div>
-          <div style="background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; font-size: 11.5pt; line-height: 1.8;">
-            <strong>Topic (A): "My Dream Job in the Future"</strong><br>
-            <span style="color: #64748b; font-size: 11pt;">Guiding words/prompts: what job you want - why you chose it - skills needed - how you plan to help your society.</span>
-            <div style="margin-top: 6px; border-top: 1px dashed #cbd5e1; padding-top: 6px;">
-              <strong>Topic (B): "Protecting the Environment"</strong><br>
-              <span style="color: #64748b; font-size: 11pt;">Guiding words/prompts: planting trees - recycling plastic - saving electricity and water - clean cities.</span>
-            </div>
-          </div>
-          <div style="line-height: 2.3; color: #94a3b8; font-size: 12pt;">
-            ........................................................................................................................................................................<br>
-            ........................................................................................................................................................................<br>
-            ........................................................................................................................................................................<br>
-            ........................................................................................................................................................................<br>
-            ........................................................................................................................................................................
-          </div>
-        </div>
-      `;
-    }
-
-    // 11. PUNCTUATION & CAPITALIZATION
-    else if (type === 'punctuation') {
-      snippet = `
-        <div class="question-block" dir="ltr" style="margin-bottom: 22px; page-break-inside: avoid; direction: ltr; text-align: left; font-size: 12pt;">
-          ${buildQuestionHeader(qLabel, 'Punctuation & Capitalization', qMarks, true)}
-          <div style="font-weight: bold; margin-bottom: 6px; color: #1e293b;">
-            Punctuate and capitalize the following sentences correctly:
-          </div>
-          <div style="line-height: 2.2;">
-            <div style="margin-bottom: 6px;">
-              <strong>1.</strong> did ahmed travel to london with mr smith last monday<br>
-              <span style="margin-left: 18px; color: #64748b;">Correction: ........................................................................................................................................</span>
-            </div>
-            <div>
-              <strong>2.</strong> wow what an amazing football match exclaimed omar<br>
-              <span style="margin-left: 18px; color: #64748b;">Correction: ........................................................................................................................................</span>
-            </div>
-          </div>
-        </div>
-      `;
-    }
-
-    insertHtmlSnippet(snippet);
-  };
-
-  // Switch header to English Preset
-  const handleApplyEnglishHeaderPreset = () => {
-    setHeaderConfig(prev => ({
-      ...prev,
-      ministryText: 'Ministry of Education',
-      schoolName: 'International Private School',
-      examTitle: 'English Language Examination',
-      academicYear: '2025 - 2026',
-      subject: 'English Language (اللغة الإنجليزية)',
-      duration: '90 Minutes (ساعة ونصف)',
-      totalMarks: '100 Marks (100 درجة)',
-      instructions: 'Read all questions carefully. Answer in clear handwriting and write with blue or black pen.',
-      customFields: [
-        { label: 'Paper Model', value: 'Model A' },
-        { label: 'Term', value: 'First Term' }
-      ]
-    }));
-    setDocDirection('ltr');
-    setActiveFont('Arial');
-    setCustomQuestionMarks('20 Marks');
-    setSavedSuccessMessage('تم تطبيق نموذج الترويسة باللغة الإنجليزية بنجاح 🇬🇧');
-    setTimeout(() => setSavedSuccessMessage(''), 3000);
-  };
-
-  // Switch header to Arabic Preset
+  // Reset header to Standard Syrian / Arabic Model
   const handleApplyArabicHeaderPreset = () => {
     setHeaderConfig(prev => ({
       ...prev,
@@ -1775,16 +1406,15 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
       academicYear: '2025 - 2026 م',
       duration: 'ساعة ونصف (90 دقيقة)',
       totalMarks: '100 درجة',
-      instructions: 'أجب عن جميع الأسئلة بدقة وخط واضح.',
+      instructions: 'أجب عن جميع الأسئلة بدقة وخط واضح. بيّن خطوات العمليات الحسابية بالتفصيل.',
       customFields: [
         { label: 'رقم النموذج', value: 'نموذج (أ)' },
         { label: 'الفصل الدراسي', value: 'الفصل الأول' }
       ]
     }));
-    setDocDirection('rtl');
     setActiveFont('Traditional Arabic');
     setCustomQuestionMarks('20 درجة');
-    setSavedSuccessMessage('تم استرجاع نموذج الترويسة العربية 🇸🇾');
+    setSavedSuccessMessage('تم ضبط الترويسة العربية المعتمدة 🇸🇾');
     setTimeout(() => setSavedSuccessMessage(''), 3000);
   };
 
@@ -1952,11 +1582,8 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
     setHeaderConfig(prev => ({ ...prev, subject: subj }));
     if (subj.includes('رياضيات') || subj.includes('حساب')) {
       setActiveTabType('math');
-    } else if (subj.includes('إنكليز') || subj.includes('انجليز') || subj.toLowerCase().includes('english')) {
-      setActiveTabType('english');
-      setDocDirection('ltr');
-      setActiveFont('Arial');
-      setCustomQuestionMarks('20 Marks');
+    } else {
+      setActiveTabType('general');
     }
   };
 
@@ -2173,19 +1800,11 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
             <div className="flex items-center gap-1.5 flex-wrap">
               <button
                 type="button"
-                onClick={handleApplyEnglishHeaderPreset}
-                className="px-2.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-200 rounded-xl text-xs font-bold transition flex items-center gap-1 cursor-pointer"
-                title="تعبئة الترويسة بنموذج رسمي باللغة الإنجليزية"
-              >
-                <span>🇬🇧 ترويسة إنكليزية</span>
-              </button>
-              <button
-                type="button"
                 onClick={handleApplyArabicHeaderPreset}
                 className="px-2.5 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 rounded-xl text-xs font-bold transition flex items-center gap-1 cursor-pointer"
-                title="استرجاع الترويسة العربية"
+                title="استرجاع الترويسة العربية المعتمدة"
               >
-                <span>🇸🇾 ترويسة عربية</span>
+                <span>🇸🇾 الترويسة المعتمدة</span>
               </button>
               <button
                 type="button"
@@ -2398,40 +2017,19 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
             className="bg-white border border-slate-300 rounded-lg px-2 py-1 text-xs font-bold text-slate-700 focus:outline-none cursor-pointer"
             title="نماذج عناوين جاهزة للاختيار السريع"
           >
-            <option value="">{docDirection === 'ltr' ? '-- Quick Titles --' : '-- عناوين سريعة --'}</option>
-            <option value="auto">{docDirection === 'ltr' ? '🔄 Automatic (Next Question)' : '🔄 تلقائي (حسب الترتيب الحالي)'}</option>
-            {docDirection === 'ltr' ? (
-              <>
-                {QUESTION_NUMBERS_EN.map((q) => (
-                  <option key={q} value={q}>{q}</option>
-                ))}
-                <option value="Question 1: Reading Comprehension">Question 1: Reading Comprehension</option>
-                <option value="Question 2: Grammar & Structure">Question 2: Grammar & Structure</option>
-                <option value="Question 3: Vocabulary & Word Bank">Question 3: Vocabulary & Word Bank</option>
-                <option value="Question 4: Multiple Choice (MCQ)">Question 4: Multiple Choice (MCQ)</option>
-                <option value="Question 5: True or False">Question 5: True or False</option>
-                <option value="Question 6: Matching Columns">Question 6: Matching Columns</option>
-                <option value="Question 7: Dialogue Completion">Question 7: Dialogue Completion</option>
-                <option value="Question 8: Sentence Reordering">Question 8: Sentence Reordering</option>
-                <option value="Question 9: Do as shown in brackets">Question 9: Do as shown in brackets</option>
-                <option value="Question 10: Writing & Composition">Question 10: Writing & Composition</option>
-                <option value="Question 11: Punctuation">Question 11: Punctuation</option>
-              </>
-            ) : (
-              <>
-                {QUESTION_NUMBERS.map((q) => (
-                  <option key={q} value={q}>{q}</option>
-                ))}
-                <option value="المسألة الأولى">المسألة الأولى</option>
-                <option value="المسألة الثانية">المسألة الثانية</option>
-                <option value="التمرين الأول">التمرين الأول</option>
-                <option value="التمرين الثاني">التمرين الثاني</option>
-                <option value="سؤال للمتفوقين ⭐">سؤال للمتفوقين ⭐</option>
-                <option value="أولاً: العمليات الحسابية">أولاً: العمليات الحسابية</option>
-                <option value="ثانياً: الهندسة والقياس">ثانياً: الهندسة والقياس</option>
-                <option value="ثالثاً: حل المسائل">ثالثاً: حل المسائل</option>
-              </>
-            )}
+            <option value="">-- عناوين سريعة --</option>
+            <option value="auto">🔄 تلقائي (حسب الترتيب الحالي)</option>
+            {QUESTION_NUMBERS.map((q) => (
+              <option key={q} value={q}>{q}</option>
+            ))}
+            <option value="المسألة الأولى">المسألة الأولى</option>
+            <option value="المسألة الثانية">المسألة الثانية</option>
+            <option value="التمرين الأول">التمرين الأول</option>
+            <option value="التمرين الثاني">التمرين الثاني</option>
+            <option value="سؤال للمتفوقين ⭐">سؤال للمتفوقين ⭐</option>
+            <option value="أولاً: العمليات الحسابية">أولاً: العمليات الحسابية</option>
+            <option value="ثانياً: الهندسة والقياس">ثانياً: الهندسة والقياس</option>
+            <option value="ثالثاً: حل المسائل">ثالثاً: حل المسائل</option>
           </select>
 
           {/* Marks Input */}
@@ -2459,40 +2057,34 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
         </div>
       </div>
 
-      {/* DEDICATED QUESTION TEMPLATES BAR (MATH, ENGLISH, GENERAL) */}
+      {/* DEDICATED QUESTION TEMPLATES BAR (MATH, GENERAL) */}
       <div className={`w-full max-w-5xl rounded-2xl shadow-sm p-3 mb-3 print:hidden border-2 transition-all ${
-        activeTabType === 'english' 
-          ? 'bg-gradient-to-r from-blue-50 via-white to-sky-50 border-blue-400' 
-          : activeTabType === 'math'
+        activeTabType === 'math'
           ? 'bg-gradient-to-r from-amber-50 via-white to-amber-50/60 border-amber-300'
           : 'bg-gradient-to-r from-indigo-50 via-white to-slate-50 border-indigo-300'
       }`}>
         <div className="flex items-center justify-between flex-wrap gap-2 mb-2 pb-2 border-b border-slate-200">
           <div className="flex items-center gap-2">
             <div className={`w-7 h-7 rounded-lg text-white flex items-center justify-center font-black shadow-xs ${
-              activeTabType === 'english' ? 'bg-blue-600' : activeTabType === 'math' ? 'bg-amber-500' : 'bg-indigo-600'
+              activeTabType === 'math' ? 'bg-amber-500' : 'bg-indigo-600'
             }`}>
-              {activeTabType === 'english' ? '🇬🇧' : activeTabType === 'math' ? <Calculator className="w-4 h-4" /> : '📝'}
+              {activeTabType === 'math' ? <Calculator className="w-4 h-4" /> : '📝'}
             </div>
             <div>
               <h3 className="font-black text-xs sm:text-sm text-slate-900 flex items-center gap-1.5">
                 <span>
-                  {activeTabType === 'english' 
-                    ? 'قوالب مادة اللغة الإنجليزية المعتمدة (English Language Exam Templates)' 
-                    : activeTabType === 'math'
+                  {activeTabType === 'math'
                     ? 'قوالب مادة الرياضيات والعمليات الحسابية الجاهزة للتعبئة'
                     : 'القوالب العامة للاختبارات والمذاكرات'}
                 </span>
-                <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
-                  activeTabType === 'english' ? 'bg-blue-100 text-blue-900' : 'bg-amber-200 text-amber-900'
-                }`}>
+                <span className="text-[10px] px-2 py-0.5 rounded-full font-bold bg-amber-200 text-amber-900">
                   انقر لإدراج السؤال في الورقة فوراً (12pt)
                 </span>
               </h3>
             </div>
           </div>
 
-          {/* Toggle between Math Suite, English Suite, and General Templates */}
+          {/* Toggle between Math Suite and General Templates */}
           <div className="flex items-center gap-1 bg-slate-100 p-0.5 rounded-xl border border-slate-200">
             <button
               type="button"
@@ -2502,21 +2094,6 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
               }`}
             >
               <span>📐 الرياضيات</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setActiveTabType('english');
-                setDocDirection('ltr');
-                setActiveFont('Arial');
-                setCustomQuestionMarks('20 Marks');
-              }}
-              className={`px-3 py-1 rounded-lg text-xs font-black transition cursor-pointer flex items-center gap-1 ${
-                activeTabType === 'english' ? 'bg-blue-600 text-white shadow-xs' : 'text-blue-900 hover:bg-blue-100'
-              }`}
-            >
-              <span>🇬🇧 اللغة الإنكليزية</span>
-              <span className="text-[10px] bg-blue-700 text-white px-1.5 py-0.2 rounded-full font-bold">English</span>
             </button>
             <button
               type="button"
@@ -2701,250 +2278,8 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
               </button>
             </div>
           </div>
-        ) : activeTabType === 'english' ? (
-          /* 2. DEDICATED ENGLISH LANGUAGE EXAM SUITE */
-          <div className="space-y-2.5">
-            {/* Top row: English Quick Tools (Header Preset, Direction Toggle, Font Hint) */}
-            <div className="flex items-center justify-between flex-wrap gap-2 text-xs font-bold bg-blue-100/70 px-3 py-2 rounded-xl border border-blue-200 text-blue-950">
-              <div className="flex items-center gap-2">
-                <span className="text-base">🇬🇧</span>
-                <span>أدوات امتحان اللغة الإنجليزية المعتمدة (تنسيق LTR بحجم 12pt لكتابة أسئلة نموذجية):</span>
-              </div>
-              <div className="flex items-center gap-2 flex-wrap">
-                <button
-                  type="button"
-                  onClick={handleApplyEnglishHeaderPreset}
-                  className="px-3 py-1 bg-blue-700 hover:bg-blue-800 text-white rounded-lg text-xs font-black transition cursor-pointer flex items-center gap-1 shadow-2xs"
-                  title="تحويل ترويسة الاختبار المدرسية إلى اللغة الإنجليزية رسمياً"
-                >
-                  <span>🇬🇧 تطبيق ترويسة إنكليزية</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleApplyArabicHeaderPreset}
-                  className="px-2.5 py-1 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded-lg text-xs font-bold transition cursor-pointer"
-                  title="استرجاع الترويسة العربية"
-                >
-                  <span>🇸🇾 ترويسة عربية</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setDocDirection(docDirection === 'ltr' ? 'rtl' : 'ltr')}
-                  className="px-2.5 py-1 bg-white hover:bg-blue-50 text-blue-800 border border-blue-300 rounded-lg text-xs font-extrabold transition cursor-pointer flex items-center gap-1"
-                  title="تبديل اتجاه الورقة بين LTR و RTL"
-                >
-                  <span>اتجاه الورقة:</span>
-                  <span className="font-black text-indigo-700 underline">{docDirection === 'ltr' ? 'يسار لليمين (LTR ➔)' : 'يمين لليسار (⬅ RTL)'}</span>
-                </button>
-              </div>
-            </div>
-
-            {/* Template Count Control for English */}
-            <div className="flex items-center justify-between flex-wrap gap-2 bg-white border border-blue-300 px-3 py-2 rounded-xl shadow-2xs">
-              <div className="flex items-center gap-1.5 text-xs font-black text-blue-950">
-                <span className="w-5 h-5 bg-blue-600 text-white rounded-md flex items-center justify-center text-[10px]">🔢</span>
-                <span>تحديد عدد الجمل / العناصر المطلوب إدراجها لكل سؤال إنجليزي:</span>
-              </div>
-              <div className="flex items-center gap-1.5 flex-wrap">
-                {[1, 2, 3, 4, 5, 6, 8, 10].map(cnt => (
-                  <button
-                    key={cnt}
-                    type="button"
-                    onClick={() => setInsertCount(cnt)}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-black transition cursor-pointer border ${
-                      insertCount === cnt
-                        ? 'bg-blue-700 text-white border-blue-800 shadow-2xs scale-105'
-                        : 'bg-blue-50 hover:bg-blue-100 text-blue-900 border-blue-200'
-                    }`}
-                  >
-                    {cnt === 5 ? '5 عناصر ⭐ (Standard)' : `${cnt}`}
-                  </button>
-                ))}
-                <div className="flex items-center gap-1 border-r border-blue-300 pr-2 mr-1">
-                  <span className="text-[11px] font-bold text-slate-600">أو عدد آخر:</span>
-                  <input
-                    type="number"
-                    min={1}
-                    max={20}
-                    value={insertCount}
-                    onChange={(e) => setInsertCount(Math.max(1, Math.min(20, parseInt(e.target.value) || 1)))}
-                    className="w-12 bg-white border border-blue-400 rounded-lg text-center font-black text-xs text-blue-950 py-0.5 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  />
-                  <span className="text-[11px] text-blue-900 font-bold">جملة</span>
-                </div>
-              </div>
-            </div>
-
-            {/* Grid of English Questions */}
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2 pt-0.5">
-              {/* 1. Reading Comprehension */}
-              <button
-                type="button"
-                onClick={() => insertEnglishSnippet('reading')}
-                className="px-3 py-2.5 bg-white hover:bg-blue-50 text-blue-950 border-2 border-blue-300 hover:border-blue-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1 shadow-2xs text-center"
-              >
-                <div className="flex items-center gap-1 text-blue-700 font-black">
-                  <span>📖</span>
-                  <span>Reading Comprehension</span>
-                </div>
-                <div className="text-[10.5px] font-bold text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200">
-                  نص قراءة واستيعاب وأسئلة
-                </div>
-              </button>
-
-              {/* 2. Grammar & Structures */}
-              <button
-                type="button"
-                onClick={() => insertEnglishSnippet('grammar')}
-                className="px-3 py-2.5 bg-white hover:bg-indigo-50 text-indigo-950 border-2 border-indigo-300 hover:border-indigo-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1 shadow-2xs text-center"
-              >
-                <div className="flex items-center gap-1 text-indigo-700 font-black">
-                  <span>🧠</span>
-                  <span>Grammar & Structures</span>
-                </div>
-                <div className="text-[10.5px] font-bold text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200">
-                  قواعد وأزمنة بين القوسين ({insertCount})
-                </div>
-              </button>
-
-              {/* 3. Vocabulary in Context */}
-              <button
-                type="button"
-                onClick={() => insertEnglishSnippet('vocab')}
-                className="px-3 py-2.5 bg-white hover:bg-teal-50 text-teal-950 border-2 border-teal-300 hover:border-teal-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1 shadow-2xs text-center"
-              >
-                <div className="flex items-center gap-1 text-teal-700 font-black">
-                  <span>🔤</span>
-                  <span>Vocabulary & Word Bank</span>
-                </div>
-                <div className="text-[10.5px] font-bold text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200">
-                  بنك كلمات وفراغات ({insertCount})
-                </div>
-              </button>
-
-              {/* 4. Multiple Choice */}
-              <button
-                type="button"
-                onClick={() => insertEnglishSnippet('mcq')}
-                className="px-3 py-2.5 bg-white hover:bg-amber-50 text-amber-950 border-2 border-amber-300 hover:border-amber-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1 shadow-2xs text-center"
-              >
-                <div className="flex items-center gap-1 text-amber-700 font-black">
-                  <span>🔘</span>
-                  <span>Multiple Choice (MCQ)</span>
-                </div>
-                <div className="text-[10.5px] font-bold text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200">
-                  اختيارات (A, B, C, D) ({insertCount})
-                </div>
-              </button>
-
-              {/* 5. True or False */}
-              <button
-                type="button"
-                onClick={() => insertEnglishSnippet('true_false')}
-                className="px-3 py-2.5 bg-white hover:bg-emerald-50 text-emerald-950 border-2 border-emerald-300 hover:border-emerald-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1 shadow-2xs text-center"
-              >
-                <div className="flex items-center gap-1 text-emerald-700 font-black">
-                  <span>✔️</span>
-                  <span>True or False (T / F)</span>
-                </div>
-                <div className="text-[10.5px] font-bold text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200">
-                  صح وخطأ بالإنكليزي ({insertCount})
-                </div>
-              </button>
-
-              {/* 6. Matching Columns */}
-              <button
-                type="button"
-                onClick={() => insertEnglishSnippet('matching')}
-                className="px-3 py-2.5 bg-white hover:bg-purple-50 text-purple-950 border-2 border-purple-300 hover:border-purple-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1 shadow-2xs text-center"
-              >
-                <div className="flex items-center gap-1 text-purple-700 font-black">
-                  <span>🔗</span>
-                  <span>Matching Column (A & B)</span>
-                </div>
-                <div className="text-[10.5px] font-bold text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200">
-                  توصيل ومطابقة قائمتين ({insertCount})
-                </div>
-              </button>
-
-              {/* 7. Dialogue Completion */}
-              <button
-                type="button"
-                onClick={() => insertEnglishSnippet('dialogue')}
-                className="px-3 py-2.5 bg-white hover:bg-cyan-50 text-cyan-950 border-2 border-cyan-300 hover:border-cyan-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1 shadow-2xs text-center"
-              >
-                <div className="flex items-center gap-1 text-cyan-700 font-black">
-                  <span>💬</span>
-                  <span>Complete Dialogue</span>
-                </div>
-                <div className="text-[10.5px] font-bold text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200">
-                  إكمال محادثة حوارية واقعية
-                </div>
-              </button>
-
-              {/* 8. Sentence Reordering */}
-              <button
-                type="button"
-                onClick={() => insertEnglishSnippet('reorder')}
-                className="px-3 py-2.5 bg-white hover:bg-rose-50 text-rose-950 border-2 border-rose-300 hover:border-rose-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1 shadow-2xs text-center"
-              >
-                <div className="flex items-center gap-1 text-rose-700 font-black">
-                  <span>🔄</span>
-                  <span>Reorder Words</span>
-                </div>
-                <div className="text-[10.5px] font-bold text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200">
-                  ترتيب الكلمات لتكوين جمل ({insertCount})
-                </div>
-              </button>
-
-              {/* 9. Do as shown between brackets */}
-              <button
-                type="button"
-                onClick={() => insertEnglishSnippet('brackets_tasks')}
-                className="px-3 py-2.5 bg-white hover:bg-violet-50 text-violet-950 border-2 border-violet-300 hover:border-violet-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1 shadow-2xs text-center"
-              >
-                <div className="flex items-center gap-1 text-violet-700 font-black">
-                  <span>⚙️</span>
-                  <span>Do as in Brackets</span>
-                </div>
-                <div className="text-[10.5px] font-bold text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200">
-                  تحويل الجمل (نفي، سؤال، مجهول)
-                </div>
-              </button>
-
-              {/* 10. Composition & Writing */}
-              <button
-                type="button"
-                onClick={() => insertEnglishSnippet('composition')}
-                className="px-3 py-2.5 bg-white hover:bg-emerald-50 text-emerald-950 border-2 border-emerald-300 hover:border-emerald-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1 shadow-2xs text-center"
-              >
-                <div className="flex items-center gap-1 text-emerald-700 font-black">
-                  <span>✍️</span>
-                  <span>Composition & Writing</span>
-                </div>
-                <div className="text-[10.5px] font-bold text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200">
-                  موضوع تعبير وفقرة موجهة مع أسطر
-                </div>
-              </button>
-
-              {/* 11. Punctuation & Capitalization */}
-              <button
-                type="button"
-                onClick={() => insertEnglishSnippet('punctuation')}
-                className="px-3 py-2.5 bg-white hover:bg-slate-100 text-slate-900 border-2 border-slate-300 hover:border-slate-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1 shadow-2xs text-center"
-              >
-                <div className="flex items-center gap-1 text-slate-800 font-black">
-                  <span>🔠</span>
-                  <span>Punctuation</span>
-                </div>
-                <div className="text-[10.5px] font-bold text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200">
-                  علامات الترقيم والحروف الكبيرة
-                </div>
-              </button>
-            </div>
-          </div>
         ) : (
-          /* 3. GENERAL QUESTION TEMPLATES */
+          /* 2. GENERAL QUESTION TEMPLATES */
           <div className="flex flex-wrap gap-2 pt-1">
             <button
               type="button"
@@ -2996,14 +2331,13 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
             className="bg-transparent text-xs font-bold text-slate-700 focus:outline-none cursor-pointer"
             title="تغيير نوع الخط"
           >
-            <option value="Arial">Arial (إنجليزي / لاتيني)</option>
-            <option value="Calibri">Calibri (كاليبري)</option>
-            <option value="Times New Roman">Times New Roman (تايمز)</option>
             <option value="Traditional Arabic">Traditional Arabic (عربي تقليدي)</option>
             <option value="Amiri">Amiri (أميري)</option>
             <option value="Cairo">Cairo (كايرو)</option>
             <option value="Tajawal">Tajawal (تجوّل)</option>
             <option value="Tahoma">Tahoma (تاهوما)</option>
+            <option value="Calibri">Calibri (كاليبري)</option>
+            <option value="Times New Roman">Times New Roman (تايمز)</option>
           </select>
         </div>
 
@@ -3025,38 +2359,6 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
             <option value="20pt">20 pt</option>
             <option value="24pt">24 pt (عريض)</option>
           </select>
-        </div>
-
-        {/* Text Direction Switcher LTR / RTL */}
-        <div className="flex items-center gap-0.5 bg-slate-100 p-0.5 rounded-xl border border-slate-200">
-          <button
-            type="button"
-            onClick={() => {
-              setDocDirection('ltr');
-              setActiveFont(prev => (prev === 'Traditional Arabic' || prev === 'Amiri' || prev === 'Cairo' || prev === 'Tajawal') ? 'Arial' : prev);
-            }}
-            className={`px-2 py-1 rounded-lg text-xs font-black transition cursor-pointer flex items-center gap-1 ${
-              docDirection === 'ltr' ? 'bg-blue-600 text-white shadow-2xs' : 'text-slate-600 hover:bg-slate-200'
-            }`}
-            title="اتجاه الكتابة من اليسار إلى اليمين (لغة إنجليزية LTR)"
-          >
-            <span>LTR ➔</span>
-            <span className="text-[10px]">English</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setDocDirection('rtl');
-              setActiveFont(prev => prev === 'Arial' ? 'Traditional Arabic' : prev);
-            }}
-            className={`px-2 py-1 rounded-lg text-xs font-black transition cursor-pointer flex items-center gap-1 ${
-              docDirection === 'rtl' ? 'bg-indigo-600 text-white shadow-2xs' : 'text-slate-600 hover:bg-slate-200'
-            }`}
-            title="اتجاه الكتابة من اليمين إلى اليسار (لغة عربية RTL)"
-          >
-            <span>⬅ RTL</span>
-            <span className="text-[10px]">عربي</span>
-          </button>
         </div>
 
         <div className="h-5 w-[1px] bg-slate-200 mx-0.5" />
@@ -3296,36 +2598,34 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
       {/* Main Word Document A4 Sheet Simulation */}
       <div 
         id="exam-paper-printable-sheet"
-        className={`w-full max-w-4xl bg-white rounded-2xl shadow-xl border border-slate-200 p-6 sm:p-10 md:p-14 min-h-[1050px] transition-all print:shadow-none print:border-none print:p-0 print:m-0 ${
-          docDirection === 'ltr' ? 'text-left' : 'text-right'
-        }`}
+        className="w-full max-w-4xl bg-white rounded-2xl shadow-xl border border-slate-200 p-6 sm:p-10 md:p-14 min-h-[1050px] transition-all print:shadow-none print:border-none print:p-0 print:m-0 text-right"
         style={{
           fontFamily: activeFont,
-          direction: docDirection
+          direction: 'rtl'
         }}
       >
         {/* Official Exam Header Box - Cancelled/hidden by default per user request */}
         {showHeader && (
           <div 
             className="border-2 border-slate-900 p-4 sm:p-5 rounded-xl mb-6 bg-slate-50/60 print:bg-white print:border-slate-900"
-            dir={docDirection}
+            dir="rtl"
           >
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4 border-b border-slate-300 pb-3 mb-3">
-              {/* Ministry & School (Right for RTL, Left for LTR) */}
-              <div className={`space-y-0.5 ${docDirection === 'ltr' ? 'text-left order-1' : 'text-right order-1'}`}>
-                <h4 className="font-extrabold text-xs text-slate-800">{headerConfig.ministryText || (docDirection === 'ltr' ? 'Ministry of Education' : 'وزارة التربية والتعليم')}</h4>
-                <h3 className="font-black text-sm text-indigo-900">{headerConfig.schoolName || (docDirection === 'ltr' ? 'International Private School' : 'المدرسة الدولية الخاصة')}</h3>
-                <p className="text-[11px] text-slate-600">{docDirection === 'ltr' ? 'Academic Year' : 'العام الدراسي'}: <strong>{headerConfig.academicYear || '2025 - 2026'}</strong></p>
+              {/* Ministry & School (Right) */}
+              <div className="space-y-0.5 text-right order-1">
+                <h4 className="font-extrabold text-xs text-slate-800">{headerConfig.ministryText || 'وزارة التربية والتعليم'}</h4>
+                <h3 className="font-black text-sm text-indigo-900">{headerConfig.schoolName || 'المدرسة الدولية الخاصة'}</h3>
+                <p className="text-[11px] text-slate-600">العام الدراسي: <strong>{headerConfig.academicYear || '2025 - 2026'}</strong></p>
               </div>
 
               {/* Center: Title & Subject */}
               <div className="text-center space-y-1 order-2">
                 <h2 className="font-black text-base sm:text-lg text-slate-950 underline decoration-2 underline-offset-4">
-                  {headerConfig.examTitle || (docDirection === 'ltr' ? 'English Language Examination' : 'أسئلة المذاكرة والاختبار')}
+                  {headerConfig.examTitle || 'أسئلة المذاكرة والاختبار'}
                 </h2>
                 <div className="flex items-center justify-center gap-2 text-xs font-black text-slate-800 flex-wrap">
                   <span className="bg-indigo-50 border border-indigo-200 text-indigo-900 px-2 py-0.5 rounded-md">
-                    {docDirection === 'ltr' ? 'Subject' : 'مادة'}: {headerConfig.subject}
+                    مادة: {headerConfig.subject}
                   </span>
                   <span>•</span>
                   <span className="bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-md">{headerConfig.className}</span>
@@ -3333,26 +2633,26 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
               </div>
 
               {/* Duration, Marks, Teacher */}
-              <div className={`space-y-0.5 text-xs text-slate-700 font-medium ${docDirection === 'ltr' ? 'text-right order-3' : 'text-left order-3'}`}>
-                <p>{docDirection === 'ltr' ? 'Duration' : 'زمن الامتحان'}: <strong>{headerConfig.duration || (docDirection === 'ltr' ? '90 mins' : 'ساعة ونصف')}</strong></p>
-                <p>{docDirection === 'ltr' ? 'Max Marks' : 'الدرجة الكلية'}: <strong className="text-indigo-800 font-bold">{headerConfig.totalMarks || (docDirection === 'ltr' ? '100 Marks' : '100 درجة')}</strong></p>
-                <p>{docDirection === 'ltr' ? 'Date' : 'تاريخ الاختبار'}: <strong>{headerConfig.examDate || new Date().toISOString().split('T')[0]}</strong></p>
-                <p>{docDirection === 'ltr' ? 'Teacher' : 'معلم المادة'}: <strong className="text-slate-900 font-bold">{headerConfig.teacherName}</strong></p>
+              <div className="space-y-0.5 text-xs text-slate-700 font-medium text-left order-3">
+                <p>زمن الامتحان: <strong>{headerConfig.duration || 'ساعة ونصف'}</strong></p>
+                <p>الدرجة الكلية: <strong className="text-indigo-800 font-bold">{headerConfig.totalMarks || '100 درجة'}</strong></p>
+                <p>تاريخ الاختبار: <strong>{headerConfig.examDate || new Date().toISOString().split('T')[0]}</strong></p>
+                <p>معلم المادة: <strong className="text-slate-900 font-bold">{headerConfig.teacherName}</strong></p>
               </div>
             </div>
 
             {/* Student Identification Line */}
             <div className="flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-800 pt-1 border-t border-dashed border-slate-200">
-              <div className={`flex-1 ${docDirection === 'ltr' ? 'text-left' : 'text-right'}`}>
-                <span className="font-bold">{docDirection === 'ltr' ? 'Student Name' : 'اسم الطالب/ـة'}: </span>
+              <div className="flex-1 text-right">
+                <span className="font-bold">اسم الطالب/ـة: </span>
                 <span className="text-slate-400 font-light">...........................................................................................</span>
               </div>
-              <div className={`w-48 ${docDirection === 'ltr' ? 'text-left' : 'text-right'}`}>
-                <span className="font-bold">{docDirection === 'ltr' ? 'Seat / ID No' : 'الرقم الموحد / القيد'}: </span>
+              <div className="w-48 text-right">
+                <span className="font-bold">الرقم الموحد / القيد: </span>
                 <span className="text-slate-400 font-light">........................</span>
               </div>
-              <div className={`w-24 ${docDirection === 'ltr' ? 'text-right' : 'text-left'}`}>
-                <span className="font-bold">{docDirection === 'ltr' ? 'Section' : 'الشعبة'}: </span>
+              <div className="w-24 text-left">
+                <span className="font-bold">الشعبة: </span>
                 <span className="text-slate-400 font-light">[ ...... ]</span>
               </div>
             </div>
@@ -3370,10 +2670,8 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
 
             {/* Important Instructions Box */}
             {headerConfig.instructions && (
-              <div className={`mt-2.5 p-2 rounded-lg bg-amber-50/80 border border-amber-200/70 text-[11px] text-amber-950 font-medium leading-relaxed ${
-                docDirection === 'ltr' ? 'text-left' : 'text-right'
-              }`}>
-                <strong>📌 {docDirection === 'ltr' ? 'Important Instructions' : 'تعليمات هامة'}: </strong>
+              <div className="mt-2.5 p-2 rounded-lg bg-amber-50/80 border border-amber-200/70 text-[11px] text-amber-950 font-medium leading-relaxed text-right">
+                <strong>📌 تعليمات هامة: </strong>
                 <span>{headerConfig.instructions}</span>
               </div>
             )}
@@ -3387,33 +2685,29 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
           suppressContentEditableWarning
           onClick={handleEditorClick}
           onInput={checkDocEmpty}
-          dir={docDirection}
-          className={`min-h-[600px] outline-none text-slate-900 leading-relaxed text-base focus:ring-1 focus:ring-indigo-100 p-2 rounded-lg transition ${
-            docDirection === 'ltr' ? 'text-left' : 'text-right'
-          }`}
+          dir="rtl"
+          className="min-h-[600px] outline-none text-slate-900 leading-relaxed text-base focus:ring-1 focus:ring-indigo-100 p-2 rounded-lg transition text-right"
           style={{
             lineHeight: 1.8,
             fontFamily: activeFont,
             fontSize: activeFontSize,
-            direction: docDirection,
-            textAlign: docDirection === 'ltr' ? 'left' : 'right'
+            direction: 'rtl',
+            textAlign: 'right'
           }}
-          placeholder={docDirection === 'ltr' ? "Click here to write English exam questions or choose templates from above..." : "انقر هنا لبدء كتابة الأسئلة أو اختر القوالب من الأعلى..."}
+          placeholder="انقر هنا لبدء كتابة الأسئلة أو اختر القوالب من الأعلى..."
         />
 
         {/* Bottom Exam Conclusion - Cancelled/hidden by default per user request */}
         {showFooter && (
           <div 
-            dir={docDirection}
+            dir="rtl"
             className="mt-12 pt-4 border-t-2 border-slate-800 text-center text-xs font-bold text-slate-600 flex items-center justify-between"
           >
-            <span>{docDirection === 'ltr' ? 'International Private School - Official Paper' : 'المدرسة الدولية الخاصة - نموذج معتمد'}</span>
+            <span>المدرسة الدولية الخاصة - نموذج معتمد</span>
             <span className="font-black text-slate-900">
-              {docDirection === 'ltr' 
-                ? '✨ End of Questions - Best of Luck to All Students ✨' 
-                : '✨ انتهت الأسئلة - مع تمنياتنا لجميع الطلبة بالنجاح والتفوق ✨'}
+              ✨ انتهت الأسئلة - مع تمنياتنا لجميع الطلبة بالنجاح والتفوق ✨
             </span>
-            <span>{docDirection === 'ltr' ? "Teacher's Signature: ........................" : 'توقيع المعلم: ........................'}</span>
+            <span>توقيع المعلم: ........................</span>
           </div>
         )}
       </div>

@@ -36,16 +36,26 @@ import {
   Phone,
   ArrowLeft,
   CheckCircle2,
-  FileText
+  FileText,
+  FileSpreadsheet,
+  Printer,
+  Download,
+  Upload,
+  Eye,
+  ClipboardList
 } from 'lucide-react';
+import * as XLSX from 'xlsx';
 import { buildWhatsAppUrl, openWhatsAppDirectly, getWhatsAppSentRecords, recordWhatsAppSent, WhatsAppSentRecord } from '../lib/whatsapp';
 import { sendParentPushNotification } from '../lib/pushDispatcher';
 import { WhatsAppMessageCustomizerModal } from './WhatsAppMessageCustomizerModal';
 import { PortalDesignerBadge } from './PortalDesignerBadge';
-import { Teacher, Student, Class, Attendance, Grade, Parent, Message, Announcement, ExamQuestionPaper } from '../types';
+import { Teacher, Student, Class, Attendance, Grade, Parent, Message, Announcement, ExamQuestionPaper, SentGradeSheet, SentGradeSheetStudentSummary } from '../types';
 import { ExamQuestionsManager } from './ExamQuestionsManager';
 import { sanitizeAndDeduplicateStudents, getSafeStudentKey } from '../lib/studentDeduplicator';
 import { getStoredWelcomeMessages, WelcomeMessagesConfig } from '../lib/welcomeMessages';
+import { persistDirectToFirestore } from '../lib/firebaseSync';
+import { printElementById } from '../lib/printUtils';
+import { GradeSheetSignatures } from './GradeSheetSignatures';
 import { motion, AnimatePresence } from 'motion/react';
 
 interface TeacherPortalProps {
@@ -101,13 +111,66 @@ export default function TeacherPortal({
 
   const [welcomeMsgs, setWelcomeMsgs] = useState<WelcomeMessagesConfig>(getStoredWelcomeMessages);
 
+  // Grade Sheet Connected State with Director
+  const [gradeViewMode, setGradeViewMode] = useState<'sheet' | 'quick'>('sheet');
+  const [monthlyEvaluations, setMonthlyEvaluations] = useState<{ [studentId: string]: any }>(() => {
+    const saved = localStorage.getItem('school_monthly_evaluations');
+    return saved ? JSON.parse(saved) : {};
+  });
+  const [sentGradeSheets, setSentGradeSheets] = useState<SentGradeSheet[]>(() => {
+    const saved = localStorage.getItem('school_sent_grade_sheets');
+    return saved ? JSON.parse(saved) : [];
+  });
+  const [currentEvaluationMonth, setCurrentEvaluationMonth] = useState<string>(() => {
+    return localStorage.getItem('school_evaluation_current_month') || 'شهر شباط';
+  });
+  const [savedEvaluationMonths, setSavedEvaluationMonths] = useState<string[]>(() => {
+    const saved = localStorage.getItem('school_evaluation_saved_months');
+    return saved ? JSON.parse(saved) : ['شهر كانون الثاني', 'شهر شباط', 'شهر آذار', 'شهر نيسان', 'شهر أيار'];
+  });
+  const [customSubjects, setCustomSubjects] = useState<string[]>(() => {
+    const saved = localStorage.getItem('school_custom_subjects');
+    return saved ? JSON.parse(saved) : ['الرياضيات', 'العلوم', 'اللغة العربية', 'التربية الإسلامية', 'اللغة الإنجليزية', 'الاجتماعيات'];
+  });
+  const [directorMaxGradeSetting, setDirectorMaxGradeSetting] = useState<string>(() => {
+    return localStorage.getItem('school_max_grade_setting') || '100';
+  });
+  const [isSentSheetsModalOpen, setIsSentSheetsModalOpen] = useState(false);
+  const [selectedSentSheetToView, setSelectedSentSheetToView] = useState<SentGradeSheet | null>(null);
+  const [sheetSuccessMessage, setSheetSuccessMessage] = useState<string | null>(null);
+  const [isAddingNewMonth, setIsAddingNewMonth] = useState(false);
+  const [newMonthName, setNewMonthName] = useState('');
+
   useEffect(() => {
-    const handleStorageUpdate = () => {
+    const handleStorageUpdate = (e: Event) => {
       const savedIcon = localStorage.getItem('school_app_icon');
       if (savedIcon !== null) {
         setSchoolAppIcon(savedIcon);
       }
       setWelcomeMsgs(getStoredWelcomeMessages());
+
+      const customEvent = e as CustomEvent<{ key: string; value: string }>;
+      if (customEvent && customEvent.detail) {
+        const { key, value } = customEvent.detail;
+        if (key === 'school_monthly_evaluations' && value) {
+          try { setMonthlyEvaluations(JSON.parse(value)); } catch (err) {}
+        }
+        if (key === 'school_sent_grade_sheets' && value) {
+          try { setSentGradeSheets(JSON.parse(value)); } catch (err) {}
+        }
+        if (key === 'school_evaluation_current_month' && value) {
+          setCurrentEvaluationMonth(value);
+        }
+        if (key === 'school_evaluation_saved_months' && value) {
+          try { setSavedEvaluationMonths(JSON.parse(value)); } catch (err) {}
+        }
+        if (key === 'school_custom_subjects' && value) {
+          try { setCustomSubjects(JSON.parse(value)); } catch (err) {}
+        }
+        if (key === 'school_max_grade_setting' && value) {
+          setDirectorMaxGradeSetting(value);
+        }
+      }
     };
     window.addEventListener('school_storage_update', handleStorageUpdate);
     return () => window.removeEventListener('school_storage_update', handleStorageUpdate);
@@ -519,6 +582,195 @@ export default function TeacherPortal({
       setGradeSubject('');
     }
   }, [selectedClassId, teacherClassSubjects]);
+
+  // Grade Sheet helpers & calculations
+  const numericMaxGrade = directorMaxGradeSetting === 'unspecified'
+    ? undefined
+    : (directorMaxGradeSetting === '50' ? 50 : directorMaxGradeSetting === '20' ? 20 : 100);
+
+  const uniqueSubjects = React.useMemo(() => {
+    const list = customSubjects && customSubjects.length > 0 
+      ? customSubjects 
+      : ['الرياضيات', 'العلوم', 'اللغة العربية', 'التربية الإسلامية', 'اللغة الإنجليزية', 'الاجتماعيات'];
+    return Array.from(new Set(list));
+  }, [customSubjects]);
+
+  const handleSaveAndSendGradeSheetToDirector = async () => {
+    if (!selectedClassId) {
+      alert('الرجاء اختيار الصف الدراسي أولاً.');
+      return;
+    }
+    const targetClass = classes.find(c => c.id === selectedClassId);
+    if (!targetClass) return;
+
+    if (classStudents.length === 0) {
+      alert('لا يوجد طلاب مسجلون في هذا الصف لحفظ الكشف.');
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    const studentsSummary: SentGradeSheetStudentSummary[] = [];
+
+    for (const student of classStudents) {
+      const studentGrades = grades.filter(g => g.studentId === student.id && (g.examName === currentEvaluationMonth || !g.examName));
+      let totalScore = 0;
+      let scoredCount = 0;
+      const studentScoresList: { subject: string; score: number | null; maxScore: number }[] = [];
+
+      uniqueSubjects.forEach(sub => {
+        const subGrade = studentGrades.find(g => g.subject === sub);
+        if (subGrade && typeof subGrade.score === 'number' && !isNaN(subGrade.score)) {
+          totalScore += subGrade.score;
+          scoredCount++;
+          studentScoresList.push({ subject: sub, score: subGrade.score, maxScore: numericMaxGrade });
+        } else {
+          studentScoresList.push({ subject: sub, score: null, maxScore: numericMaxGrade });
+        }
+      });
+
+      const avgFormatted = scoredCount > 0 ? (totalScore / scoredCount).toFixed(1) + '%' : '---';
+      let estimation = 'ضعيف';
+      if (scoredCount > 0) {
+        const avgNum = totalScore / scoredCount;
+        if (avgNum > 90) estimation = 'ممتاز';
+        else if (avgNum > 80) estimation = 'جيد جداً';
+        else if (avgNum > 60) estimation = 'جيد';
+        else if (avgNum > 40) estimation = 'وسط';
+      } else {
+        estimation = '---';
+      }
+
+      const evalKey = `${student.id}_${currentEvaluationMonth}`;
+      const evalForMonth = monthlyEvaluations[evalKey] || monthlyEvaluations[student.id];
+      const teacherDirectiveText = evalForMonth?.teacherText !== undefined ? evalForMonth.teacherText : (evalForMonth?.text || '');
+      const directorDirectiveText = evalForMonth?.directorText || '';
+
+      const studentParent = parents.find(p => p.childrenIds.includes(student.id) || p.id === student.parentId);
+
+      studentsSummary.push({
+        studentId: student.id,
+        studentName: student.name,
+        unifiedNo: student.unifiedNo || student.rollNo,
+        rollNo: student.rollNo,
+        parentId: studentParent?.id || student.parentId || 'parent',
+        parentName: studentParent?.name || student.parentName || 'ولي الأمر',
+        parentPhone: studentParent?.phone || student.parentPhone || '',
+        average: avgFormatted,
+        estimation,
+        scores: studentScoresList,
+        teacherNotes: teacherDirectiveText,
+        directorNotes: directorDirectiveText
+      });
+    }
+
+    const sheetRecord: SentGradeSheet = {
+      id: 'gs_teacher_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
+      title: `كشف درجات ${targetClass.name} - شهر ${currentEvaluationMonth}`,
+      month: currentEvaluationMonth,
+      classId: targetClass.id,
+      className: targetClass.name,
+      cohort: targetClass.shift || 'morning',
+      dateSent: nowIso,
+      sentBy: `المعلم: ${activeTeacher?.name || 'معلم الصف'}`,
+      teacherId: selectedTeacherId,
+      status: 'submitted',
+      studentCount: classStudents.length,
+      studentsSummary
+    };
+
+    const filteredSheets = sentGradeSheets.filter(s =>
+      !(s.month === currentEvaluationMonth && s.classId === targetClass.id)
+    );
+    const updatedSentSheets = [sheetRecord, ...filteredSheets];
+    setSentGradeSheets(updatedSentSheets);
+    localStorage.setItem('school_sent_grade_sheets', JSON.stringify(updatedSentSheets));
+    window.dispatchEvent(new CustomEvent('school_storage_update', {
+      detail: { key: 'school_sent_grade_sheets', value: JSON.stringify(updatedSentSheets) }
+    }));
+
+    // Send notification message to Director
+    sendMessage({
+      senderId: selectedTeacherId,
+      senderName: activeTeacher?.name ? `المعلم ${activeTeacher.name}` : 'معلم الصف',
+      senderRole: 'teacher',
+      receiverId: 'director',
+      receiverName: 'المدير العام (إدارة المدرسة)',
+      receiverRole: 'director',
+      content: `📢 [إشعار كشف درجات]\nقام المعلم ${activeTeacher?.name || ''} برصد وتعبئة كشف درجات (${targetClass.name}) لشهر (${currentEvaluationMonth}) بإجمالي (${classStudents.length} طالب)، وهو جاهز بانتظار اعتمادكم الكريم وإرسال النتائج لأولياء الأمور 📊🚀`
+    });
+
+    // Cloud persist
+    await persistDirectToFirestore('school_sent_grade_sheets', updatedSentSheets);
+    await persistDirectToFirestore('school_monthly_evaluations', monthlyEvaluations);
+    await persistDirectToFirestore('school_grades', grades);
+
+    setSheetSuccessMessage(`🎉 تم بنجاح حفظ وإرسال كشف درجات صف (${targetClass.name}) لشهر (${currentEvaluationMonth}) إلى المدير العام بانتظار الاعتماد الرسمي! 🚀`);
+    setTimeout(() => setSheetSuccessMessage(null), 6000);
+    alert(`🎉 تم بنجاح حفظ وإرسال كشف الدرجات للمدير العام!\n\n🏫 الصف: ${targetClass.name}\n📅 الشهر: ${currentEvaluationMonth}\n👨‍🎓 عدد الطلاب: ${classStudents.length} طالب\n\n✅ تم إشعار المدير العام وربط الكشف بالكامل في سجل الكشوفات بانتظار اعتماده وإرساله لأولياء الأمور! 🚀`);
+  };
+
+  const handleExportTeacherClassExcel = () => {
+    if (!selectedClassId) {
+      alert('الرجاء اختيار الصف أولاً.');
+      return;
+    }
+    const targetClass = classes.find(c => c.id === selectedClassId);
+    if (!targetClass) return;
+
+    if (classStudents.length === 0) {
+      alert('لا يوجد طلاب مسجلون في هذا الصف.');
+      return;
+    }
+
+    const headers = ['الرقم الموحد', 'اسم الطالب', 'الصف', ...uniqueSubjects, 'المعدل', 'التقدير', 'توجيهات وملاحظات المعلم'];
+    const data = classStudents.map(s => {
+      const studentGrades = grades.filter(g => g.studentId === s.id && (g.examName === currentEvaluationMonth || !g.examName));
+      const evalForMonth = monthlyEvaluations[`${s.id}_${currentEvaluationMonth}`] || monthlyEvaluations[s.id];
+
+      const row: any = {
+        'الرقم الموحد': s.unifiedNo || s.rollNo || '',
+        'اسم الطالب': s.name,
+        'الصف': targetClass.name
+      };
+
+      let totalScore = 0;
+      let subjectCount = 0;
+
+      uniqueSubjects.forEach(sub => {
+        const subGrade = studentGrades.find(g => g.subject === sub);
+        if (subGrade && typeof subGrade.score === 'number' && !isNaN(subGrade.score)) {
+          row[sub] = subGrade.score;
+          totalScore += subGrade.score;
+          subjectCount++;
+        } else {
+          row[sub] = '';
+        }
+      });
+
+      const avg = subjectCount > 0 ? (totalScore / subjectCount).toFixed(1) : '0';
+      row['المعدل'] = avg + '%';
+
+      let estimation = 'ضعيف';
+      const avgNum = parseFloat(avg);
+      if (avgNum > 90) estimation = 'ممتاز';
+      else if (avgNum > 80) estimation = 'جيد جداً';
+      else if (avgNum > 60) estimation = 'جيد';
+      else if (avgNum > 40) estimation = 'وسط';
+      row['التقدير'] = estimation;
+      row['توجيهات وملاحظات المعلم'] = evalForMonth?.teacherText !== undefined ? evalForMonth.teacherText : (evalForMonth?.text || '');
+
+      return row;
+    });
+
+    const worksheet = XLSX.utils.json_to_sheet(data);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'كشف الدرجات');
+    XLSX.writeFile(workbook, `كشف_درجات_${targetClass.name.replace(/\s+/g, '_')}_${currentEvaluationMonth}.xlsx`);
+  };
+
+  const handlePrintTeacherGradeSheet = () => {
+    printElementById('teacher-grades-sheet-print-container', `كشف درجات ${classes.find(c => c.id === selectedClassId)?.name || ''} - ${currentEvaluationMonth}`);
+  };
 
   // Message state
   const [selectedParentId, setSelectedParentId] = useState<string>('');
@@ -988,6 +1240,7 @@ export default function TeacherPortal({
 
             <nav className="space-y-1">
               <button
+                id="teacher-nav-grades"
                 onClick={() => {
                   setActiveTab('grades');
                   setIsMobileMenuOpen(false);
@@ -996,8 +1249,13 @@ export default function TeacherPortal({
                   activeTab === 'grades' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-900 hover:bg-white hover:text-indigo-900'
                 }`}
               >
-                <Award className="w-4 h-4 shrink-0" />
-                <span>رصد الدرجات والتقييم</span>
+                <FileCheck className="w-4 h-4 shrink-0 text-indigo-400" />
+                <span>كشوفات ومعالجة الدرجات</span>
+                <span className={`mr-auto px-1.5 py-0.5 rounded-full text-[8px] font-extrabold ${
+                  activeTab === 'grades' ? 'bg-indigo-500/40 text-white' : 'bg-indigo-100 text-indigo-800 border border-indigo-200'
+                }`}>
+                  مرتبط بالمدير 🔗
+                </span>
               </button>
 
               <button
@@ -1134,12 +1392,399 @@ export default function TeacherPortal({
               exit={{ opacity: 0, y: -10 }}
               className="space-y-6"
             >
-              <div>
-                <h2 className="text-xl font-bold text-slate-800">رصد درجات الاختبارات والتقويم</h2>
-                <p className="text-slate-500 text-xs mt-1">سجل التقييمات للطلاب. يتم تحديث الشهادة وكشف الدرجات لدى ولي الأمر فوراً.</p>
+              {/* Header and Mode Switcher */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200/80 pb-4">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <FileCheck className="w-6 h-6 text-indigo-600" />
+                    <h2 className="text-xl font-bold text-slate-900">كشوفات ومعالجة الدرجات (المرتبطة بالإدارة العامة)</h2>
+                    <span className="bg-emerald-50 text-emerald-700 border border-emerald-200 text-[10px] font-extrabold px-2.5 py-0.5 rounded-full flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                      مرتبط بالمدير العام 🔗
+                    </span>
+                  </div>
+                  <p className="text-slate-500 text-xs mt-1">
+                    تعبئة ورصد كشف درجات الصف لكافة المواد والمعدلات وتدوين التوجيهات، وإرسال الكشف بضغطة زر للمدير العام للاعتماد الرسمي 🚀
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-xl shrink-0 self-start sm:self-auto">
+                  <button
+                    type="button"
+                    onClick={() => setGradeViewMode('sheet')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                      gradeViewMode === 'sheet'
+                        ? 'bg-indigo-600 text-white shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    <FileCheck className="w-3.5 h-3.5" />
+                    <span>كشف درجات الصف الموحد 📜</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setGradeViewMode('quick')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                      gradeViewMode === 'quick'
+                        ? 'bg-indigo-600 text-white shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    <Award className="w-3.5 h-3.5" />
+                    <span>الرصد الفردي السريع ⚡</span>
+                  </button>
+                </div>
               </div>
 
-              {/* Grading Mode Selection Icons/Cards */}
+              {sheetSuccessMessage && (
+                <div className="p-3.5 bg-emerald-50 border border-emerald-300 text-emerald-900 rounded-2xl text-xs font-bold flex items-center gap-2 animate-bounce">
+                  <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>{sheetSuccessMessage}</span>
+                </div>
+              )}
+
+              {gradeViewMode === 'sheet' ? (
+                <div className="space-y-5">
+                  {/* Controls Bar: Month, Class, Scale & Action Buttons */}
+                  <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-xs space-y-4">
+                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-100 pb-4">
+                      {/* Class & Month Selectors */}
+                      <div className="flex flex-wrap items-center gap-3">
+                        <div className="flex items-center gap-2 bg-indigo-50 border border-indigo-200 px-3 py-1.5 rounded-xl">
+                          <span className="text-xs font-bold text-indigo-950">الصف المختار:</span>
+                          <span className="text-xs font-extrabold text-indigo-700">
+                            {classes.find(c => c.id === selectedClassId)?.name || 'غير محدد'} ({classStudents.length} طالب)
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-2 bg-amber-50/70 border border-amber-200 px-3 py-1.5 rounded-xl">
+                          <span className="text-xs font-bold text-amber-950">📋 التقييم لشهر:</span>
+                          {!isAddingNewMonth ? (
+                            <select
+                              value={currentEvaluationMonth}
+                              onChange={e => {
+                                if (e.target.value === 'add_new') {
+                                  setIsAddingNewMonth(true);
+                                  setNewMonthName('');
+                                } else {
+                                  setCurrentEvaluationMonth(e.target.value);
+                                  localStorage.setItem('school_evaluation_current_month', e.target.value);
+                                  window.dispatchEvent(new CustomEvent('school_storage_update', {
+                                    detail: { key: 'school_evaluation_current_month', value: e.target.value }
+                                  }));
+                                }
+                              }}
+                              className="bg-white border border-amber-300 rounded-lg px-2 py-0.5 text-amber-900 text-xs font-extrabold focus:outline-none focus:ring-1 focus:ring-amber-500 cursor-pointer text-center"
+                            >
+                              {savedEvaluationMonths.map(m => (
+                                <option key={m} value={m}>{m}</option>
+                              ))}
+                              <option value="add_new" className="text-indigo-600 font-bold">➕ إضافة شهر جديد...</option>
+                            </select>
+                          ) : (
+                            <div className="flex items-center gap-1.5">
+                              <input
+                                type="text"
+                                value={newMonthName}
+                                onChange={e => setNewMonthName(e.target.value)}
+                                placeholder="اكتب اسم الشهر..."
+                                className="bg-white border border-amber-300 rounded-lg px-2 py-0.5 text-xs font-bold w-24 text-center"
+                                autoFocus
+                              />
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (newMonthName.trim()) {
+                                    const updatedMonths = [...savedEvaluationMonths, newMonthName.trim()];
+                                    setSavedEvaluationMonths(updatedMonths);
+                                    setCurrentEvaluationMonth(newMonthName.trim());
+                                    localStorage.setItem('school_evaluation_saved_months', JSON.stringify(updatedMonths));
+                                    localStorage.setItem('school_evaluation_current_month', newMonthName.trim());
+                                    window.dispatchEvent(new CustomEvent('school_storage_update', {
+                                      detail: { key: 'school_evaluation_saved_months', value: JSON.stringify(updatedMonths) }
+                                    }));
+                                  }
+                                  setIsAddingNewMonth(false);
+                                }}
+                                className="bg-amber-600 text-white text-[10px] font-bold px-2 py-1 rounded cursor-pointer"
+                              >
+                                حفظ
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setIsAddingNewMonth(false)}
+                                className="text-slate-400 text-xs px-1 cursor-pointer"
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="text-[11px] font-bold text-slate-500 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-xl">
+                          ⚖️ مقياس الدرجة: <strong className="text-indigo-600">{directorMaxGradeSetting === 'unspecified' ? 'غير محدد (مفتوح)' : `من ${numericMaxGrade}`}</strong>
+                        </div>
+                      </div>
+
+                      {/* Prominent Action Buttons */}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={handleSaveAndSendGradeSheetToDirector}
+                          className="bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-xs px-4 py-2.5 rounded-xl transition cursor-pointer shadow-md shadow-indigo-200 flex items-center gap-1.5"
+                          title="حفظ وإرسال كشف الدرجات للمدير العام بانتظار الاعتماد الرسمي"
+                        >
+                          <Send className="w-4 h-4 text-indigo-200" />
+                          <span>💾 حفظ وإرسال كشف الدرجات للمدير العام 🚀</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setIsSentSheetsModalOpen(true)}
+                          className="bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 font-extrabold text-xs px-3 py-2.5 rounded-xl transition cursor-pointer shadow-2xs flex items-center gap-1.5"
+                          title="عرض أرشيف الكشوفات المرسلة للمدير العام"
+                        >
+                          <ClipboardList className="w-4 h-4 text-amber-700" />
+                          <span>📁 أرشيف الكشوفات المرسلة للمدير ({sentGradeSheets.filter(s => s.teacherId === selectedTeacherId || s.sentBy?.includes(activeTeacher?.name || '')).length})</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={handleExportTeacherClassExcel}
+                          className="bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 font-bold text-xs px-3 py-2.5 rounded-xl transition cursor-pointer shadow-2xs flex items-center gap-1.5"
+                          title="تصدير كشف درجات طلاب الصف إلى ملف Excel"
+                        >
+                          <FileSpreadsheet className="w-4 h-4 text-emerald-700" />
+                          <span>تصدير Excel 📊</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={handlePrintTeacherGradeSheet}
+                          className="bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-300 font-bold text-xs px-3 py-2.5 rounded-xl transition cursor-pointer shadow-2xs flex items-center gap-1.5"
+                          title="طباعة كشف درجات الصف الرسمي"
+                        >
+                          <Printer className="w-4 h-4 text-slate-600" />
+                          <span>طباعة الكشف 🖨️</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Grade Sheet Table Container */}
+                    <div id="teacher-grades-sheet-print-container" className="space-y-4">
+                      {/* Official Print Header */}
+                      <div className="hidden print:block text-center border-b-2 border-slate-800 pb-3 mb-4 space-y-1">
+                        <div className="flex justify-between items-center text-xs text-slate-600 font-bold">
+                          <span>الجمهورية العربية السورية - وزارة التربية</span>
+                          <span>المدرسة الدولية الخاصة - مدينة مارع</span>
+                        </div>
+                        <h2 className="text-base font-extrabold text-slate-900 mt-2">
+                          كشف درجات ورصد تقييم: {classes.find(c => c.id === selectedClassId)?.name}
+                        </h2>
+                        <div className="flex justify-center gap-4 text-xs font-bold text-slate-700">
+                          <span>شهر: {currentEvaluationMonth}</span>
+                          <span>•</span>
+                          <span>معلم الصف: {activeTeacher?.name}</span>
+                          <span>•</span>
+                          <span>تاريخ التحرير: {new Date().toLocaleDateString('ar-SY')}</span>
+                        </div>
+                      </div>
+
+                      {/* Responsive Table */}
+                      <div className="overflow-x-auto border border-slate-200 rounded-2xl shadow-2xs">
+                        <table className="w-full text-right border-collapse text-xs">
+                          <thead className="bg-slate-50 text-slate-700 border-b border-slate-200 font-black">
+                            <tr>
+                              <th className="p-3 text-center w-24">الرقم الموحد</th>
+                              <th className="p-3 min-w-[150px]">اسم الطالب</th>
+                              {uniqueSubjects.map(sub => {
+                                const isTeacherSub = teacherClassSubjects.includes(sub);
+                                return (
+                                  <th
+                                    key={sub}
+                                    className={`p-3 text-center min-w-[85px] ${
+                                      isTeacherSub ? 'bg-indigo-100/70 text-indigo-950 font-black border-x border-indigo-200' : ''
+                                    }`}
+                                  >
+                                    <div>{sub}</div>
+                                    {isTeacherSub && (
+                                      <span className="text-[8px] bg-indigo-600 text-white px-1.5 py-0.2 rounded-full font-bold block mt-0.5">
+                                        ⭐ مادتك
+                                      </span>
+                                    )}
+                                  </th>
+                                );
+                              })}
+                              <th className="p-3 text-center w-20">المعدل</th>
+                              <th className="p-3 text-center w-24">التقدير</th>
+                              <th className="p-3 min-w-[200px]">توجيهات وملاحظات المعلم</th>
+                              <th className="p-3 min-w-[160px]">توجيهات الإدارة</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {classStudents.map((student, idx) => {
+                              const studentGrades = grades.filter(g => g.studentId === student.id && (g.examName === currentEvaluationMonth || !g.examName));
+                              let totalScore = 0;
+                              let scoredCount = 0;
+                              uniqueSubjects.forEach(sub => {
+                                const subGrade = studentGrades.find(g => g.subject === sub);
+                                if (subGrade && typeof subGrade.score === 'number' && !isNaN(subGrade.score)) {
+                                  totalScore += subGrade.score;
+                                  scoredCount++;
+                                }
+                              });
+
+                              const evalKey = `${student.id}_${currentEvaluationMonth}`;
+                              const evalForMonth = monthlyEvaluations[evalKey] || monthlyEvaluations[student.id];
+
+                              return (
+                                <tr key={getSafeStudentKey(student, idx, 't_grade_row')} className="hover:bg-slate-50/70 transition">
+                                  <td className="p-3 text-center font-mono font-bold text-indigo-700">
+                                    <span className="inline-block px-2 py-0.5 rounded-lg bg-indigo-50 border border-indigo-100 text-xs">
+                                      #{student.unifiedNo || student.rollNo}
+                                    </span>
+                                  </td>
+                                  <td className="p-3 font-extrabold text-slate-800 whitespace-nowrap">
+                                    {student.name}
+                                  </td>
+                                  {uniqueSubjects.map(sub => {
+                                    const subGrade = studentGrades.find(g => g.subject === sub);
+                                    const isTeacherSub = teacherClassSubjects.includes(sub);
+                                    return (
+                                      <td
+                                        key={sub}
+                                        className={`p-2 text-center ${
+                                          isTeacherSub ? 'bg-indigo-50/30 border-x border-indigo-100/50' : ''
+                                        }`}
+                                      >
+                                        <input
+                                          type="number"
+                                          min="0"
+                                          max={directorMaxGradeSetting === 'unspecified' ? undefined : (numericMaxGrade || 100)}
+                                          value={subGrade && subGrade.score !== null ? subGrade.score : ''}
+                                          onChange={e => {
+                                            const valStr = e.target.value.trim();
+                                            const score = valStr === '' ? 0 : parseFloat(valStr) || 0;
+                                            if (setGrades) {
+                                              setGrades(prev => {
+                                                const copy = [...prev];
+                                                const existingIdx = copy.findIndex(g => g.studentId === student.id && g.subject === sub && g.examName === currentEvaluationMonth);
+                                                if (existingIdx !== -1) {
+                                                  copy[existingIdx] = { ...copy[existingIdx], score };
+                                                } else {
+                                                  copy.push({
+                                                    id: 'g_t_edt_' + Date.now() + Math.random().toString(36).substring(2, 7),
+                                                    studentId: student.id,
+                                                    subject: sub,
+                                                    examName: currentEvaluationMonth,
+                                                    score,
+                                                    maxScore: numericMaxGrade || 100,
+                                                    date: new Date().toISOString().split('T')[0],
+                                                    teacherId: selectedTeacherId
+                                                  });
+                                                }
+                                                localStorage.setItem('school_grades', JSON.stringify(copy));
+                                                return copy;
+                                              });
+                                            }
+                                          }}
+                                          className={`w-14 text-center border rounded-lg p-1 text-xs font-bold font-mono focus:outline-none transition ${
+                                            isTeacherSub
+                                              ? 'border-indigo-300 bg-white hover:border-indigo-500 focus:ring-1 focus:ring-indigo-400'
+                                              : 'border-slate-200 bg-slate-50/50 hover:border-slate-400'
+                                          }`}
+                                          placeholder="---"
+                                        />
+                                      </td>
+                                    );
+                                  })}
+                                  {/* Average */}
+                                  <td className="p-3 text-center font-bold font-mono text-indigo-700 bg-indigo-50/20">
+                                    {scoredCount > 0 ? (totalScore / scoredCount).toFixed(1) + '%' : '---'}
+                                  </td>
+                                  {/* Estimation */}
+                                  <td className="p-3 text-center font-bold">
+                                    {scoredCount > 0 ? (() => {
+                                      const avg = totalScore / scoredCount;
+                                      let label = 'ضعيف';
+                                      let badgeClass = 'bg-rose-50 text-rose-700 border-rose-200';
+                                      if (avg > 90) { label = 'ممتاز'; badgeClass = 'bg-emerald-50 text-emerald-800 border-emerald-300'; }
+                                      else if (avg > 80) { label = 'جيد جداً'; badgeClass = 'bg-teal-50 text-teal-800 border-teal-300'; }
+                                      else if (avg > 60) { label = 'جيد'; badgeClass = 'bg-blue-50 text-blue-800 border-blue-300'; }
+                                      else if (avg > 40) { label = 'وسط'; badgeClass = 'bg-amber-50 text-amber-800 border-amber-300'; }
+                                      return (
+                                        <span className={`px-2 py-0.5 rounded-md border text-[10px] ${badgeClass}`}>
+                                          {label}
+                                        </span>
+                                      );
+                                    })() : (
+                                      <span className="text-slate-300">---</span>
+                                    )}
+                                  </td>
+                                  {/* Teacher Directives */}
+                                  <td className="p-2 text-center min-w-[200px]">
+                                    <textarea
+                                      rows={1}
+                                      value={evalForMonth?.teacherText !== undefined ? evalForMonth.teacherText : (evalForMonth?.text || '')}
+                                      onChange={e => {
+                                        const val = e.target.value;
+                                        const currentDirector = evalForMonth?.directorText || '';
+                                        const updated = {
+                                          ...monthlyEvaluations,
+                                          [`${student.id}_${currentEvaluationMonth}`]: {
+                                            ...evalForMonth,
+                                            month: currentEvaluationMonth,
+                                            teacherText: val,
+                                            directorText: currentDirector,
+                                            text: val
+                                          },
+                                          [student.id]: {
+                                            ...monthlyEvaluations[student.id],
+                                            month: currentEvaluationMonth,
+                                            teacherText: val,
+                                            directorText: currentDirector,
+                                            text: val
+                                          }
+                                        };
+                                        setMonthlyEvaluations(updated);
+                                        localStorage.setItem('school_monthly_evaluations', JSON.stringify(updated));
+                                        window.dispatchEvent(new CustomEvent('school_storage_update', {
+                                          detail: { key: 'school_monthly_evaluations', value: JSON.stringify(updated) }
+                                        }));
+                                      }}
+                                      className="w-full text-xs border border-indigo-200 hover:border-indigo-400 focus:border-indigo-600 rounded-lg p-1.5 focus:outline-none text-right bg-white"
+                                      placeholder="اكتب ملاحظاتك وتوجيهك للطالب..."
+                                    />
+                                  </td>
+                                  {/* Director Directives (Read-Only) */}
+                                  <td className="p-2 text-center min-w-[160px]">
+                                    {evalForMonth?.directorText ? (
+                                      <div className="text-[11px] font-semibold text-slate-800 bg-amber-50 border border-amber-200 p-1.5 rounded-lg text-right">
+                                        {evalForMonth.directorText}
+                                      </div>
+                                    ) : (
+                                      <span className="text-slate-400 text-[10px] italic">بانتظار توجيه الإدارة</span>
+                                    )}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      {/* Signatures & Seal Component */}
+                      <div className="pt-4 border-t border-slate-200">
+                        <GradeSheetSignatures
+                          subtitle={`كشف درجات ${classes.find(c => c.id === selectedClassId)?.name || ''} - شهر ${currentEvaluationMonth}`}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-6">
+                  {/* Grading Mode Selection Icons/Cards */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <button
                   type="button"
@@ -1624,6 +2269,8 @@ export default function TeacherPortal({
                       يرجى تحديد طالب من القائمة المنسدلة في الأعلى للبدء في رصد درجات المواد له معاً.
                     </div>
                   )}
+                </div>
+              )}
                 </div>
               )}
             </motion.div>
@@ -2742,6 +3389,7 @@ export default function TeacherPortal({
             </motion.div>
           </div>
         )}
+      </AnimatePresence>
 
         {/* Modal: كافة الرسائل لولي الأمر */}
         {selectedStudentForMessages && (() => {
@@ -3129,7 +3777,186 @@ export default function TeacherPortal({
             </motion.div>
           </div>
         )}
-      </AnimatePresence>
+
+        {/* Sent Grade Sheets Archive Modal for Teacher */}
+        <AnimatePresence>
+          {isSentSheetsModalOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/60 backdrop-blur-xs">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95, y: 15 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 15 }}
+                className="bg-white rounded-3xl border border-slate-200 shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden text-right"
+                style={{ direction: 'rtl' }}
+              >
+                {/* Modal Header */}
+                <div className="bg-gradient-to-r from-indigo-900 to-slate-900 text-white p-5 flex items-center justify-between border-b border-indigo-800 shrink-0">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-2xl bg-indigo-500/20 border border-indigo-400/30 flex items-center justify-center text-xl">
+                      📁
+                    </div>
+                    <div>
+                      <h3 className="font-extrabold text-sm sm:text-base text-white">
+                        أرشيف كشوفات الدرجات المرسلة للمدير العام
+                      </h3>
+                      <p className="text-[11px] text-indigo-200 mt-0.5">
+                        كافة الكشوفات التي قمت بإرسالها للمدير العام مع حالتها (قيد المراجعة أو معتمدة)
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsSentSheetsModalOpen(false);
+                      setSelectedSentSheetToView(null);
+                    }}
+                    className="p-1.5 text-slate-400 hover:text-white hover:bg-white/10 rounded-xl transition cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                {/* Modal Content */}
+                <div className="p-5 overflow-y-auto flex-1 space-y-4">
+                  {selectedSentSheetToView ? (
+                    // Detailed Sheet Inspection
+                    <div className="space-y-4">
+                      <div className="flex items-center justify-between bg-slate-50 p-3.5 rounded-2xl border border-slate-200">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedSentSheetToView(null)}
+                          className="px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-700 rounded-xl text-xs font-bold transition flex items-center gap-1.5 border border-slate-300 shadow-2xs cursor-pointer"
+                        >
+                          <ArrowLeft className="w-3.5 h-3.5" />
+                          <span>العودة للقائمة ↩️</span>
+                        </button>
+                        <div className="text-right">
+                          <h4 className="font-extrabold text-sm text-slate-800">{selectedSentSheetToView.title}</h4>
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full inline-block mt-1 ${
+                            selectedSentSheetToView.status === 'submitted'
+                              ? 'bg-amber-100 text-amber-900 border border-amber-300'
+                              : 'bg-emerald-100 text-emerald-900 border border-emerald-300'
+                          }`}>
+                            {selectedSentSheetToView.status === 'submitted'
+                              ? '⏳ قيد المراجعة بانتظار اعتماد المدير العام'
+                              : '✅ معتمد رسمياً من الإدارة العامة'}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Students Table */}
+                      <div className="border border-slate-200 rounded-2xl overflow-hidden shadow-2xs">
+                        <table className="w-full text-right border-collapse text-xs">
+                          <thead className="bg-slate-50 text-slate-700 border-b border-slate-200 font-bold">
+                            <tr>
+                              <th className="p-2.5 text-center">#</th>
+                              <th className="p-2.5">الرقم الموحد</th>
+                              <th className="p-2.5">اسم الطالب</th>
+                              <th className="p-2.5 text-center">المعدل</th>
+                              <th className="p-2.5 text-center">التقدير</th>
+                              <th className="p-2.5">الدرجات المرصودة</th>
+                              <th className="p-2.5">توجيهات المعلم</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {selectedSentSheetToView.studentsSummary.map((st, idx) => (
+                              <tr key={st.studentId || idx} className="hover:bg-slate-50/80">
+                                <td className="p-2.5 text-center font-bold text-slate-400">{idx + 1}</td>
+                                <td className="p-2.5 font-mono text-indigo-700 font-bold">#{st.unifiedNo || st.rollNo || '---'}</td>
+                                <td className="p-2.5 font-bold text-slate-800">{st.studentName}</td>
+                                <td className="p-2.5 text-center font-bold font-mono text-indigo-700 bg-indigo-50/30">{st.average}</td>
+                                <td className="p-2.5 text-center font-semibold text-emerald-700">{st.estimation}</td>
+                                <td className="p-2.5 text-slate-600">
+                                  <div className="flex flex-wrap gap-1 text-[11px]">
+                                    {st.scores.map(sc => (
+                                      <span key={sc.subject} className="bg-slate-100 px-2 py-0.5 rounded border border-slate-200">
+                                        {sc.subject}: <strong>{sc.score !== null ? sc.score : '---'}</strong>
+                                      </span>
+                                    ))}
+                                  </div>
+                                </td>
+                                <td className="p-2.5 text-slate-600 text-[11px] max-w-xs">{st.teacherNotes || '---'}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ) : (
+                    // Sheets List
+                    <div className="space-y-3">
+                      {sentGradeSheets.filter(s => s.teacherId === selectedTeacherId || s.sentBy?.includes(activeTeacher?.name || '')).length === 0 ? (
+                        <div className="text-center py-12 px-4 bg-slate-50 rounded-3xl border border-dashed border-slate-200 space-y-2">
+                          <span className="text-3xl block">📊</span>
+                          <h4 className="font-bold text-slate-700 text-sm">لا توجد كشوفات درجات مرسلة بعد</h4>
+                          <p className="text-xs text-slate-400 max-w-md mx-auto">
+                            قم بتعبئة كشف درجات الصف والضغط على زر "حفظ وإرسال كشف الدرجات للمدير العام" لتظهر كشوفاتك هنا مع حالة الاعتماد.
+                          </p>
+                        </div>
+                      ) : (
+                        sentGradeSheets
+                          .filter(s => s.teacherId === selectedTeacherId || s.sentBy?.includes(activeTeacher?.name || ''))
+                          .map((sheet, index) => (
+                            <div
+                              key={sheet.id || index}
+                              className="bg-white p-4 rounded-2xl border border-slate-200 shadow-2xs hover:border-indigo-300 transition flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3"
+                            >
+                              <div className="space-y-1">
+                                <div className="flex items-center gap-2">
+                                  <h4 className="font-extrabold text-slate-800 text-sm">{sheet.title}</h4>
+                                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                                    sheet.status === 'submitted'
+                                      ? 'bg-amber-50 text-amber-800 border-amber-300 animate-pulse'
+                                      : 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                                  }`}>
+                                    {sheet.status === 'submitted'
+                                      ? '⏳ قيد المراجعة بانتظار اعتماد المدير العام'
+                                      : '✅ معتمد رسمياً ومُرسل للأهالي'}
+                                  </span>
+                                </div>
+                                <div className="text-xs text-slate-400 flex flex-wrap items-center gap-3">
+                                  <span>📅 شهر: <strong className="text-slate-600">{sheet.month}</strong></span>
+                                  <span>🏫 الصف: <strong className="text-slate-600">{sheet.className}</strong></span>
+                                  <span>👥 الطلاب: <strong className="text-slate-600">{sheet.studentCount}</strong></span>
+                                  <span>🕒 تاريخ الإرسال: <strong className="text-slate-600 font-mono">{new Date(sheet.dateSent).toLocaleDateString('ar-SY')}</strong></span>
+                                </div>
+                              </div>
+
+                              <button
+                                type="button"
+                                onClick={() => setSelectedSentSheetToView(sheet)}
+                                className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1 border border-indigo-200 cursor-pointer shadow-2xs"
+                              >
+                                <Eye className="w-3.5 h-3.5" />
+                                <span>معاينة الكشف 👁️</span>
+                              </button>
+                            </div>
+                          ))
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* Modal Footer */}
+                <div className="bg-slate-50 p-4 border-t border-slate-200 flex justify-between items-center shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsSentSheetsModalOpen(false);
+                      setSelectedSentSheetToView(null);
+                    }}
+                    className="bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 text-xs font-bold px-4 py-2 rounded-xl transition cursor-pointer"
+                  >
+                    إغلاق النافذة ✕
+                  </button>
+                  <span className="text-[11px] text-slate-500 font-bold">
+                    🔒 جميع الكشوفات مرتبطة بقاعدة بيانات المدرسة السحابية ومحدثة لحظياً
+                  </span>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
     </div>
   );
 }
