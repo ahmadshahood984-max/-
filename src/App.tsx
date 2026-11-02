@@ -834,18 +834,15 @@ export default function App() {
   useEffect(() => {
     const updateActiveIds = () => {
       const tId = localStorage.getItem('school_active_teacher_id') || '';
-      setActiveTeacherId(tId);
+      setActiveTeacherId(prev => (prev !== tId ? tId : prev));
 
       const sId = localStorage.getItem('parent_portal_student_id') || '';
       if (sId) {
         const student = students.find(s => s.id === sId || s.rollNo === sId);
-        if (student) {
-          setActiveParentId(student.parentId);
-        } else {
-          setActiveParentId('');
-        }
+        const newParentId = student ? student.parentId : '';
+        setActiveParentId(prev => (prev !== newParentId ? newParentId : prev));
       } else {
-        setActiveParentId('');
+        setActiveParentId(prev => (prev !== '' ? '' : prev));
       }
     };
 

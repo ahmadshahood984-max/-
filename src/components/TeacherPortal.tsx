@@ -53,7 +53,7 @@ import { Teacher, Student, Class, Attendance, Grade, Parent, Message, Announceme
 import { ExamQuestionsManager } from './ExamQuestionsManager';
 import { sanitizeAndDeduplicateStudents, getSafeStudentKey } from '../lib/studentDeduplicator';
 import { getStoredWelcomeMessages, WelcomeMessagesConfig } from '../lib/welcomeMessages';
-import { persistDirectToFirestore } from '../lib/firebaseSync';
+import { persistDirectToFirestore, safeDispatchStorageUpdate } from '../lib/firebaseSync';
 import { printElementById } from '../lib/printUtils';
 import { GradeSheetSignatures } from './GradeSheetSignatures';
 import { motion, AnimatePresence } from 'motion/react';
@@ -143,33 +143,26 @@ export default function TeacherPortal({
 
   useEffect(() => {
     const handleStorageUpdate = (e: Event) => {
-      const savedIcon = localStorage.getItem('school_app_icon');
-      if (savedIcon !== null) {
-        setSchoolAppIcon(savedIcon);
-      }
-      setWelcomeMsgs(getStoredWelcomeMessages());
-
       const customEvent = e as CustomEvent<{ key: string; value: string }>;
-      if (customEvent && customEvent.detail) {
-        const { key, value } = customEvent.detail;
-        if (key === 'school_monthly_evaluations' && value) {
-          try { setMonthlyEvaluations(JSON.parse(value)); } catch (err) {}
-        }
-        if (key === 'school_sent_grade_sheets' && value) {
-          try { setSentGradeSheets(JSON.parse(value)); } catch (err) {}
-        }
-        if (key === 'school_evaluation_current_month' && value) {
-          setCurrentEvaluationMonth(value);
-        }
-        if (key === 'school_evaluation_saved_months' && value) {
-          try { setSavedEvaluationMonths(JSON.parse(value)); } catch (err) {}
-        }
-        if (key === 'school_custom_subjects' && value) {
-          try { setCustomSubjects(JSON.parse(value)); } catch (err) {}
-        }
-        if (key === 'school_max_grade_setting' && value) {
-          setDirectorMaxGradeSetting(value);
-        }
+      if (!customEvent || !customEvent.detail) return;
+
+      const { key, value } = customEvent.detail;
+      if (key === 'school_app_icon') {
+        setSchoolAppIcon(value || '');
+      } else if (key === 'school_welcome_messages') {
+        setWelcomeMsgs(getStoredWelcomeMessages());
+      } else if (key === 'school_monthly_evaluations' && value) {
+        try { setMonthlyEvaluations(JSON.parse(value)); } catch (err) {}
+      } else if (key === 'school_sent_grade_sheets' && value) {
+        try { setSentGradeSheets(JSON.parse(value)); } catch (err) {}
+      } else if (key === 'school_evaluation_current_month' && value) {
+        setCurrentEvaluationMonth(value);
+      } else if (key === 'school_evaluation_saved_months' && value) {
+        try { setSavedEvaluationMonths(JSON.parse(value)); } catch (err) {}
+      } else if (key === 'school_custom_subjects' && value) {
+        try { setCustomSubjects(JSON.parse(value)); } catch (err) {}
+      } else if (key === 'school_max_grade_setting' && value) {
+        setDirectorMaxGradeSetting(value);
       }
     };
     window.addEventListener('school_storage_update', handleStorageUpdate);
@@ -180,10 +173,12 @@ export default function TeacherPortal({
   useEffect(() => {
     if (selectedTeacherId) {
       localStorage.setItem('school_active_teacher_id', selectedTeacherId);
-      // Dispatch storage update event so App.tsx can re-check unread counts in real-time
-      window.dispatchEvent(new CustomEvent('school_storage_update', {
-        detail: { key: 'school_active_teacher_id', value: selectedTeacherId }
-      }));
+      // Dispatch storage update event asynchronously so App.tsx can re-check unread counts without render clash
+      setTimeout(() => {
+        window.dispatchEvent(new CustomEvent('school_storage_update', {
+          detail: { key: 'school_active_teacher_id', value: selectedTeacherId }
+        }));
+      }, 0);
     }
   }, [selectedTeacherId]);
 
@@ -608,11 +603,14 @@ export default function TeacherPortal({
       return;
     }
 
+    const storedGradesRaw = localStorage.getItem('school_grades');
+    const latestGrades: Grade[] = storedGradesRaw ? JSON.parse(storedGradesRaw) : grades;
+
     const nowIso = new Date().toISOString();
     const studentsSummary: SentGradeSheetStudentSummary[] = [];
 
     for (const student of classStudents) {
-      const studentGrades = grades.filter(g => g.studentId === student.id && (g.examName === currentEvaluationMonth || !g.examName));
+      const studentGrades = latestGrades.filter(g => g.studentId === student.id && (g.examName === currentEvaluationMonth || !g.examName));
       let totalScore = 0;
       let scoredCount = 0;
       const studentScoresList: { subject: string; score: number | null; maxScore: number }[] = [];
@@ -684,9 +682,7 @@ export default function TeacherPortal({
     const updatedSentSheets = [sheetRecord, ...filteredSheets];
     setSentGradeSheets(updatedSentSheets);
     localStorage.setItem('school_sent_grade_sheets', JSON.stringify(updatedSentSheets));
-    window.dispatchEvent(new CustomEvent('school_storage_update', {
-      detail: { key: 'school_sent_grade_sheets', value: JSON.stringify(updatedSentSheets) }
-    }));
+    safeDispatchStorageUpdate('school_sent_grade_sheets', JSON.stringify(updatedSentSheets));
 
     // Send notification message to Director
     sendMessage({
@@ -702,7 +698,10 @@ export default function TeacherPortal({
     // Cloud persist
     await persistDirectToFirestore('school_sent_grade_sheets', updatedSentSheets);
     await persistDirectToFirestore('school_monthly_evaluations', monthlyEvaluations);
-    await persistDirectToFirestore('school_grades', grades);
+    await persistDirectToFirestore('school_grades', latestGrades);
+
+    safeDispatchStorageUpdate('school_grades', JSON.stringify(latestGrades));
+    safeDispatchStorageUpdate('school_monthly_evaluations', JSON.stringify(monthlyEvaluations));
 
     setSheetSuccessMessage(`🎉 تم بنجاح حفظ وإرسال كشف درجات صف (${targetClass.name}) لشهر (${currentEvaluationMonth}) إلى المدير العام بانتظار الاعتماد الرسمي! 🚀`);
     setTimeout(() => setSheetSuccessMessage(null), 6000);
@@ -1445,6 +1444,40 @@ export default function TeacherPortal({
 
               {gradeViewMode === 'sheet' ? (
                 <div className="space-y-5">
+                  {/* Official Evaluation Month Banner set by Director */}
+                  <div className="bg-gradient-to-r from-indigo-900 via-slate-900 to-indigo-950 text-white rounded-2xl p-4 shadow-md border border-indigo-800/80 flex flex-col md:flex-row items-center justify-between gap-4 text-right">
+                    <div className="flex items-center gap-3">
+                      <div className="w-12 h-12 rounded-2xl bg-amber-400/20 border border-amber-300/30 flex items-center justify-center text-2xl shrink-0 shadow-inner">
+                        📌
+                      </div>
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-xs text-amber-300 font-bold">شهر التقييم الرسمي المحدد من المدير العام:</span>
+                          <span className="bg-amber-400 text-slate-950 font-black text-xs px-3 py-1 rounded-full shadow-2xs">
+                            {currentEvaluationMonth} 🔒
+                          </span>
+                          <span className="text-[10px] bg-indigo-500/40 text-indigo-200 border border-indigo-400/30 px-2.5 py-0.5 rounded-full font-bold">
+                            مرتبط بالمدير العام تلقائياً 🔗
+                          </span>
+                        </div>
+                        <p className="text-xs text-slate-300 mt-1 leading-relaxed">
+                          حدد المدير العام شهر ({currentEvaluationMonth}) للتقييم. قم بتعبئة درجات طلاب الصف أدناه، ثم اضغط على زر "حفظ وإرسال كشف الدرجات للمدير العام" لتظهر فوراً بكشف درجات المدير لاعتماده وإرساله لأولياء الأمور.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0 w-full md:w-auto">
+                      <button
+                        type="button"
+                        onClick={handleSaveAndSendGradeSheetToDirector}
+                        className="flex-1 md:flex-initial px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-black text-xs rounded-xl transition shadow-md flex items-center justify-center gap-2 cursor-pointer"
+                      >
+                        <Send className="w-4 h-4" />
+                        <span>💾 حفظ وإرسال للمدير العام 🚀</span>
+                      </button>
+                    </div>
+                  </div>
+
                   {/* Controls Bar: Month, Class, Scale & Action Buttons */}
                   <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-xs space-y-4">
                     <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-100 pb-4">
@@ -1457,69 +1490,16 @@ export default function TeacherPortal({
                           </span>
                         </div>
 
-                        <div className="flex items-center gap-2 bg-amber-50/70 border border-amber-200 px-3 py-1.5 rounded-xl">
+                        <div className="flex items-center gap-2 bg-amber-50/80 border border-amber-300 px-3.5 py-1.5 rounded-xl shadow-2xs">
                           <span className="text-xs font-bold text-amber-950">📋 التقييم لشهر:</span>
-                          {!isAddingNewMonth ? (
-                            <select
-                              value={currentEvaluationMonth}
-                              onChange={e => {
-                                if (e.target.value === 'add_new') {
-                                  setIsAddingNewMonth(true);
-                                  setNewMonthName('');
-                                } else {
-                                  setCurrentEvaluationMonth(e.target.value);
-                                  localStorage.setItem('school_evaluation_current_month', e.target.value);
-                                  window.dispatchEvent(new CustomEvent('school_storage_update', {
-                                    detail: { key: 'school_evaluation_current_month', value: e.target.value }
-                                  }));
-                                }
-                              }}
-                              className="bg-white border border-amber-300 rounded-lg px-2 py-0.5 text-amber-900 text-xs font-extrabold focus:outline-none focus:ring-1 focus:ring-amber-500 cursor-pointer text-center"
-                            >
-                              {savedEvaluationMonths.map(m => (
-                                <option key={m} value={m}>{m}</option>
-                              ))}
-                              <option value="add_new" className="text-indigo-600 font-bold">➕ إضافة شهر جديد...</option>
-                            </select>
-                          ) : (
-                            <div className="flex items-center gap-1.5">
-                              <input
-                                type="text"
-                                value={newMonthName}
-                                onChange={e => setNewMonthName(e.target.value)}
-                                placeholder="اكتب اسم الشهر..."
-                                className="bg-white border border-amber-300 rounded-lg px-2 py-0.5 text-xs font-bold w-24 text-center"
-                                autoFocus
-                              />
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  if (newMonthName.trim()) {
-                                    const updatedMonths = [...savedEvaluationMonths, newMonthName.trim()];
-                                    setSavedEvaluationMonths(updatedMonths);
-                                    setCurrentEvaluationMonth(newMonthName.trim());
-                                    localStorage.setItem('school_evaluation_saved_months', JSON.stringify(updatedMonths));
-                                    localStorage.setItem('school_evaluation_current_month', newMonthName.trim());
-                                    window.dispatchEvent(new CustomEvent('school_storage_update', {
-                                      detail: { key: 'school_evaluation_saved_months', value: JSON.stringify(updatedMonths) }
-                                    }));
-                                  }
-                                  setIsAddingNewMonth(false);
-                                }}
-                                className="bg-amber-600 text-white text-[10px] font-bold px-2 py-1 rounded cursor-pointer"
-                              >
-                                حفظ
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setIsAddingNewMonth(false)}
-                                className="text-slate-400 text-xs px-1 cursor-pointer"
-                              >
-                                ✕
-                              </button>
-                            </div>
-                          )}
+                          <span className="bg-amber-200 text-amber-950 font-black text-xs px-2.5 py-0.5 rounded-lg border border-amber-400">
+                            {currentEvaluationMonth} 🔒
+                          </span>
+                          <span className="text-[10px] text-amber-800 font-bold hidden sm:inline-block">
+                            (محدد رسمياً من المدير العام)
+                          </span>
                         </div>
+
 
                         <div className="text-[11px] font-bold text-slate-500 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-xl">
                           ⚖️ مقياس الدرجة: <strong className="text-indigo-600">{directorMaxGradeSetting === 'unspecified' ? 'غير محدد (مفتوح)' : `من ${numericMaxGrade}`}</strong>
@@ -1748,9 +1728,12 @@ export default function TeacherPortal({
                                         };
                                         setMonthlyEvaluations(updated);
                                         localStorage.setItem('school_monthly_evaluations', JSON.stringify(updated));
-                                        window.dispatchEvent(new CustomEvent('school_storage_update', {
-                                          detail: { key: 'school_monthly_evaluations', value: JSON.stringify(updated) }
-                                        }));
+                                        const updatedStr = JSON.stringify(updated);
+                                        setTimeout(() => {
+                                          window.dispatchEvent(new CustomEvent('school_storage_update', {
+                                            detail: { key: 'school_monthly_evaluations', value: updatedStr }
+                                          }));
+                                        }, 0);
                                       }}
                                       className="w-full text-xs border border-indigo-200 hover:border-indigo-400 focus:border-indigo-600 rounded-lg p-1.5 focus:outline-none text-right bg-white"
                                       placeholder="اكتب ملاحظاتك وتوجيهك للطالب..."

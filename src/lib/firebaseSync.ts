@@ -71,6 +71,19 @@ const localUpdateTimestamps = new Map<string, number>();
 // Custom event name
 export const STORAGE_UPDATE_EVENT = 'school_storage_update';
 
+/**
+ * Safely dispatch storage update event asynchronously outside current React call stack
+ */
+export function safeDispatchStorageUpdate(key: string, value: string) {
+  if (typeof window !== 'undefined') {
+    setTimeout(() => {
+      window.dispatchEvent(new CustomEvent(STORAGE_UPDATE_EVENT, {
+        detail: { key, value }
+      }));
+    }, 0);
+  }
+}
+
 // Keep reference to original methods
 const originalSetItem = localStorage.setItem.bind(localStorage);
 const originalRemoveItem = localStorage.removeItem.bind(localStorage);
@@ -87,9 +100,7 @@ try {
           isRemoteSyncing = true;
           originalSetItem(key, value);
           isRemoteSyncing = false;
-          window.dispatchEvent(new CustomEvent(STORAGE_UPDATE_EVENT, {
-            detail: { key, value }
-          }));
+          safeDispatchStorageUpdate(key, value);
         }
       }
     };
@@ -129,12 +140,8 @@ export async function persistDirectToFirestore(key: string, data: any): Promise<
 
     originalSetItem(key, valueString);
     
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent(STORAGE_UPDATE_EVENT, {
-        detail: { key, value: valueString }
-      }));
-      broadcastLocalUpdate(key, valueString);
-    }
+    safeDispatchStorageUpdate(key, valueString);
+    broadcastLocalUpdate(key, valueString);
 
     if (db && !isFirestoreQuotaExceeded()) {
       const docRef = doc(db, 'school_live_data', key);
@@ -214,12 +221,8 @@ export async function fetchStudentsOnlyDirectly(): Promise<any[]> {
         const str = JSON.stringify(clean);
         originalSetItem('school_students', str);
         initialLoadCompletedKeys.add('school_students');
-        if (typeof window !== 'undefined') {
-          window.dispatchEvent(new CustomEvent(STORAGE_UPDATE_EVENT, {
-            detail: { key: 'school_students', value: str }
-          }));
-          broadcastLocalUpdate('school_students', str);
-        }
+        safeDispatchStorageUpdate('school_students', str);
+        broadcastLocalUpdate('school_students', str);
         return clean;
       }
     }
@@ -318,12 +321,8 @@ export async function forceRefreshDataFromFirestore(): Promise<boolean> {
               originalSetItem(key, valueString);
               isRemoteSyncing = false;
 
-              if (typeof window !== 'undefined') {
-                window.dispatchEvent(new CustomEvent(STORAGE_UPDATE_EVENT, {
-                  detail: { key, value: valueString }
-                }));
-                broadcastLocalUpdate(key, valueString);
-              }
+              safeDispatchStorageUpdate(key, valueString);
+              broadcastLocalUpdate(key, valueString);
             }
             initialLoadCompletedKeys.add(key);
           }
@@ -562,10 +561,8 @@ export function setupFirebaseSync() {
               originalSetItem(key, valueString);
               isRemoteSyncing = false;
 
-              // Dispatch custom window event so React states can react
-              window.dispatchEvent(new CustomEvent(STORAGE_UPDATE_EVENT, {
-                detail: { key, value: valueString }
-              }));
+              // Dispatch custom window event safely so React states can react
+              safeDispatchStorageUpdate(key, valueString);
               broadcastLocalUpdate(key, valueString);
             }
           }

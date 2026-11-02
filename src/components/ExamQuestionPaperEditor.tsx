@@ -713,7 +713,7 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
       `;
     }
 
-    // 7. LONG DIVISION (BRACKET): إدراج قسمة مثل هذه (كرسي القسمة المطولة)
+    // 7. LONG DIVISION (BRACKET): إدراج قسمة درج (المعكوس ذو الخطوط الثلاثة كالدرج)
     else if (type === 'division_long' || type === 'division_bracket') {
       const longDivPairs = [
         { dividend: '٥ ٦', divisor: '٧' },
@@ -733,29 +733,82 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
           <div style="font-weight: bold; font-size: 10.5pt; color: #0284c7; margin-bottom: 3px; text-align: right;">${lbl}</div>
           <table style="border-collapse: collapse; margin: 0 auto; font-size: 12pt; border: none;" dir="rtl">
             <tr style="border: none;">
-              <td style="width: 35px; font-size: 9.5pt; color: #64748b; font-weight: bold; text-align: center; border: none;">الناتج:</td>
-              <td style="border: none; border-bottom: 2px solid #0f172a; padding: 1px 6px; text-align: center; min-width: 60px;">
-                <span contenteditable="true" style="color: #1e3a8a; font-weight: bold;">[ &nbsp; &nbsp; ]</span>
+              <!-- خط أفقي علوي أول فوق المقسوم للناتج -->
+              <td style="border: none; border-bottom: 2.5px solid #0f172a; padding: 2px 6px; text-align: center; min-width: 65px;">
+                <span style="font-size: 9pt; color: #64748b; font-weight: bold; margin-left: 3px;">الناتج:</span>
+                <span contenteditable="true" style="color: #1e3a8a; font-weight: bold; font-size: 12pt;">[ &nbsp; &nbsp; ]</span>
+              </td>
+              <td style="border: none; width: 44px; text-align: center; padding: 2px 4px;"></td>
+            </tr>
+            <tr style="border: none;">
+              <!-- المقسوم على اليمين مع خط عمودي فاصل ثانٍ على يساره -->
+              <td contenteditable="true" style="border: none; border-left: 2.5px solid #0f172a; padding: 4px 8px; font-weight: bold; font-size: 13pt; letter-spacing: 3px; text-align: center;">${pair.dividend}</td>
+              <!-- المقسوم عليه على اليسار مع خط أفقي ثالث تحته كالدرج -->
+              <td contenteditable="true" style="border: none; border-bottom: 2.5px solid #0f172a; padding: 4px 8px; font-weight: bold; font-size: 13pt; text-align: center; background: #f8fafc; min-width: 44px;">${pair.divisor}</td>
+            </tr>
+            <tr style="border: none;">
+              <td colspan="2" style="border: none; height: 28px; padding: 4px 4px; text-align: center;">
+                <span style="color: #94a3b8; font-size: 9pt; border-bottom: 1px dotted #cbd5e1; display: inline-block; width: 85%; padding-bottom: 2px;">(خطوات الحل)</span>
               </td>
             </tr>
             <tr style="border: none;">
-              <td contenteditable="true" style="border: none; border-left: 2px solid #0f172a; padding: 3px 6px; font-weight: bold; font-size: 13pt; text-align: center; background: #f8fafc;">${pair.divisor}</td>
-              <td contenteditable="true" style="border: none; padding: 3px 6px; font-weight: bold; font-size: 13pt; letter-spacing: 3px; text-align: center;">${pair.dividend}</td>
-            </tr>
-            <tr style="border: none;">
-              <td style="border: none; border-left: 2px solid #0f172a; height: 26px;"></td>
-              <td style="border: none; color: #94a3b8; font-size: 9pt; padding-top: 3px; border-bottom: 1px dotted #cbd5e1; text-align: center;">(خطوات الحل)</td>
-            </tr>
-            <tr style="border: none;">
-              <td style="border: none; border-left: 2px solid #0f172a;"></td>
-              <td style="border: none; padding: 3px 2px; font-size: 9.5pt; font-weight: bold; color: #16a34a; text-align: center;">الباقي = [ &nbsp; ]</td>
+              <td colspan="2" style="border: none; padding: 4px 2px; font-size: 9.5pt; font-weight: bold; color: #16a34a; text-align: center;">الباقي = [ &nbsp; ]</td>
             </tr>
           </table>
         `);
       }
       snippet = `
         <div class="question-block" dir="rtl" style="margin-top: 10pt; margin-bottom: 14pt; page-break-inside: avoid; font-size: 12pt; width: 100%; clear: both;">
-          ${buildQuestionHeader(qLabel, openQuestionTitle || 'أوجد ناتج وباقي القسمة المطولة موضحاً خطوات الحل:', qMarks)}
+          ${buildQuestionHeader(qLabel, openQuestionTitle || 'أوجد ناتج وباقي قسمة الدرج (القسمة المطولة) موضحاً خطوات الحل:', qMarks)}
+          ${renderWordCompatibleGrid(items, count > 6 ? 4 : (count <= 3 ? count : 4))}
+        </div>
+      `;
+    }
+
+    // 7-B. LONG DIVISION (MIRRORED DIRECTION): درج القسمة بالاتجاه الآخر مع 3 خطوط
+    else if (type === 'division_long_mirrored') {
+      const longDivPairs = [
+        { dividend: '٥ ٦', divisor: '٧' },
+        { dividend: '٩ ٦', divisor: '٨' },
+        { dividend: '٨ ٤', divisor: '٤' },
+        { dividend: '٧ ٥', divisor: '٥' },
+        { dividend: '١ ٢ ٥', divisor: '٥' },
+        { dividend: '٩ ٠', divisor: '٦' },
+        { dividend: '٦ ٤', divisor: '٤' },
+        { dividend: '٨ ٥', divisor: '٥' }
+      ];
+      const items: string[] = [];
+      for (let i = 0; i < count; i++) {
+        const pair = longDivPairs[i % longDivPairs.length];
+        const lbl = SUB_EXAMPLE_LABELS[i] || `(${i + 1})`;
+        items.push(`
+          <div style="font-weight: bold; font-size: 10.5pt; color: #0284c7; margin-bottom: 3px; text-align: right;">${lbl}</div>
+          <table style="border-collapse: collapse; margin: 0 auto; font-size: 12pt; border: none;" dir="rtl">
+            <tr style="border: none;">
+              <td style="border: none; width: 44px; text-align: center; padding: 2px 4px;"></td>
+              <td style="border: none; border-bottom: 2.5px solid #0f172a; padding: 2px 6px; text-align: center; min-width: 65px;">
+                <span style="font-size: 9pt; color: #64748b; font-weight: bold; margin-left: 3px;">الناتج:</span>
+                <span contenteditable="true" style="color: #1e3a8a; font-weight: bold; font-size: 12pt;">[ &nbsp; &nbsp; ]</span>
+              </td>
+            </tr>
+            <tr style="border: none;">
+              <td contenteditable="true" style="border: none; border-left: 2.5px solid #0f172a; border-bottom: 2.5px solid #0f172a; padding: 4px 8px; font-weight: bold; font-size: 13pt; text-align: center; background: #f8fafc; min-width: 44px;">${pair.divisor}</td>
+              <td contenteditable="true" style="border: none; padding: 4px 8px; font-weight: bold; font-size: 13pt; letter-spacing: 3px; text-align: center;">${pair.dividend}</td>
+            </tr>
+            <tr style="border: none;">
+              <td colspan="2" style="border: none; height: 28px; padding: 4px 4px; text-align: center;">
+                <span style="color: #94a3b8; font-size: 9pt; border-bottom: 1px dotted #cbd5e1; display: inline-block; width: 85%; padding-bottom: 2px;">(خطوات الحل)</span>
+              </td>
+            </tr>
+            <tr style="border: none;">
+              <td colspan="2" style="border: none; padding: 4px 2px; font-size: 9.5pt; font-weight: bold; color: #16a34a; text-align: center;">الباقي = [ &nbsp; ]</td>
+            </tr>
+          </table>
+        `);
+      }
+      snippet = `
+        <div class="question-block" dir="rtl" style="margin-top: 10pt; margin-bottom: 14pt; page-break-inside: avoid; font-size: 12pt; width: 100%; clear: both;">
+          ${buildQuestionHeader(qLabel, openQuestionTitle || 'أوجد ناتج وباقي قسمة الدرج (القسمة المطولة) موضحاً خطوات الحل:', qMarks)}
           ${renderWordCompatibleGrid(items, count > 6 ? 4 : (count <= 3 ? count : 4))}
         </div>
       `;
@@ -2253,13 +2306,29 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
                 type="button"
                 onClick={() => insertMathSnippet('division_long')}
                 className="px-3 py-2.5 bg-white hover:bg-sky-50 text-sky-950 border-2 border-sky-400 hover:border-sky-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1.5 shadow-2xs text-center"
+                title="إدراج درج القسمة المعكوس ذو 3 خطوط (المقسوم على اليمين والخط الثالث تحت المقسوم عليه)"
               >
                 <div className="flex items-center gap-1 text-sky-800 font-black">
                   <span>➗</span>
-                  <span>إدراج قسمة مثل هذه ({insertCount} مسائل)</span>
+                  <span>إدراج قسمة درج (3 خطوط) ({insertCount} مسائل)</span>
                 </div>
-                <div className="text-[11px] font-bold text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200">
-                  <span>كرسي القسمة والخطوات ⟌</span>
+                <div className="text-[11px] font-bold text-sky-900 bg-sky-50 px-2 py-0.5 rounded border border-sky-200">
+                  <span>درج القسمة المعكوس بـ 3 خطوط ⎶</span>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => insertMathSnippet('division_long_mirrored')}
+                className="px-3 py-2.5 bg-white hover:bg-cyan-50 text-cyan-950 border-2 border-cyan-400 hover:border-cyan-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1.5 shadow-2xs text-center"
+                title="إدراج درج القسمة بالاتجاه الآخر مع 3 خطوط كاملة"
+              >
+                <div className="flex items-center gap-1 text-cyan-800 font-black">
+                  <span>➗</span>
+                  <span>درج القسمة (الاتجاه الآخر 3 خطوط)</span>
+                </div>
+                <div className="text-[11px] font-bold text-cyan-900 bg-cyan-50 px-2 py-0.5 rounded border border-cyan-200">
+                  <span>المقسوم يساراً مع خط ثالث ⎵</span>
                 </div>
               </button>
 

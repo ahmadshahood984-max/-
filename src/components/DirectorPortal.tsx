@@ -82,7 +82,7 @@ import * as XLSX from 'xlsx';
 import { db } from '../lib/firebase';
 import { collection, addDoc, setDoc, deleteDoc, doc, serverTimestamp, writeBatch, getDocs } from 'firebase/firestore';
 import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead } from '../lib/firestoreTracker';
-import { forceRefreshDataFromFirestore, persistDirectToFirestore, persistGradeReportBatchDirect } from '../lib/firebaseSync';
+import { forceRefreshDataFromFirestore, persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate } from '../lib/firebaseSync';
 import { isFirestoreQuotaExceeded, markFirestoreQuotaExceeded, isQuotaError } from '../lib/quotaManager';
 import { getStoredWelcomeMessages, saveWelcomeMessages, DEFAULT_WELCOME_MESSAGES, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { Bell, Activity, Info, Smartphone } from 'lucide-react';
@@ -4596,13 +4596,18 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     const targetName = nameToUse !== undefined ? nameToUse : newMonthName;
     const trimmed = targetName.trim();
     if (!trimmed) return;
+    let updated = savedEvaluationMonths;
     if (!savedEvaluationMonths.includes(trimmed)) {
-      const updated = [...savedEvaluationMonths, trimmed];
+      updated = [...savedEvaluationMonths, trimmed];
       setSavedEvaluationMonths(updated);
       localStorage.setItem('school_saved_evaluation_months', JSON.stringify(updated));
+      persistDirectToFirestore('school_saved_evaluation_months', updated);
+      safeDispatchStorageUpdate('school_saved_evaluation_months', JSON.stringify(updated));
     }
     setCurrentEvaluationMonth(trimmed);
     localStorage.setItem('school_evaluation_current_month', trimmed);
+    persistDirectToFirestore('school_evaluation_current_month', trimmed);
+    safeDispatchStorageUpdate('school_evaluation_current_month', trimmed);
     setIsAddingNewMonth(false);
   };
 
@@ -4790,9 +4795,30 @@ ${directivesFormatted}
       cohort: activeCohort,
       dateSent: nowIso,
       sentBy: 'المدير العام (إدارة المدرسة)',
+      status: 'approved',
       studentCount: targetStudents.length,
       studentsSummary
     };
+
+    // Check if teacher had submitted this sheet to notify them of approval
+    const teacherSubmitted = sentGradeSheets.find(s =>
+      s.month === currentEvaluationMonth && (s.classId === targetClassId || s.className === scopeTitle) && s.teacherId
+    );
+    if (teacherSubmitted && teacherSubmitted.teacherId) {
+      newMessagesList.push({
+        id: 'm_ack_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
+        senderId: 'director',
+        senderName: 'المدير العام (إدارة المدرسة)',
+        senderRole: 'director',
+        receiverId: teacherSubmitted.teacherId,
+        receiverName: teacherSubmitted.sentBy || 'المعلم',
+        receiverRole: 'teacher',
+        content: `🎉 [اعتماد كشف الدرجات وإرساله]\nتمت مراجعة كشف درجات (${scopeTitle}) لشهر (${currentEvaluationMonth}) واعتماده رسمياً، وتم إرسال كافة بطاقات الدرجات والتقارير لأولياء الأمور بنجاح 🚀 بوركت جهودكم.`,
+        date: nowIso,
+        read: false,
+        category: 'general'
+      });
+    }
 
     // 3. Update States (استبدال الكشف والمراسلات السابقة لنفس الشهر بدلاً من تكرارها)
     const existingMessagesWithoutTheseGrades = messages.filter(m => {
@@ -10474,27 +10500,35 @@ ${sampleEval}
                         <span>💾 حفظ وإرسال النتائج لأولياء الأمور</span>
                       </button>
 
-                      <div className="flex items-center gap-3 bg-indigo-50/50 border border-indigo-100/60 p-2 sm:py-1.5 rounded-2xl">
-                        <span className="text-[11px] font-bold text-indigo-950 whitespace-nowrap">📋 التقييم الشهري لشهر:</span>
+                      <div className="flex flex-wrap items-center gap-2 bg-indigo-50/70 border border-indigo-200/80 p-2 sm:py-1.5 rounded-2xl shadow-2xs">
+                        <span className="text-[11px] font-extrabold text-indigo-950 whitespace-nowrap">📋 التقييم الشهري لشهر:</span>
                         {!isAddingNewMonth ? (
-                          <select
-                            value={currentEvaluationMonth}
-                            onChange={e => {
-                              if (e.target.value === 'add_new') {
-                                setIsAddingNewMonth(true);
-                                setNewMonthName('');
-                              } else {
-                                setCurrentEvaluationMonth(e.target.value);
-                                localStorage.setItem('school_evaluation_current_month', e.target.value);
-                              }
-                            }}
-                            className="bg-white border border-indigo-200 rounded-xl px-2 py-1 text-indigo-900 text-[11px] font-black focus:outline-none focus:ring-2 focus:ring-indigo-500 text-center cursor-pointer min-w-[120px]"
-                          >
-                            {savedEvaluationMonths.map(m => (
-                              <option key={m} value={m}>{m}</option>
-                            ))}
-                            <option value="add_new" className="text-indigo-600 font-bold">➕ إضافة شهر جديد...</option>
-                          </select>
+                          <div className="flex items-center gap-2">
+                            <select
+                              value={currentEvaluationMonth}
+                              onChange={e => {
+                                if (e.target.value === 'add_new') {
+                                  setIsAddingNewMonth(true);
+                                  setNewMonthName('');
+                                } else {
+                                  const newMonth = e.target.value;
+                                  setCurrentEvaluationMonth(newMonth);
+                                  localStorage.setItem('school_evaluation_current_month', newMonth);
+                                  persistDirectToFirestore('school_evaluation_current_month', newMonth);
+                                  safeDispatchStorageUpdate('school_evaluation_current_month', newMonth);
+                                }
+                              }}
+                              className="bg-white border border-indigo-200 rounded-xl px-2 py-1 text-indigo-900 text-[11px] font-black focus:outline-none focus:ring-2 focus:ring-indigo-500 text-center cursor-pointer min-w-[120px]"
+                            >
+                              {savedEvaluationMonths.map(m => (
+                                <option key={m} value={m}>{m}</option>
+                              ))}
+                              <option value="add_new" className="text-indigo-600 font-bold">➕ إضافة شهر جديد...</option>
+                            </select>
+                            <span className="bg-emerald-100 text-emerald-800 border border-emerald-300 text-[10px] font-black px-2 py-0.5 rounded-full whitespace-nowrap hidden sm:inline-block">
+                              🔒 محدد رسمياً للمعلمين
+                            </span>
+                          </div>
                         ) : (
                           <div className="flex items-center gap-1.5">
                             <input
@@ -10529,6 +10563,60 @@ ${sampleEval}
                       </div>
                     </div>
                   </div>
+
+                  {/* Teacher Submission Alert Banner for Selected Class & Month */}
+                  {(() => {
+                    const targetClass = classes.find(c => c.id === selectedClassForGrades);
+                    const submittedSheetForThisClass = sentGradeSheets.find(s => 
+                      s.month === currentEvaluationMonth && 
+                      (s.classId === selectedClassForGrades || s.className === targetClass?.name) &&
+                      s.status === 'submitted'
+                    );
+
+                    if (submittedSheetForThisClass) {
+                      return (
+                        <div className="bg-gradient-to-r from-amber-50 via-emerald-50 to-amber-50 border-2 border-amber-300 rounded-2xl p-4 mb-4 flex flex-col md:flex-row items-center justify-between gap-3 text-right shadow-sm">
+                          <div className="flex items-center gap-3">
+                            <div className="w-11 h-11 rounded-2xl bg-amber-500/20 border border-amber-400/40 flex items-center justify-center text-2xl shrink-0 shadow-2xs">
+                              📥
+                            </div>
+                            <div>
+                              <div className="flex flex-wrap items-center gap-2">
+                                <h4 className="font-black text-sm text-slate-900">
+                                  قام {submittedSheetForThisClass.sentBy || 'معلم الصف'} بتعبئة درجات هذا الصف لشهر ({currentEvaluationMonth})
+                                </h4>
+                                <span className="text-[10px] font-black px-2.5 py-0.5 rounded-full bg-amber-200 text-amber-950 border border-amber-400 animate-pulse">
+                                  جاهز للمصادقة والإرسال لأولياء الأمور ⏳
+                                </span>
+                              </div>
+                              <p className="text-xs text-slate-600 mt-1">
+                                الدرجات وتوجيهات المعلم مرصودة أدناه ومحدثة لحظياً. يمكنك مراجعتها ثم الضغط على الزر لاعتمادها وإرسال النتائج والبطاقات لأولياء الأمور فوراً.
+                              </p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => setSelectedSentSheetToView(submittedSheetForThisClass)}
+                              className="px-3.5 py-2 bg-white hover:bg-slate-100 text-slate-700 font-bold text-xs rounded-xl border border-slate-300 transition shadow-2xs cursor-pointer flex items-center gap-1.5"
+                            >
+                              <Eye className="w-3.5 h-3.5" />
+                              <span>معاينة الكشف 👁️</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleSaveAndSendGradesToParents(false)}
+                              className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white font-black text-xs rounded-xl transition shadow-md flex items-center justify-center gap-2 cursor-pointer"
+                            >
+                              <Send className="w-4 h-4" />
+                              <span>🚀 اعتماد وإرسال النتائج لأولياء الأمور</span>
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    }
+                    return null;
+                  })()}
 
                   <div className="overflow-x-auto">
                     {(() => {
