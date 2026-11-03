@@ -40,7 +40,7 @@ import {
 } from './lib/studentDeduplicator';
 import { safeShowNotification } from './lib/notificationHelper';
 import { sendParentPushNotification, sendBroadcastPushNotification } from './lib/pushDispatcher';
-import { persistDirectToFirestore, forceRefreshDataFromFirestore } from './lib/firebaseSync';
+import { persistDirectToFirestore, forceRefreshDataFromFirestore, safeDispatchStorageUpdate } from './lib/firebaseSync';
 import { syncSingleGradeToFirestore } from './lib/studentGradesQuery';
 import { 
   Building, 
@@ -335,26 +335,90 @@ export default function App() {
   });
 
   const saveExamQuestionPaper = async (paper: ExamQuestionPaper) => {
+    let updatedPapers: ExamQuestionPaper[] = [];
     setExamQuestions(prev => {
       const idx = prev.findIndex(p => p.id === paper.id);
-      let updated: ExamQuestionPaper[];
       if (idx >= 0) {
-        updated = [...prev];
-        updated[idx] = paper;
+        updatedPapers = prev.map((p, i) => i === idx ? paper : p);
       } else {
-        updated = [paper, ...prev];
+        updatedPapers = [paper, ...prev];
       }
-      persistDirectToFirestore('school_exam_questions', updated);
-      return updated;
+      try {
+        localStorage.setItem('school_exam_questions', JSON.stringify(updatedPapers));
+      } catch {}
+      return updatedPapers;
     });
+
+    // Cloud and cross-browser synchronization
+    await persistDirectToFirestore('school_exam_questions', updatedPapers);
+    safeDispatchStorageUpdate('school_exam_questions', JSON.stringify(updatedPapers));
+
+    // If submitted by teacher, immediately notify the Director across all devices/browsers
+    if (paper.status === 'submitted') {
+      const notifMsg: Message = {
+        id: `m_exam_${paper.id}_${Date.now()}`,
+        senderId: paper.teacherId || 'teacher',
+        senderName: paper.teacherName ? `المعلم ${paper.teacherName}` : 'معلم المادة',
+        senderRole: 'teacher',
+        receiverId: 'director',
+        receiverName: 'المدير العام (إدارة المدرسة)',
+        receiverRole: 'director',
+        content: `📝 [إشعار أسئلة مذاكرة جديدة]\nقام المعلم (${paper.teacherName || 'المعلم'}) بإرسال ورقة أسئلة مذاكرة (${paper.subject}) للصف (${paper.className}) بعنوان: "${paper.title}".\n📄 جاهزة الآن بملف الأسئلة والمذاكرات للاعتماد الرسمي أو التصدير لوورد.`,
+        date: new Date().toISOString(),
+        read: false
+      };
+
+      setMessages(prev => {
+        const filtered = prev.filter(m => !m.id.startsWith(`m_exam_${paper.id}`));
+        const updatedMsgs = [notifMsg, ...filtered];
+        try {
+          localStorage.setItem('school_messages', JSON.stringify(updatedMsgs));
+        } catch {}
+        persistDirectToFirestore('school_messages', updatedMsgs);
+        safeDispatchStorageUpdate('school_messages', JSON.stringify(updatedMsgs));
+        return updatedMsgs;
+      });
+
+      logEvent(`قام المعلم ${paper.teacherName || 'المعلم'} بإرسال ورقة أسئلة (${paper.subject}) للإدارة للاعتماد`, 'primary');
+    } else if (paper.status === 'approved' && paper.teacherId) {
+      // If director approved the paper, notify the teacher
+      const approvalMsg: Message = {
+        id: `m_apprv_${paper.id}_${Date.now()}`,
+        senderId: 'director',
+        senderName: 'المدير العام (إدارة المدرسة)',
+        senderRole: 'director',
+        receiverId: paper.teacherId,
+        receiverName: paper.teacherName,
+        receiverRole: 'teacher',
+        content: `✅ [اعتماد ورقة الأسئلة]\nتم اعتماد نموذج أسئلة (${paper.subject}) للصف (${paper.className}) بعنوان: "${paper.title}" رسمياً من قبل الإدارة. يمكنك الآن طباعتها وتوزيعها على الطلاب.`,
+        date: new Date().toISOString(),
+        read: false
+      };
+
+      setMessages(prev => {
+        const filtered = prev.filter(m => !m.id.startsWith(`m_apprv_${paper.id}`));
+        const updatedMsgs = [approvalMsg, ...filtered];
+        try {
+          localStorage.setItem('school_messages', JSON.stringify(updatedMsgs));
+        } catch {}
+        persistDirectToFirestore('school_messages', updatedMsgs);
+        safeDispatchStorageUpdate('school_messages', JSON.stringify(updatedMsgs));
+        return updatedMsgs;
+      });
+    }
   };
 
   const deleteExamQuestionPaper = async (id: string) => {
+    let updatedPapers: ExamQuestionPaper[] = [];
     setExamQuestions(prev => {
-      const updated = prev.filter(p => p.id !== id);
-      persistDirectToFirestore('school_exam_questions', updated);
-      return updated;
+      updatedPapers = prev.filter(p => p.id !== id);
+      try {
+        localStorage.setItem('school_exam_questions', JSON.stringify(updatedPapers));
+      } catch {}
+      return updatedPapers;
     });
+    await persistDirectToFirestore('school_exam_questions', updatedPapers);
+    safeDispatchStorageUpdate('school_exam_questions', JSON.stringify(updatedPapers));
   };
 
   // Simulator Active Portal: 'director' | 'teacher' | 'parent'

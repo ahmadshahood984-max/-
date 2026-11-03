@@ -610,7 +610,7 @@ export default function TeacherPortal({
     const studentsSummary: SentGradeSheetStudentSummary[] = [];
 
     for (const student of classStudents) {
-      const studentGrades = latestGrades.filter(g => g.studentId === student.id && (g.examName === currentEvaluationMonth || !g.examName));
+      const studentGrades = latestGrades.filter(g => g.studentId === student.id && g.examName === currentEvaluationMonth);
       let totalScore = 0;
       let scoredCount = 0;
       const studentScoresList: { subject: string; score: number | null; maxScore: number }[] = [];
@@ -639,7 +639,7 @@ export default function TeacherPortal({
       }
 
       const evalKey = `${student.id}_${currentEvaluationMonth}`;
-      const evalForMonth = monthlyEvaluations[evalKey] || monthlyEvaluations[student.id];
+      const evalForMonth = monthlyEvaluations[evalKey] || (monthlyEvaluations[student.id]?.month === currentEvaluationMonth ? monthlyEvaluations[student.id] : undefined);
       const teacherDirectiveText = evalForMonth?.teacherText !== undefined ? evalForMonth.teacherText : (evalForMonth?.text || '');
       const directorDirectiveText = evalForMonth?.directorText || '';
 
@@ -723,8 +723,8 @@ export default function TeacherPortal({
 
     const headers = ['الرقم الموحد', 'اسم الطالب', 'الصف', ...uniqueSubjects, 'المعدل', 'التقدير', 'توجيهات وملاحظات المعلم'];
     const data = classStudents.map(s => {
-      const studentGrades = grades.filter(g => g.studentId === s.id && (g.examName === currentEvaluationMonth || !g.examName));
-      const evalForMonth = monthlyEvaluations[`${s.id}_${currentEvaluationMonth}`] || monthlyEvaluations[s.id];
+      const studentGrades = grades.filter(g => g.studentId === s.id && g.examName === currentEvaluationMonth);
+      const evalForMonth = monthlyEvaluations[`${s.id}_${currentEvaluationMonth}`] || (monthlyEvaluations[s.id]?.month === currentEvaluationMonth ? monthlyEvaluations[s.id] : undefined);
 
       const row: any = {
         'الرقم الموحد': s.unifiedNo || s.rollNo || '',
@@ -1603,7 +1603,7 @@ export default function TeacherPortal({
                           </thead>
                           <tbody className="divide-y divide-slate-100">
                             {classStudents.map((student, idx) => {
-                              const studentGrades = grades.filter(g => g.studentId === student.id && (g.examName === currentEvaluationMonth || !g.examName));
+                              const studentGrades = grades.filter(g => g.studentId === student.id && g.examName === currentEvaluationMonth);
                               let totalScore = 0;
                               let scoredCount = 0;
                               uniqueSubjects.forEach(sub => {
@@ -1615,7 +1615,7 @@ export default function TeacherPortal({
                               });
 
                               const evalKey = `${student.id}_${currentEvaluationMonth}`;
-                              const evalForMonth = monthlyEvaluations[evalKey] || monthlyEvaluations[student.id];
+                              const evalForMonth = monthlyEvaluations[evalKey] || (monthlyEvaluations[student.id]?.month === currentEvaluationMonth ? monthlyEvaluations[student.id] : undefined);
 
                               return (
                                 <tr key={getSafeStudentKey(student, idx, 't_grade_row')} className="hover:bg-slate-50/70 transition">
@@ -1712,14 +1712,7 @@ export default function TeacherPortal({
                                         const updated = {
                                           ...monthlyEvaluations,
                                           [`${student.id}_${currentEvaluationMonth}`]: {
-                                            ...evalForMonth,
-                                            month: currentEvaluationMonth,
-                                            teacherText: val,
-                                            directorText: currentDirector,
-                                            text: val
-                                          },
-                                          [student.id]: {
-                                            ...monthlyEvaluations[student.id],
+                                            ...(evalForMonth || {}),
                                             month: currentEvaluationMonth,
                                             teacherText: val,
                                             directorText: currentDirector,

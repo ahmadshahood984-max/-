@@ -6465,13 +6465,17 @@ ${directivesFormatted}
             >
               <FileText className="w-3.5 h-3.5 shrink-0 text-amber-400" />
               <span>الأسئلة (ملف المذاكرات)</span>
-              {examQuestions.length > 0 && (
+              {examQuestions.some(q => q.status === 'submitted') ? (
+                <span className="mr-auto px-2 py-0.5 rounded-full text-[8.5px] font-black bg-rose-600 text-white animate-pulse shadow-xs">
+                  {examQuestions.filter(q => q.status === 'submitted').length} بانتظار الاعتماد 🔔
+                </span>
+              ) : examQuestions.length > 0 ? (
                 <span className={`mr-auto px-1.5 py-0.5 rounded-full text-[8px] font-bold ${
                   activeTab === 'questions' ? 'bg-indigo-500/40 text-white' : 'bg-amber-500/20 text-amber-300 border border-amber-400/30'
                 }`}>
                   {examQuestions.length}
                 </span>
-              )}
+              ) : null}
             </button>
 
             <button
@@ -6610,8 +6614,38 @@ ${directivesFormatted}
                 </div>
               </div>
 
+              {/* Exam Questions Alert for Director */}
+              {examQuestions.some(q => q.status === 'submitted') && (
+                <div className="bg-gradient-to-r from-rose-600 via-indigo-600 to-indigo-700 text-white p-4 sm:p-5 rounded-2xl shadow-md border border-white/20 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4 animate-fade-in">
+                  <div className="flex items-center gap-3">
+                    <div className="w-11 h-11 rounded-2xl bg-white/20 backdrop-blur-xs flex items-center justify-center font-black text-xl shrink-0">
+                      🔔
+                    </div>
+                    <div>
+                      <h4 className="font-black text-sm sm:text-base text-white flex items-center gap-2">
+                        <span>وصلت أوراق أسئلة مذاكرة جديدة من المعلمين!</span>
+                        <span className="bg-white text-rose-700 text-[10px] font-black px-2 py-0.5 rounded-full">
+                          {examQuestions.filter(q => q.status === 'submitted').length} بانتظار الاعتماد
+                        </span>
+                      </h4>
+                      <p className="text-xs text-indigo-100 mt-1">
+                        قام المعلمون بكتابة وإرسال نماذج أسئلة جديدة للمذاكرات للاعتماد الرسمي وتصديرها بصيغة وورد (Word).
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('questions')}
+                    className="px-4 py-2.5 bg-white hover:bg-slate-100 text-indigo-900 rounded-xl text-xs font-black transition cursor-pointer shadow-sm flex items-center justify-center gap-2 shrink-0"
+                  >
+                    <FileText className="w-4 h-4 text-indigo-600" />
+                    <span>مراجعة واعتماد الأسئلة فوراً ⚡</span>
+                  </button>
+                </div>
+              )}
+
               {/* Subject Addition Button / Quick Actions Row */}
-              <div className="grid grid-cols-1 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <button
                   onClick={() => setShowSubjectModal(true)}
                   className="group relative overflow-hidden bg-white hover:bg-slate-50 text-slate-850 p-5 rounded-2xl transition-all duration-300 flex items-center justify-between gap-4 cursor-pointer border border-slate-200 hover:border-indigo-200 hover:shadow-lg text-right w-full"
@@ -6622,6 +6656,24 @@ ${directivesFormatted}
                   <div className="flex-1">
                     <span className="block font-black text-sm text-indigo-600">إضافة مادة دراسية جديدة 📚</span>
                     <span className="block text-[10px] text-slate-500 mt-1 font-sans">إضافة مادة دراسية جديدة وتفعيلها لتخصيصها للمعلمين والدرجات</span>
+                  </div>
+                </button>
+
+                <button
+                  onClick={() => setActiveTab('questions')}
+                  className="group relative overflow-hidden bg-white hover:bg-slate-50 text-slate-850 p-5 rounded-2xl transition-all duration-300 flex items-center justify-between gap-4 cursor-pointer border border-slate-200 hover:border-amber-200 hover:shadow-lg text-right w-full"
+                >
+                  <div className="p-3 bg-amber-50 text-amber-600 rounded-xl group-hover:scale-110 transition-transform duration-300">
+                    <FileText className="w-6 h-6 text-amber-500" />
+                  </div>
+                  <div className="flex-1">
+                    <div className="flex items-center justify-between">
+                      <span className="block font-black text-sm text-amber-700">ملف الأسئلة والمذاكرات (Word) 📄</span>
+                      <span className="text-[10px] bg-amber-100 text-amber-800 font-bold px-2 py-0.5 rounded-full">
+                        {examQuestions.length} نماذج
+                      </span>
+                    </div>
+                    <span className="block text-[10px] text-slate-500 mt-1 font-sans">استعراض نماذج أسئلة المعلمين واعتمادها وتصديرها بصيغة وورد جاهزة</span>
                   </div>
                 </button>
               </div>
@@ -11374,7 +11426,7 @@ ${sampleEval}
             >
               <ExamQuestionsManager
                 currentUserRole="director"
-                classes={classes.filter(matchesCohort)}
+                classes={classes}
                 examQuestions={examQuestions}
                 onSavePaper={(paper) => {
                   if (saveExamQuestionPaper) saveExamQuestionPaper(paper);

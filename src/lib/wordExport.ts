@@ -209,18 +209,122 @@ export function exportExamPaperToWord(paper: ExamQuestionPaper, filename?: strin
     </html>
   `;
 
-  // Create Blob and trigger direct download
+  // Build safe filename
+  const cleanTitle = (docTitle || 'أسئلة_المذاكرة')
+    .replace(/[\\/:*?"<>|]+/g, '_')
+    .replace(/\s+/g, '_')
+    .trim();
+  const fullFileName = `${cleanTitle}.doc`;
+
+  // Helper to show floating confirmation toast
+  const showExportToast = (message: string) => {
+    if (typeof document === 'undefined') return;
+    try {
+      const existingToast = document.getElementById('word-export-floating-toast');
+      if (existingToast) existingToast.remove();
+
+      const toast = document.createElement('div');
+      toast.id = 'word-export-floating-toast';
+      toast.setAttribute('dir', 'rtl');
+      toast.className = 'fixed top-4 left-1/2 -translate-x-1/2 z-[999999] bg-gradient-to-r from-blue-700 to-indigo-700 text-white font-bold text-xs sm:text-sm px-5 py-3.5 rounded-2xl shadow-2xl border border-white/20 flex items-center gap-3 animate-bounce';
+      toast.innerHTML = `
+        <span class="text-xl">📄</span>
+        <div class="text-right">
+          <p class="font-black text-sm">${message}</p>
+          <p class="text-[10px] text-blue-100 font-normal mt-0.5">صيغة Microsoft Word (.doc) متوافقة 100% مع الهاتف والكمبيوتر</p>
+        </div>
+      `;
+      document.body.appendChild(toast);
+      setTimeout(() => {
+        if (toast && toast.parentNode) {
+          toast.style.transition = 'opacity 0.5s ease';
+          toast.style.opacity = '0';
+          setTimeout(() => toast.remove(), 500);
+        }
+      }, 4500);
+    } catch {}
+  };
+
+  // Create Blob and UTF-8 BOM
   const blob = new Blob(['\ufeff', wordDocumentContent], {
     type: 'application/msword;charset=utf-8'
   });
 
-  const url = URL.createObjectURL(blob);
-  const downloadLink = document.createElement('a');
-  downloadLink.href = url;
-  downloadLink.download = `${docTitle}.doc`;
-  document.body.appendChild(downloadLink);
-  downloadLink.click();
-  document.body.removeChild(downloadLink);
-  URL.revokeObjectURL(url);
+  // Mobile Web Share API: Allows saving directly to Android/iOS storage or opening in Word app
+  const isMobile = typeof navigator !== 'undefined' && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
+  if (isMobile && typeof navigator !== 'undefined' && typeof (navigator as any).share === 'function') {
+    try {
+      const file = new File([blob], fullFileName, { type: 'application/msword' });
+      if (typeof (navigator as any).canShare === 'function' && (navigator as any).canShare({ files: [file] })) {
+        (navigator as any).share({
+          files: [file],
+          title: paper.title || 'أسئلة المذاكرة',
+          text: `ملف وورد (.doc) لأسئلة ${paper.subject || ''} - ${paper.className || ''}`
+        }).then(() => {
+          showExportToast('تم فتح خيارات الحفظ بالهاتف والمشاركة بنجاح 📄');
+        }).catch((shareErr: any) => {
+          // If aborted by user, don't crash
+          if (shareErr?.name !== 'AbortError') {
+            triggerDirectDownload();
+          }
+        });
+        return;
+      }
+    } catch {
+      // Fallback to direct anchor download
+    }
+  }
+
+  // Direct download routine with delayed revoke
+  function triggerDirectDownload() {
+    try {
+      const url = URL.createObjectURL(blob);
+      const downloadLink = document.createElement('a');
+      downloadLink.href = url;
+      downloadLink.download = fullFileName;
+      downloadLink.target = '_self';
+      downloadLink.rel = 'noopener';
+      downloadLink.style.display = 'none';
+      document.body.appendChild(downloadLink);
+      downloadLink.click();
+
+      setTimeout(() => {
+        if (document.body.contains(downloadLink)) {
+          document.body.removeChild(downloadLink);
+        }
+      }, 2000);
+
+      // Keep blob alive for 2 minutes so mobile Download Manager does not abort!
+      setTimeout(() => {
+        try {
+          URL.revokeObjectURL(url);
+        } catch {}
+      }, 120000);
+
+      showExportToast(`تم تنزيل وحفظ ملف الوورد (${fullFileName}) بهاتفك 📥`);
+    } catch (err) {
+      // Data URI fallback for restricted iframes
+      try {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const base64data = reader.result as string;
+          const fallbackLink = document.createElement('a');
+          fallbackLink.href = base64data;
+          fallbackLink.download = fullFileName;
+          fallbackLink.target = '_self';
+          fallbackLink.style.display = 'none';
+          document.body.appendChild(fallbackLink);
+          fallbackLink.click();
+          setTimeout(() => fallbackLink.remove(), 2000);
+          showExportToast(`تم تنزيل وحفظ ملف الوورد (${fullFileName}) بهاتفك 📥`);
+        };
+        reader.readAsDataURL(blob);
+      } catch {
+        alert('تعذر تنزيل الملف، يرجى إعادة المحاولة.');
+      }
+    }
+  }
+
+  triggerDirectDownload();
 }
 
