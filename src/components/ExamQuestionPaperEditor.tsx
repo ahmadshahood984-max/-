@@ -37,6 +37,7 @@ import {
 } from 'lucide-react';
 import { ExamQuestionPaper, ExamHeaderConfig } from '../types';
 import { exportExamPaperToWord } from '../lib/wordExport';
+import { ExamExportModal } from './ExamExportModal';
 
 interface ExamQuestionPaperEditorProps {
   paper?: ExamQuestionPaper | null;
@@ -85,6 +86,7 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
   const [docTitle, setDocTitle] = useState<string>(paper?.title || 'أسئلة المذاكرة والاختبار');
   const [status, setStatus] = useState<ExamQuestionPaper['status']>(paper?.status || 'draft');
   const [directorNotes, setDirectorNotes] = useState<string>(paper?.directorNotes || '');
+  const [showExportModal, setShowExportModal] = useState<boolean>(false);
 
   // Header configuration
   const [headerConfig, setHeaderConfig] = useState<ExamHeaderConfig>(paper?.headerConfig || {
@@ -119,14 +121,17 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
   const [highlightColor, setHighlightColor] = useState<string>('#ffffff');
   const [savedSuccessMessage, setSavedSuccessMessage] = useState<string>('');
 
+  // Question Spacing State (Controls distance between questions in points - default 4pt for ultra-tight)
+  const [editorQuestionSpacing, setEditorQuestionSpacing] = useState<number>(4);
+
   // Math & Templates Navigation State (Pure Arabic)
   const isMathSubject = headerConfig.subject.includes('رياضيات') || headerConfig.subject.includes('حساب');
   const [activeTabType, setActiveTabType] = useState<'math' | 'general'>(
     isMathSubject ? 'math' : 'general'
   );
   const [activeMathCategory, setActiveMathCategory] = useState<
-    'all' | 'division' | 'addition' | 'subtraction' | 'fractions' | 'multiplication' | 'word_problems' | 'geometry' | 'missing_compare'
-  >('division');
+    'all' | 'powers_exponents' | 'division' | 'addition' | 'subtraction' | 'fractions' | 'multiplication' | 'word_problems' | 'geometry' | 'missing_compare'
+  >('powers_exponents');
 
   // Document Text Direction (Always RTL)
   const docDirection = 'rtl';
@@ -138,6 +143,89 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
   // Two-step clear page confirmation state (no window.confirm needed)
   const [confirmClearActive, setConfirmClearActive] = useState<boolean>(false);
   const [undoBufferHtml, setUndoBufferHtml] = useState<string | null>(null);
+
+  // Example borders visibility state (default true: hide boxes/borders around exercises/examples per user request)
+  const [hideExampleBorders, setHideExampleBorders] = useState<boolean>(true);
+
+  // Helper to toggle example borders across the entire document
+  const toggleExampleBorders = (hide: boolean) => {
+    setHideExampleBorders(hide);
+    if (!editorRef.current) return;
+    setUndoBufferHtml(editorRef.current.innerHTML);
+
+    const cells = editorRef.current.querySelectorAll('.exam-items-table td, td.exam-item-cell');
+    cells.forEach((cell) => {
+      const el = cell as HTMLElement;
+      if (hide) {
+        el.style.border = 'none';
+        el.style.backgroundColor = 'transparent';
+        el.style.boxShadow = 'none';
+      } else {
+        el.style.border = '1px solid #cbd5e1';
+        el.style.borderRadius = '6px';
+        el.style.backgroundColor = '#ffffff';
+      }
+    });
+
+    setSavedSuccessMessage(hide ? 'تم إخفاء المربعات والإطارات حول الأمثلة بنجاح 🔲✨' : 'تم إظهار المربعات حول الأمثلة 🔳');
+    setTimeout(() => setSavedSuccessMessage(''), 2500);
+  };
+
+  // Helper to apply question spacing to all existing questions in the editor
+  const applyQuestionSpacing = (spacingPt: number) => {
+    setEditorQuestionSpacing(spacingPt);
+    if (!editorRef.current) return;
+
+    const topMargin = Math.round(spacingPt * 0.4);
+    const bottomMargin = Math.round(spacingPt * 0.6);
+
+    const questionBlocks = editorRef.current.querySelectorAll('.question-block');
+    questionBlocks.forEach((block) => {
+      const el = block as HTMLElement;
+      el.style.marginTop = `${topMargin}pt`;
+      el.style.marginBottom = `${bottomMargin}pt`;
+    });
+
+    // Also remove rogue empty spacer paragraphs <p class="question-spacer">
+    const spacers = editorRef.current.querySelectorAll('.question-spacer');
+    spacers.forEach(s => s.remove());
+
+    setSavedSuccessMessage(`تم تقريب وضبط المسافة بين الأسئلة إلى (${spacingPt}pt) بنجاح ✨`);
+    setTimeout(() => setSavedSuccessMessage(''), 2500);
+  };
+
+  // Helper to purge all unnecessary empty lines and gaps between questions
+  const cleanAllEmptySpacers = () => {
+    if (!editorRef.current) return;
+    setUndoBufferHtml(editorRef.current.innerHTML);
+
+    // 1. Remove all .question-spacer
+    const spacers = editorRef.current.querySelectorAll('.question-spacer');
+    spacers.forEach(s => s.remove());
+
+    // 2. Remove all empty <p> with only <br> or &nbsp;
+    const allP = editorRef.current.querySelectorAll('p');
+    allP.forEach(p => {
+      const text = p.innerText.trim();
+      const html = p.innerHTML.trim();
+      if (!text && (html === '<br>' || html === '&nbsp;' || html === '' || html === '<br/>')) {
+        p.remove();
+      }
+    });
+
+    // 3. Re-apply current spacing to all question-block
+    const topMargin = Math.round(editorQuestionSpacing * 0.4);
+    const bottomMargin = Math.round(editorQuestionSpacing * 0.6);
+    const blocks = editorRef.current.querySelectorAll('.question-block');
+    blocks.forEach((block) => {
+      const el = block as HTMLElement;
+      el.style.marginTop = `${topMargin}pt`;
+      el.style.marginBottom = `${bottomMargin}pt`;
+    });
+
+    setSavedSuccessMessage('تم تنظيف وإلغاء كافة السطور والفراغات الفارغة بين الأسئلة بنجاح! 🧹✨');
+    setTimeout(() => setSavedSuccessMessage(''), 3000);
+  };
 
   // Empty document tracking
   const [isDocEmpty, setIsDocEmpty] = useState<boolean>(!paper?.contentHtml || paper.contentHtml.trim() === '');
@@ -215,8 +303,11 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
       const chunk = items.slice(i, i + maxPerCol);
       rowsHtml += `<tr style="border: none;">`;
       chunk.forEach(item => {
+        const borderStyle = hideExampleBorders
+          ? 'border: none; background-color: transparent; padding: 4px 6px;'
+          : 'border: 1px solid #cbd5e1; border-radius: 6px; padding: 6px 8px; background-color: #ffffff;';
         rowsHtml += `
-          <td style="border: 1px solid #cbd5e1; border-radius: 6px; padding: 6px 8px; background-color: #ffffff; text-align: center; vertical-align: middle; font-size: 12pt;">
+          <td class="exam-item-cell" style="${borderStyle} text-align: center; vertical-align: middle; font-size: 12pt;">
             ${item}
           </td>
         `;
@@ -224,7 +315,7 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
       rowsHtml += `</tr>`;
     }
     return `
-      <table class="exam-items-table" style="width: 100%; border-collapse: separate; border-spacing: 6px; border: none; margin: 6px 0;" dir="rtl">
+      <table class="exam-items-table" style="width: 100%; border-collapse: ${hideExampleBorders ? 'collapse' : 'separate'}; border-spacing: ${hideExampleBorders ? '0' : '6px'}; border: none; margin: 4px 0;" dir="rtl">
         ${rowsHtml}
       </table>
     `;
@@ -323,17 +414,21 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
     const tempContainer = document.createElement('div');
     tempContainer.innerHTML = questionHtml.trim();
 
+    // Adjust margins dynamically according to current editorQuestionSpacing
+    const qBlock = tempContainer.querySelector('.question-block') as HTMLElement | null;
+    if (qBlock) {
+      const topMargin = Math.round(editorQuestionSpacing * 0.4);
+      const bottomMargin = Math.round(editorQuestionSpacing * 0.6);
+      qBlock.style.marginTop = `${topMargin}pt`;
+      qBlock.style.marginBottom = `${bottomMargin}pt`;
+    }
+
     // Append cleanly to the bottom of the document
     while (tempContainer.firstChild) {
       editorRef.current.appendChild(tempContainer.firstChild);
     }
 
-    // Append a comfortable spacing paragraph below it for cursor placement
-    const spacerP = document.createElement('p');
-    spacerP.className = 'question-spacer';
-    spacerP.style.margin = '8px 0';
-    spacerP.innerHTML = '<br>';
-    editorRef.current.appendChild(spacerP);
+    // NOTE: Removed empty spacer paragraph to prevent unwanted blank vertical gaps in Word!
 
     setIsDocEmpty(false);
 
@@ -344,7 +439,7 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
       lastBlock.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
 
-    setSavedSuccessMessage('تم إدراج السؤال تلقائياً تحت السؤال السابق وتنسيقه تماماً ✨');
+    setSavedSuccessMessage(`تم إدراج السؤال تلقائياً وضبط التقارب (${editorQuestionSpacing}pt) بدقة ✨`);
     setTimeout(() => setSavedSuccessMessage(''), 2500);
   };
 
@@ -479,8 +574,322 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
       return;
     }
 
+    // Quick inline power (exponent) at cursor
+    if (type === 'inline_power') {
+      const inlineSnippet = `<span contenteditable="true" style="font-weight: bold; font-size: 13pt; padding: 0 2px; color: #0f172a;">س</span><sup contenteditable="true" style="font-weight: bold; font-size: 10pt; color: #1e3a8a; vertical-align: super; padding: 0 1px;">٢</sup>&nbsp;`;
+      insertHtmlSnippet(inlineSnippet);
+      return;
+    }
+
+    // Quick inline root at cursor
+    if (type === 'inline_root') {
+      const inlineSnippet = `<span style="font-family: 'Cambria Math', 'Times New Roman', serif; font-size: 13pt; font-weight: bold; color: #0f172a;">√</span><span contenteditable="true" style="border-top: 1.5px solid #0f172a; padding: 0 3px; font-weight: bold; font-size: 12pt; display: inline-block; min-width: 24px; text-align: center;">١٦</span>&nbsp;`;
+      insertHtmlSnippet(inlineSnippet);
+      return;
+    }
+
+    // ==========================================
+    // ⚡ POWERS & EXPONENTS TEMPLATES (الأس والقوى والجذور)
+    // ==========================================
+
+    // A. حساب قيمة القوى (الأسس الموجبة والسالبة والصفرية)
+    if (type === 'powers_evaluate') {
+      const powerExamples = [
+        { base: '٢', exp: '٣', note: '٢ × ٢ × ٢', result: '٨' },
+        { base: '٣', exp: '٤', note: '٣ × ٣ × ٣ × ٣', result: '٨١' },
+        { base: '٥', exp: '٢', note: '٥ × ٥', result: '٢٥' },
+        { base: '١٠', exp: '٣', note: '١٠ × ١٠ × ١٠', result: '١٠٠٠' },
+        { base: '(-٢)', exp: '٣', note: '(-٢) × (-٢) × (-٢)', result: '-٨' },
+        { base: '(-٤)', exp: '٢', note: '(-٤) × (-٤)', result: '١٦' },
+        { base: '٧', exp: '٠', note: 'أي عدد أس صفر = ١', result: '١' },
+        { base: '٤', exp: '-٢', note: '١ / ٤²', result: '١/١٦' },
+        { base: '٦', exp: '٢', note: '٦ × ٦', result: '٣٦' },
+        { base: '٢', exp: '٥', note: '٢ × ٢ × ٢ × ٢ × ٢', result: '٣٢' },
+        { base: '٩', exp: '٢', note: '٩ × ٩', result: '٨١' },
+        { base: '١٠', exp: '٤', note: '١٠⁴', result: '١٠,٠٠٠' }
+      ];
+      const items: string[] = [];
+      for (let i = 0; i < count; i++) {
+        const item = powerExamples[i % powerExamples.length];
+        const lbl = SUB_EXAMPLE_LABELS[i] || `(${i + 1})`;
+        items.push(`
+          <div style="font-weight: bold; color: #1e3a8a; font-size: 10.5pt; margin-bottom: 2px; text-align: right;">${lbl}</div>
+          <div style="display: flex; align-items: center; justify-content: center; gap: 4px; font-size: 13pt; direction: rtl;">
+            <span contenteditable="true" style="font-weight: bold; font-size: 13pt; color: #0f172a;">${item.base}</span>
+            <sup contenteditable="true" style="font-weight: bold; font-size: 10pt; color: #b91c1c; vertical-align: super;">${item.exp}</sup>
+            <span style="font-weight: bold; color: #475569; margin: 0 4px;">=</span>
+            <span style="border-bottom: 1.5px dotted #475569; min-width: 48px; display: inline-block; text-align: center; color: #94a3b8; font-size: 11pt;">.......</span>
+          </div>
+        `);
+      }
+      snippet = `
+        <div class="question-block" dir="rtl" style="margin-top: 10pt; margin-bottom: 14pt; page-break-inside: avoid; font-size: 12pt; width: 100%; clear: both;">
+          ${buildQuestionHeader(qLabel, openQuestionTitle || 'احسب قيمة كل قوة من القوى الآتية بدقة:', qMarks)}
+          ${renderWordCompatibleGrid(items, count > 6 ? 4 : (count <= 3 ? count : 4))}
+        </div>
+      `;
+    }
+
+    // B. ضرب القوى ذات الأساس المشترك (a^m × a^n = a^{m+n})
+    else if (type === 'powers_product_rule') {
+      const productExamples = [
+        { b: '٣', m: '٤', n: '٢', resM: '٦' },
+        { b: '٥', m: '٣', n: '٥', resM: '٨' },
+        { b: '٢', m: '٧', n: '٣', resM: '١٠' },
+        { b: '١٠', m: '٢', n: '٤', resM: '٦' },
+        { b: 'س', m: '٣', n: '٥', resM: '٨' },
+        { b: '٧', m: '٢', n: '٦', resM: '٨' },
+        { b: '٤', m: '٥', n: '٤', resM: '٩' },
+        { b: 'ص', m: '٤', n: '٢', resM: '٦' },
+        { b: '(-٣)', m: '٢', n: '٣', resM: '٥' },
+        { b: '٦', m: '٣', n: '٢', resM: '٥' }
+      ];
+      const items: string[] = [];
+      for (let i = 0; i < count; i++) {
+        const item = productExamples[i % productExamples.length];
+        const lbl = SUB_EXAMPLE_LABELS[i] || `(${i + 1})`;
+        items.push(`
+          <div style="font-weight: bold; color: #1e3a8a; font-size: 10.5pt; margin-bottom: 2px; text-align: right;">${lbl}</div>
+          <div style="display: flex; align-items: center; justify-content: center; gap: 3px; font-size: 13pt; direction: rtl;">
+            <span contenteditable="true" style="font-weight: bold;">${item.b}</span><sup contenteditable="true" style="color: #b91c1c; font-weight: bold;">${item.m}</sup>
+            <span style="font-weight: bold; color: #047857; margin: 0 2px;"> × </span>
+            <span contenteditable="true" style="font-weight: bold;">${item.b}</span><sup contenteditable="true" style="color: #b91c1c; font-weight: bold;">${item.n}</sup>
+            <span style="font-weight: bold; color: #475569; margin: 0 3px;"> = </span>
+            <span contenteditable="true" style="font-weight: bold;">${item.b}</span><sup style="border: 1px dashed #64748b; padding: 0 4px; min-width: 14px; display: inline-block; text-align: center; color: #64748b; font-size: 9.5pt;">....</sup>
+          </div>
+        `);
+      }
+      snippet = `
+        <div class="question-block" dir="rtl" style="margin-top: 10pt; margin-bottom: 14pt; page-break-inside: avoid; font-size: 12pt; width: 100%; clear: both;">
+          ${buildQuestionHeader(qLabel, openQuestionTitle || 'اكتب كلاً مما يأتي على شكل قوة واحدة ذات أساس مشترك (ضرب القوى):', qMarks)}
+          ${renderWordCompatibleGrid(items, count > 6 ? 4 : (count <= 3 ? count : 4))}
+        </div>
+      `;
+    }
+
+    // C. قسمة القوى واختزال الكسور الأسية (a^m ÷ a^n = a^{m-n})
+    else if (type === 'powers_quotient_rule') {
+      const quotientExamples = [
+        { b: '٧', m: '٨', n: '٣', resM: '٥' },
+        { b: '٤', m: '٩', n: '٥', resM: '٤' },
+        { b: '١٠', m: '٧', n: '٣', resM: '٤' },
+        { b: '٢', m: '١٠', n: '٤', resM: '٦' },
+        { b: 'س', m: '٧', n: '٢', resM: '٥' },
+        { b: '٥', m: '٦', n: '٢', resM: '٤' },
+        { b: '٨', m: '٥', n: '٣', resM: '٢' },
+        { b: '(-٣)', m: '٦', n: '٢', resM: '٤' },
+        { b: 'ص', m: '٩', n: '٤', resM: '٥' }
+      ];
+      const items: string[] = [];
+      for (let i = 0; i < count; i++) {
+        const item = quotientExamples[i % quotientExamples.length];
+        const lbl = SUB_EXAMPLE_LABELS[i] || `(${i + 1})`;
+        items.push(`
+          <div style="font-weight: bold; color: #1e3a8a; font-size: 10.5pt; margin-bottom: 2px; text-align: right;">${lbl}</div>
+          <table style="margin: 0 auto; border-collapse: collapse; border: none;" dir="rtl">
+            <tr style="border: none;">
+              <td style="border: none; padding: 0 4px; text-align: center;">
+                <span contenteditable="true" style="font-weight: bold; font-size: 12pt;">${item.b}</span><sup contenteditable="true" style="color: #b91c1c; font-weight: bold;">${item.m}</sup>
+              </td>
+              <td rowspan="3" style="border: none; padding: 0 4px; font-size: 13pt; font-weight: bold; color: #475569; vertical-align: middle;"> = </td>
+              <td rowspan="3" style="border: none; padding: 0 4px; vertical-align: middle;">
+                <span contenteditable="true" style="font-weight: bold; font-size: 12pt;">${item.b}</span><sup style="border: 1px dashed #64748b; padding: 0 4px; min-width: 14px; display: inline-block; text-align: center; color: #64748b; font-size: 9.5pt;">....</sup>
+              </td>
+            </tr>
+            <tr style="border: none;">
+              <td style="border: none; border-top: 2px solid #0f172a; padding: 0; height: 1px;"></td>
+            </tr>
+            <tr style="border: none;">
+              <td style="border: none; padding: 0 4px; text-align: center;">
+                <span contenteditable="true" style="font-weight: bold; font-size: 12pt;">${item.b}</span><sup contenteditable="true" style="color: #b91c1c; font-weight: bold;">${item.n}</sup>
+              </td>
+            </tr>
+          </table>
+        `);
+      }
+      snippet = `
+        <div class="question-block" dir="rtl" style="margin-top: 10pt; margin-bottom: 14pt; page-break-inside: avoid; font-size: 12pt; width: 100%; clear: both;">
+          ${buildQuestionHeader(qLabel, openQuestionTitle || 'اكتب بالصيغة الأسية المختصرة على شكل قوة واحدة (قسمة القوى):', qMarks)}
+          ${renderWordCompatibleGrid(items, count > 6 ? 4 : (count <= 3 ? count : 4))}
+        </div>
+      `;
+    }
+
+    // D. قوة القوة وقوة الجداء والكسر ((a^m)^n = a^{m×n})
+    else if (type === 'powers_power_of_power') {
+      const powerOfPowerExamples = [
+        { expStr: '(٢³)² = ٢[ .... ]', base: '٢', m: '٣', n: '٢' },
+        { expStr: '(٥²)³ = ٥[ .... ]', base: '٥', m: '٢', n: '٣' },
+        { expStr: '(١٠⁴)² = ١٠[ .... ]', base: '١٠', m: '٤', n: '٢' },
+        { expStr: '(س⁵)³ = س[ .... ]', base: 'س', m: '٥', n: '٣' },
+        { expStr: '(٣ × ٤)² = ٣[ .. ] × ٤[ .. ]', base: '٣×٤', m: '', n: '٢' },
+        { expStr: '(٢ / ٥)³ = ٢[ .. ] / ٥[ .. ]', base: '٢/٥', m: '', n: '٣' },
+        { expStr: '(٧³)² = ٧[ .... ]', base: '٧', m: '٣', n: '٢' },
+        { expStr: '(ص²)⁴ = ص[ .... ]', base: 'ص', m: '٢', n: '٤' }
+      ];
+      const items: string[] = [];
+      for (let i = 0; i < count; i++) {
+        const item = powerOfPowerExamples[i % powerOfPowerExamples.length];
+        const lbl = SUB_EXAMPLE_LABELS[i] || `(${i + 1})`;
+        items.push(`
+          <div style="font-weight: bold; color: #1e3a8a; font-size: 10.5pt; margin-bottom: 2px; text-align: right;">${lbl}</div>
+          <div style="display: flex; align-items: center; justify-content: center; gap: 3px; font-size: 13pt; direction: rtl;">
+            <span>(</span><span contenteditable="true" style="font-weight: bold;">${item.base}</span><sup contenteditable="true" style="color: #b91c1c; font-weight: bold;">${item.m}</sup><span>)</span><sup contenteditable="true" style="color: #047857; font-weight: bold;">${item.n}</sup>
+            <span style="font-weight: bold; color: #475569; margin: 0 4px;">=</span>
+            <span contenteditable="true" style="font-weight: bold;">${item.base}</span><sup style="border: 1px dashed #64748b; padding: 0 4px; min-width: 16px; display: inline-block; text-align: center; color: #64748b; font-size: 9.5pt;">....</sup>
+            <span style="font-weight: bold; color: #475569; margin: 0 3px;">=</span>
+            <span style="border-bottom: 1.5px dotted #475569; min-width: 36px; display: inline-block; text-align: center; color: #94a3b8; font-size: 11pt;">.......</span>
+          </div>
+        `);
+      }
+      snippet = `
+        <div class="question-block" dir="rtl" style="margin-top: 10pt; margin-bottom: 14pt; page-break-inside: avoid; font-size: 12pt; width: 100%; clear: both;">
+          ${buildQuestionHeader(qLabel, openQuestionTitle || 'بسّط المقادير الآتية واكتبها على شكل قوة واحدة ثم احسب الناتج:', qMarks)}
+          ${renderWordCompatibleGrid(items, count > 6 ? 4 : (count <= 3 ? count : 4))}
+        </div>
+      `;
+    }
+
+    // E. قوى العدد ١٠ والصيغة العلمية (Scientific Notation)
+    else if (type === 'powers_scientific_notation') {
+      const sciExamples = [
+        { num: '٤٥٠,٠٠٠', mantissa: '٤.٥', exp: '٥' },
+        { num: '٣,٢٠٠,٠٠٠', mantissa: '٣.٢', exp: '٦' },
+        { num: '٠.٠٠٠٣٨', mantissa: '٣.٨', exp: '-٤' },
+        { num: '٠.٠٠٠٠٧', mantissa: '٧', exp: '-٥' },
+        { num: '٨,٥٠٠,٠٠٠', mantissa: '٨.٥', exp: '٦' },
+        { num: '٠.٠٠٢٥', mantissa: '٢.٥', exp: '-٣' },
+        { num: '٦٠,٠٠٠', mantissa: '٦', exp: '٤' },
+        { num: '٠.٠٠٠٠٠٩', mantissa: '٩', exp: '-٦' }
+      ];
+      const items: string[] = [];
+      for (let i = 0; i < count; i++) {
+        const item = sciExamples[i % sciExamples.length];
+        const lbl = SUB_EXAMPLE_LABELS[i] || `(${i + 1})`;
+        items.push(`
+          <div style="font-weight: bold; color: #1e3a8a; font-size: 10.5pt; margin-bottom: 2px; text-align: right;">${lbl}</div>
+          <div style="display: flex; align-items: center; justify-content: center; gap: 3px; font-size: 12pt; direction: rtl;">
+            <span contenteditable="true" style="font-weight: bold;">${item.num}</span>
+            <span style="font-weight: bold; color: #475569; margin: 0 4px;">=</span>
+            <span style="border-bottom: 1.5px dotted #475569; min-width: 32px; display: inline-block; text-align: center; color: #94a3b8; font-size: 11pt;">......</span>
+            <span style="font-weight: bold; color: #047857; margin: 0 2px;">× ١٠</span><sup style="border: 1px dashed #64748b; padding: 0 3px; min-width: 14px; display: inline-block; text-align: center; color: #64748b; font-size: 9.5pt;">....</sup>
+          </div>
+        `);
+      }
+      snippet = `
+        <div class="question-block" dir="rtl" style="margin-top: 10pt; margin-bottom: 14pt; page-break-inside: avoid; font-size: 12pt; width: 100%; clear: both;">
+          ${buildQuestionHeader(qLabel, openQuestionTitle || 'اكتب كلاً من الأعداد الآتية بالصيغة العلمية مستخدماً قوى العدد ١٠:', qMarks)}
+          ${renderWordCompatibleGrid(items, count > 6 ? 4 : (count <= 3 ? count : 4))}
+        </div>
+      `;
+    }
+
+    // F. مقارنة القوى وترتيبها (ضع > أو < أو =)
+    else if (type === 'powers_compare') {
+      const comparePairs = [
+        { left: '٢⁴', right: '٤²' },
+        { left: '٣³', right: '٢⁵' },
+        { left: '١٠²', right: '٢⁷' },
+        { left: '(-٣)²', right: '(-٢)³' },
+        { left: '٥⁰', right: '٠⁵' },
+        { left: '٢⁻³', right: '٣⁻²' },
+        { left: '٤³', right: '٨²' },
+        { left: '٦²', right: '٢⁶' },
+        { left: '(-١)⁸', right: '(-١)⁹' },
+        { left: '٩²', right: '٣⁴' }
+      ];
+      const items: string[] = [];
+      for (let i = 0; i < count; i++) {
+        const pair = comparePairs[i % comparePairs.length];
+        const lbl = SUB_EXAMPLE_LABELS[i] || `(${i + 1})`;
+        items.push(`
+          <span style="font-weight: bold; color: #1e3a8a; font-size: 11pt;">${lbl}</span>
+          &nbsp;
+          <span contenteditable="true" style="font-weight: bold; font-size: 13pt;">${pair.left}</span>
+          &nbsp;
+          <span style="border: 1.5px dashed #4338ca; background: #ffffff; padding: 1px 10px; border-radius: 6px; font-weight: bold; font-size: 11pt; color: #64748b;">( &nbsp;&nbsp;&nbsp;&nbsp; )</span>
+          &nbsp;
+          <span contenteditable="true" style="font-weight: bold; font-size: 13pt;">${pair.right}</span>
+        `);
+      }
+      snippet = `
+        <div class="question-block" dir="rtl" style="margin-top: 10pt; margin-bottom: 14pt; page-break-inside: avoid; font-size: 12pt; width: 100%; clear: both;">
+          ${buildQuestionHeader(qLabel, openQuestionTitle || 'قارن بوضع إشارة ( > ) أو ( < ) أو ( = ) في الفراغ لتصبح المقارنة صحيحة:', qMarks)}
+          ${renderWordCompatibleGrid(items, count > 6 ? 4 : (count <= 3 ? count : 4))}
+        </div>
+      `;
+    }
+
+    // G. المعادلات الأسية وإيجاد المجهول س
+    else if (type === 'powers_equations') {
+      const eqPairs = [
+        { eq: '٢^س = ١٦', base: '٢', exp: 'س', val: '١٦', hint: '١٦ = ٢⁴' },
+        { eq: '٣^(س+١) = ٢٧', base: '٣', exp: 'س+١', val: '٢٧', hint: '٢٧ = ٣³' },
+        { eq: '٥^(٢س) = ٢٥', base: '٥', exp: '٢س', val: '٢٥', hint: '٢٥ = ٥²' },
+        { eq: '١٠^س = ١٠٠,٠٠٠', base: '١٠', exp: 'س', val: '١٠٠,٠٠٠', hint: '١٠٠,٠٠٠ = ١٠⁵' },
+        { eq: '٤^س = ٦٤', base: '٤', exp: 'س', val: '٦٤', hint: '٦٤ = ٤³' },
+        { eq: '٢^(س-١) = ٨', base: '٢', exp: 'س-١', val: '٨', hint: '٨ = ²³' },
+        { eq: '٧^س = ١', base: '٧', exp: 'س', val: '١', hint: '١ = ٧⁰' },
+        { eq: '٣^(٢س) = ٨١', base: '٣', exp: '٢س', val: '٨١', hint: '٨١ = ٣⁴' }
+      ];
+      const items: string[] = [];
+      for (let i = 0; i < count; i++) {
+        const item = eqPairs[i % eqPairs.length];
+        const lbl = SUB_EXAMPLE_LABELS[i] || `(${i + 1})`;
+        items.push(`
+          <div style="font-weight: bold; color: #1e3a8a; font-size: 10.5pt; margin-bottom: 2px; text-align: right;">${lbl}</div>
+          <div style="display: flex; align-items: center; justify-content: center; gap: 3px; font-size: 12.5pt; direction: rtl;">
+            <span contenteditable="true" style="font-weight: bold;">${item.base}</span><sup contenteditable="true" style="color: #b91c1c; font-weight: bold;">${item.exp}</sup>
+            <span style="font-weight: bold; color: #475569; margin: 0 3px;"> = </span>
+            <span contenteditable="true" style="font-weight: bold;">${item.val}</span>
+            <span style="font-weight: bold; color: #4338ca; margin: 0 4px;"> ⟹ س = </span>
+            <span style="border-bottom: 1.5px dotted #475569; min-width: 34px; display: inline-block; text-align: center; color: #94a3b8; font-size: 11pt;">......</span>
+          </div>
+        `);
+      }
+      snippet = `
+        <div class="question-block" dir="rtl" style="margin-top: 10pt; margin-bottom: 14pt; page-break-inside: avoid; font-size: 12pt; width: 100%; clear: both;">
+          ${buildQuestionHeader(qLabel, openQuestionTitle || 'حل المعادلات الأسية الآتية وأوجد قيمة المجهول (س):', qMarks)}
+          ${renderWordCompatibleGrid(items, count > 6 ? 4 : (count <= 3 ? count : 4))}
+        </div>
+      `;
+    }
+
+    // H. الأسس الكسرية والجذور النونية (Fractional Exponents & Roots)
+    else if (type === 'powers_fractional_roots') {
+      const rootExamples = [
+        { expForm: '١٦^(١/٢)', rootForm: '√١٦', ans: '٤' },
+        { expForm: '٢٧^(١/٣)', rootForm: '³√٢٧', ans: '٣' },
+        { expForm: '٨^(٢/٣)', rootForm: '(³√٨)²', ans: '٤' },
+        { expForm: '١٠٠^(١/٢)', rootForm: '√١٠٠', ans: '١٠' },
+        { expForm: '٨١^(١/٤)', rootForm: '⁴√٨١', ans: '٣' },
+        { expForm: '٣٢^(١/٥)', rootForm: '⁵√٣٢', ans: '٢' },
+        { expForm: '٤٩^(١/٢)', rootForm: '√٤٩', ans: '٧' },
+        { expForm: '٦٤^(١/٣)', rootForm: '³√٦٤', ans: '٤' }
+      ];
+      const items: string[] = [];
+      for (let i = 0; i < count; i++) {
+        const item = rootExamples[i % rootExamples.length];
+        const lbl = SUB_EXAMPLE_LABELS[i] || `(${i + 1})`;
+        items.push(`
+          <div style="font-weight: bold; color: #1e3a8a; font-size: 10.5pt; margin-bottom: 2px; text-align: right;">${lbl}</div>
+          <div style="display: flex; align-items: center; justify-content: center; gap: 3px; font-size: 12pt; direction: rtl;">
+            <span contenteditable="true" style="font-weight: bold;">${item.rootForm}</span>
+            <span style="font-weight: bold; color: #475569; margin: 0 4px;">=</span>
+            <span style="border-bottom: 1.5px dotted #475569; min-width: 45px; display: inline-block; text-align: center; color: #94a3b8; font-size: 11pt;">.......</span>
+          </div>
+        `);
+      }
+      snippet = `
+        <div class="question-block" dir="rtl" style="margin-top: 10pt; margin-bottom: 14pt; page-break-inside: avoid; font-size: 12pt; width: 100%; clear: both;">
+          ${buildQuestionHeader(qLabel, openQuestionTitle || 'احسب قيمة كل من المقادير والجذور والأسس الكسرية الآتية:', qMarks)}
+          ${renderWordCompatibleGrid(items, count > 6 ? 4 : (count <= 3 ? count : 4))}
+        </div>
+      `;
+    }
+
     // 1. EQUATION TEMPLATE: إدراج معادلة مثل هذه (كسر بمربعات منقطة مثل الوورد)
-    if (type === 'equation_fraction') {
+    else if (type === 'equation_fraction') {
       const items: string[] = [];
       for (let i = 0; i < count; i++) {
         const lbl = SUB_EXAMPLE_LABELS[i] || `(${i + 1})`;
@@ -1606,6 +2015,7 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
 
   // Export to Word
   const handleExportWord = () => {
+    setShowExportModal(true);
     const content = editorRef.current?.innerHTML || '';
     const paperToExport: ExamQuestionPaper = {
       id: paperId,
@@ -2163,19 +2573,125 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
         {/* 1. MATH TEMPLATES */}
         {activeTabType === 'math' ? (
           <div className="space-y-2.5">
-            {/* Top row: Approved note and inline fraction */}
-            <div className="flex items-center justify-between text-xs text-amber-900 font-bold bg-amber-100/60 px-3 py-1.5 rounded-lg border border-amber-200">
+            {/* Top row: Approved note and inline quick tools */}
+            <div className="flex items-center justify-between text-xs text-amber-900 font-bold bg-amber-100/70 px-3 py-2 rounded-xl border border-amber-200 flex-wrap gap-2">
               <span className="flex items-center gap-1.5">
                 <span>📐</span>
-                <span>قوالب الرياضيات المعتمدة (تدرج بحجم خط 12pt القياسي لاحتواء أكبر قدر من التمارين في الصفحة):</span>
+                <span>قوالب الرياضيات المعتمدة (تدرج بحجم خط 12pt القياسي وتنسيق وورد مباشر):</span>
               </span>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => insertMathSnippet('inline_power')}
+                  title="إدراج أس فوري (س²) عند مؤشر الفأرة"
+                  className="px-2.5 py-1 bg-amber-800 hover:bg-amber-900 text-white rounded-lg text-xs font-black transition cursor-pointer flex items-center gap-1 shadow-2xs"
+                >
+                  <span>⚡ إدراج أس (س²)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => insertMathSnippet('inline_root')}
+                  title="إدراج جذر فوري (√س) عند مؤشر الفأرة"
+                  className="px-2.5 py-1 bg-amber-800 hover:bg-amber-900 text-white rounded-lg text-xs font-black transition cursor-pointer flex items-center gap-1 shadow-2xs"
+                >
+                  <span>⚡ إدراج جذر (√س)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => insertMathSnippet('inline_fraction')}
+                  title="إدراج كسر فوري عند موضع مؤشر الفأرة الحالي"
+                  className="px-2.5 py-1 bg-amber-700 hover:bg-amber-800 text-white rounded-lg text-xs font-black transition cursor-pointer flex items-center gap-1 shadow-2xs"
+                >
+                  <span>⚡ كسر في السطر (⚏)</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Subcategory Pills Navigation for Math */}
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs">
+              <span className="text-[11px] font-black text-amber-950 shrink-0 ml-1">الأقسام:</span>
               <button
                 type="button"
-                onClick={() => insertMathSnippet('inline_fraction')}
-                title="إدراج كسر فوري عند موضع مؤشر الفأرة الحالي"
-                className="px-2.5 py-1 bg-amber-700 hover:bg-amber-800 text-white rounded-lg text-xs font-black transition cursor-pointer flex items-center gap-1 shadow-2xs"
+                onClick={() => setActiveMathCategory('powers_exponents')}
+                className={`px-3 py-1.5 rounded-xl font-black transition cursor-pointer shrink-0 flex items-center gap-1.5 border ${
+                  activeMathCategory === 'powers_exponents'
+                    ? 'bg-amber-700 text-white border-amber-800 shadow-xs'
+                    : 'bg-white hover:bg-amber-50 text-amber-950 border-amber-300'
+                }`}
               >
-                <span>⚡ إدراج كسر في السطر (⚏)</span>
+                <span>⚡ الأس والقوى والجذور (جديد ⭐)</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setActiveMathCategory('division')}
+                className={`px-2.5 py-1.5 rounded-xl font-black transition cursor-pointer shrink-0 flex items-center gap-1 border ${
+                  activeMathCategory === 'division'
+                    ? 'bg-amber-700 text-white border-amber-800 shadow-xs'
+                    : 'bg-white hover:bg-amber-50 text-slate-800 border-slate-200'
+                }`}
+              >
+                <span>➗ القسمة والدرج</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setActiveMathCategory('addition')}
+                className={`px-2.5 py-1.5 rounded-xl font-black transition cursor-pointer shrink-0 flex items-center gap-1 border ${
+                  activeMathCategory === 'addition'
+                    ? 'bg-amber-700 text-white border-amber-800 shadow-xs'
+                    : 'bg-white hover:bg-amber-50 text-slate-800 border-slate-200'
+                }`}
+              >
+                <span>➕ الجمع</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setActiveMathCategory('subtraction')}
+                className={`px-2.5 py-1.5 rounded-xl font-black transition cursor-pointer shrink-0 flex items-center gap-1 border ${
+                  activeMathCategory === 'subtraction'
+                    ? 'bg-amber-700 text-white border-amber-800 shadow-xs'
+                    : 'bg-white hover:bg-amber-50 text-slate-800 border-slate-200'
+                }`}
+              >
+                <span>➖ الطرح</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setActiveMathCategory('fractions')}
+                className={`px-2.5 py-1.5 rounded-xl font-black transition cursor-pointer shrink-0 flex items-center gap-1 border ${
+                  activeMathCategory === 'fractions'
+                    ? 'bg-amber-700 text-white border-amber-800 shadow-xs'
+                    : 'bg-white hover:bg-amber-50 text-slate-800 border-slate-200'
+                }`}
+              >
+                <span>🥧 الكسور</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setActiveMathCategory('multiplication')}
+                className={`px-2.5 py-1.5 rounded-xl font-black transition cursor-pointer shrink-0 flex items-center gap-1 border ${
+                  activeMathCategory === 'multiplication'
+                    ? 'bg-amber-700 text-white border-amber-800 shadow-xs'
+                    : 'bg-white hover:bg-amber-50 text-slate-800 border-slate-200'
+                }`}
+              >
+                <span>✖️ الضرب</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setActiveMathCategory('all')}
+                className={`px-2.5 py-1.5 rounded-xl font-black transition cursor-pointer shrink-0 flex items-center gap-1 border ${
+                  activeMathCategory === 'all'
+                    ? 'bg-slate-800 text-white border-slate-900 shadow-xs'
+                    : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'
+                }`}
+              >
+                <span>🌐 جميع القوالب</span>
               </button>
             </div>
 
@@ -2216,135 +2732,276 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
               </div>
             </div>
 
-            {/* Direct template action buttons */}
+            {/* TEMPLATES ACTION BUTTONS */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-0.5">
-              <button
-                type="button"
-                onClick={() => insertMathSnippet('equation_fraction')}
-                className="px-3 py-2.5 bg-white hover:bg-amber-50 text-amber-950 border-2 border-amber-400 hover:border-amber-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1.5 shadow-2xs group text-center"
-              >
-                <div className="flex items-center gap-1 text-amber-800 font-black">
-                  <span>📐</span>
-                  <span>إدراج معادلة مثل هذه ({insertCount} معادلات)</span>
-                </div>
-                <div className="text-[11px] font-bold text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200 flex items-center gap-1">
-                  <span>[ ▢ / ▢ ] = ....</span>
-                </div>
-              </button>
+              {/* Category: Powers & Exponents (الأس والقوى والجذور) */}
+              {(activeMathCategory === 'powers_exponents' || activeMathCategory === 'all') && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => insertMathSnippet('powers_evaluate')}
+                    className="px-3 py-2.5 bg-white hover:bg-amber-50 text-amber-950 border-2 border-amber-500 hover:border-amber-600 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1 shadow-2xs text-center"
+                    title="احسب قيمة القوى الآتية مع خطوات التعويض والناتج"
+                  >
+                    <div className="flex items-center gap-1 text-amber-800 font-black">
+                      <span>⚡</span>
+                      <span>قيمة القوى ({insertCount} قوى)</span>
+                    </div>
+                    <div className="text-[11px] font-bold text-slate-700 bg-amber-50 px-2 py-0.5 rounded border border-amber-200" dir="ltr">
+                      ٢³ = ٨ • ٥² = ٢٥
+                    </div>
+                  </button>
 
-              <button
-                type="button"
-                onClick={() => insertMathSnippet('addition_horizontal')}
-                className="px-3 py-2.5 bg-white hover:bg-emerald-50 text-emerald-950 border-2 border-emerald-400 hover:border-emerald-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1.5 shadow-2xs text-center"
-              >
-                <div className="flex items-center gap-1 text-emerald-800 font-black">
-                  <span>➕</span>
-                  <span>إدراج جمع أفقي ({insertCount} مسائل)</span>
-                </div>
-                <div className="text-[11px] font-bold text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200" dir="rtl">
-                  <span>٧ + ٨ = ......</span>
-                </div>
-              </button>
+                  <button
+                    type="button"
+                    onClick={() => insertMathSnippet('powers_product_rule')}
+                    className="px-3 py-2.5 bg-white hover:bg-blue-50 text-blue-950 border-2 border-blue-400 hover:border-blue-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1 shadow-2xs text-center"
+                    title="ضرب القوى ذات الأساس المشترك (a^m × a^n = a^{m+n})"
+                  >
+                    <div className="flex items-center gap-1 text-blue-800 font-black">
+                      <span>✖️</span>
+                      <span>ضرب القوى ({insertCount} مسائل)</span>
+                    </div>
+                    <div className="text-[11px] font-bold text-slate-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200" dir="ltr">
+                      ٣⁴ × ٣² = ٣⁶
+                    </div>
+                  </button>
 
-              <button
-                type="button"
-                onClick={() => insertMathSnippet('addition_vertical')}
-                className="px-3 py-2.5 bg-white hover:bg-emerald-50 text-emerald-950 border-2 border-emerald-400 hover:border-emerald-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1.5 shadow-2xs text-center"
-              >
-                <div className="flex items-center gap-1 text-emerald-800 font-black">
-                  <span>➕</span>
-                  <span>إدراج جمع عمودي ({insertCount} مسائل)</span>
-                </div>
-                <div className="text-[11px] font-bold text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200 flex items-center gap-1">
-                  <span>٨ وتحتها ٧ مع +</span>
-                </div>
-              </button>
+                  <button
+                    type="button"
+                    onClick={() => insertMathSnippet('powers_quotient_rule')}
+                    className="px-3 py-2.5 bg-white hover:bg-indigo-50 text-indigo-950 border-2 border-indigo-400 hover:border-indigo-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1 shadow-2xs text-center"
+                    title="قسمة القوى واختزال الكسور (a^m ÷ a^n = a^{m-n})"
+                  >
+                    <div className="flex items-center gap-1 text-indigo-800 font-black">
+                      <span>➗</span>
+                      <span>قسمة القوى ({insertCount} كسور)</span>
+                    </div>
+                    <div className="text-[11px] font-bold text-slate-700 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-200" dir="ltr">
+                      ٧⁸ ÷ ٧³ = ٧⁵
+                    </div>
+                  </button>
 
-              <button
-                type="button"
-                onClick={() => insertMathSnippet('subtraction_horizontal')}
-                className="px-3 py-2.5 bg-white hover:bg-rose-50 text-rose-950 border-2 border-rose-400 hover:border-rose-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1.5 shadow-2xs text-center"
-              >
-                <div className="flex items-center gap-1 text-rose-800 font-black">
-                  <span>➖</span>
-                  <span>إدراج طرح أفقي ({insertCount} مسائل)</span>
-                </div>
-                <div className="text-[11px] font-bold text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200" dir="rtl">
-                  <span>٨ - ٧ = ......</span>
-                </div>
-              </button>
+                  <button
+                    type="button"
+                    onClick={() => insertMathSnippet('powers_power_of_power')}
+                    className="px-3 py-2.5 bg-white hover:bg-purple-50 text-purple-950 border-2 border-purple-400 hover:border-purple-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1 shadow-2xs text-center"
+                    title="قوة القوة وقوة الجداء والكسر ((a^m)^n = a^{m×n})"
+                  >
+                    <div className="flex items-center gap-1 text-purple-800 font-black">
+                      <span>🔁</span>
+                      <span>قوة القوة ({insertCount} مقادير)</span>
+                    </div>
+                    <div className="text-[11px] font-bold text-slate-700 bg-purple-50 px-2 py-0.5 rounded border border-purple-200" dir="ltr">
+                      (٢³)² = ٢⁶ = ٦٤
+                    </div>
+                  </button>
 
-              <button
-                type="button"
-                onClick={() => insertMathSnippet('subtraction_vertical')}
-                className="px-3 py-2.5 bg-white hover:bg-rose-50 text-rose-950 border-2 border-rose-400 hover:border-rose-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1.5 shadow-2xs text-center"
-              >
-                <div className="flex items-center gap-1 text-rose-800 font-black">
-                  <span>➖</span>
-                  <span>إدراج طرح عمودي ({insertCount} مسائل)</span>
-                </div>
-                <div className="text-[11px] font-bold text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200 flex items-center gap-1">
-                  <span>٨ وتحتها ٧ مع -</span>
-                </div>
-              </button>
+                  <button
+                    type="button"
+                    onClick={() => insertMathSnippet('powers_scientific_notation')}
+                    className="px-3 py-2.5 bg-white hover:bg-teal-50 text-teal-950 border-2 border-teal-400 hover:border-teal-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1 shadow-2xs text-center"
+                    title="قوى العدد ١٠ والكتابة بالصيغة العلمية"
+                  >
+                    <div className="flex items-center gap-1 text-teal-800 font-black">
+                      <span>🔬</span>
+                      <span>الصيغة العلمية ({insertCount} أعداد)</span>
+                    </div>
+                    <div className="text-[11px] font-bold text-slate-700 bg-teal-50 px-2 py-0.5 rounded border border-teal-200" dir="ltr">
+                      ٤.٥ × ١٠⁵
+                    </div>
+                  </button>
 
-              <button
-                type="button"
-                onClick={() => insertMathSnippet('division_horizontal')}
-                className="px-3 py-2.5 bg-white hover:bg-sky-50 text-sky-950 border-2 border-sky-400 hover:border-sky-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1.5 shadow-2xs text-center"
-              >
-                <div className="flex items-center gap-1 text-sky-800 font-black">
-                  <span>➗</span>
-                  <span>إدراج قسمة أفقي ({insertCount} مسائل)</span>
-                </div>
-                <div className="text-[11px] font-bold text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200" dir="rtl">
-                  <span>٧ ÷ ٨ = ......</span>
-                </div>
-              </button>
+                  <button
+                    type="button"
+                    onClick={() => insertMathSnippet('powers_compare')}
+                    className="px-3 py-2.5 bg-white hover:bg-emerald-50 text-emerald-950 border-2 border-emerald-400 hover:border-emerald-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1 shadow-2xs text-center"
+                    title="مقارنة القوى بوضع إشارة > أو < أو ="
+                  >
+                    <div className="flex items-center gap-1 text-emerald-800 font-black">
+                      <span>⚖️</span>
+                      <span>مقارنة القوى ({insertCount} أزواج)</span>
+                    </div>
+                    <div className="text-[11px] font-bold text-slate-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200" dir="ltr">
+                      ٢⁴ ( &nbsp;&nbsp; ) ٤²
+                    </div>
+                  </button>
 
-              <button
-                type="button"
-                onClick={() => insertMathSnippet('division_long')}
-                className="px-3 py-2.5 bg-white hover:bg-sky-50 text-sky-950 border-2 border-sky-400 hover:border-sky-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1.5 shadow-2xs text-center"
-                title="إدراج درج القسمة المعكوس ذو 3 خطوط (المقسوم على اليمين والخط الثالث تحت المقسوم عليه)"
-              >
-                <div className="flex items-center gap-1 text-sky-800 font-black">
-                  <span>➗</span>
-                  <span>إدراج قسمة درج (3 خطوط) ({insertCount} مسائل)</span>
-                </div>
-                <div className="text-[11px] font-bold text-sky-900 bg-sky-50 px-2 py-0.5 rounded border border-sky-200">
-                  <span>درج القسمة المعكوس بـ 3 خطوط ⎶</span>
-                </div>
-              </button>
+                  <button
+                    type="button"
+                    onClick={() => insertMathSnippet('powers_equations')}
+                    className="px-3 py-2.5 bg-white hover:bg-rose-50 text-rose-950 border-2 border-rose-400 hover:border-rose-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1 shadow-2xs text-center"
+                    title="المعادلات الأسية وإيجاد المجهول س"
+                  >
+                    <div className="flex items-center gap-1 text-rose-800 font-black">
+                      <span>❓</span>
+                      <span>معادلات أسية ({insertCount} معادلات)</span>
+                    </div>
+                    <div className="text-[11px] font-bold text-slate-700 bg-rose-50 px-2 py-0.5 rounded border border-rose-200" dir="ltr">
+                      ٢^س = ١٦ ⟹ س = ٤
+                    </div>
+                  </button>
 
-              <button
-                type="button"
-                onClick={() => insertMathSnippet('division_long_mirrored')}
-                className="px-3 py-2.5 bg-white hover:bg-cyan-50 text-cyan-950 border-2 border-cyan-400 hover:border-cyan-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1.5 shadow-2xs text-center"
-                title="إدراج درج القسمة بالاتجاه الآخر مع 3 خطوط كاملة"
-              >
-                <div className="flex items-center gap-1 text-cyan-800 font-black">
-                  <span>➗</span>
-                  <span>درج القسمة (الاتجاه الآخر 3 خطوط)</span>
-                </div>
-                <div className="text-[11px] font-bold text-cyan-900 bg-cyan-50 px-2 py-0.5 rounded border border-cyan-200">
-                  <span>المقسوم يساراً مع خط ثالث ⎵</span>
-                </div>
-              </button>
+                  <button
+                    type="button"
+                    onClick={() => insertMathSnippet('powers_fractional_roots')}
+                    className="px-3 py-2.5 bg-white hover:bg-amber-50 text-amber-950 border-2 border-amber-400 hover:border-amber-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1 shadow-2xs text-center"
+                    title="الأسس الكسرية والجذور النونية"
+                  >
+                    <div className="flex items-center gap-1 text-amber-800 font-black">
+                      <span>√</span>
+                      <span>الجذور والأسس الكسرية</span>
+                    </div>
+                    <div className="text-[11px] font-bold text-slate-700 bg-amber-50 px-2 py-0.5 rounded border border-amber-200" dir="ltr">
+                      ١٦^(١/٢) = √١٦ = ٤
+                    </div>
+                  </button>
+                </>
+              )}
 
-              <button
-                type="button"
-                onClick={() => insertMathSnippet('fractions_operation')}
-                className="px-3 py-2.5 bg-white hover:bg-purple-50 text-purple-950 border-2 border-purple-400 hover:border-purple-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1.5 shadow-2xs text-center"
-              >
-                <div className="flex items-center gap-1 text-purple-800 font-black">
-                  <span>🥧</span>
-                  <span>إدراج كسور مثل هذه ({insertCount} مسائل)</span>
-                </div>
-                <div className="text-[11px] font-bold text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200">
-                  <span>جمع وطرح الكسور العادية</span>
-                </div>
-              </button>
+              {/* Other Math Categories */}
+              {(activeMathCategory === 'division' || activeMathCategory === 'all') && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => insertMathSnippet('division_horizontal')}
+                    className="px-3 py-2.5 bg-white hover:bg-sky-50 text-sky-950 border-2 border-sky-400 hover:border-sky-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1.5 shadow-2xs text-center"
+                  >
+                    <div className="flex items-center gap-1 text-sky-800 font-black">
+                      <span>➗</span>
+                      <span>قسمة أفقي ({insertCount} مسائل)</span>
+                    </div>
+                    <div className="text-[11px] font-bold text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200" dir="rtl">
+                      ٧ ÷ ٨ = ......
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => insertMathSnippet('division_long')}
+                    className="px-3 py-2.5 bg-white hover:bg-sky-50 text-sky-950 border-2 border-sky-400 hover:border-sky-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1.5 shadow-2xs text-center"
+                    title="درج القسمة المعكوس بـ 3 خطوط"
+                  >
+                    <div className="flex items-center gap-1 text-sky-800 font-black">
+                      <span>➗</span>
+                      <span>قسمة درج (3 خطوط)</span>
+                    </div>
+                    <div className="text-[11px] font-bold text-sky-900 bg-sky-50 px-2 py-0.5 rounded border border-sky-200">
+                      درج القسمة المعكوس ⎶
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => insertMathSnippet('division_long_mirrored')}
+                    className="px-3 py-2.5 bg-white hover:bg-cyan-50 text-cyan-950 border-2 border-cyan-400 hover:border-cyan-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1.5 shadow-2xs text-center"
+                  >
+                    <div className="flex items-center gap-1 text-cyan-800 font-black">
+                      <span>➗</span>
+                      <span>درج القسمة (الاتجاه الآخر)</span>
+                    </div>
+                    <div className="text-[11px] font-bold text-cyan-900 bg-cyan-50 px-2 py-0.5 rounded border border-cyan-200">
+                      المقسوم يساراً مع خط ثالث ⎵
+                    </div>
+                  </button>
+                </>
+              )}
+
+              {(activeMathCategory === 'addition' || activeMathCategory === 'all') && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => insertMathSnippet('addition_horizontal')}
+                    className="px-3 py-2.5 bg-white hover:bg-emerald-50 text-emerald-950 border-2 border-emerald-400 hover:border-emerald-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1.5 shadow-2xs text-center"
+                  >
+                    <div className="flex items-center gap-1 text-emerald-800 font-black">
+                      <span>➕</span>
+                      <span>جمع أفقي ({insertCount} مسائل)</span>
+                    </div>
+                    <div className="text-[11px] font-bold text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200" dir="rtl">
+                      ٧ + ٨ = ......
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => insertMathSnippet('addition_vertical')}
+                    className="px-3 py-2.5 bg-white hover:bg-emerald-50 text-emerald-950 border-2 border-emerald-400 hover:border-emerald-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1.5 shadow-2xs text-center"
+                  >
+                    <div className="flex items-center gap-1 text-emerald-800 font-black">
+                      <span>➕</span>
+                      <span>جمع عمودي ({insertCount} مسائل)</span>
+                    </div>
+                    <div className="text-[11px] font-bold text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200 flex items-center gap-1">
+                      ٨ وتحتها ٧ مع +
+                    </div>
+                  </button>
+                </>
+              )}
+
+              {(activeMathCategory === 'subtraction' || activeMathCategory === 'all') && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => insertMathSnippet('subtraction_horizontal')}
+                    className="px-3 py-2.5 bg-white hover:bg-rose-50 text-rose-950 border-2 border-rose-400 hover:border-rose-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1.5 shadow-2xs text-center"
+                  >
+                    <div className="flex items-center gap-1 text-rose-800 font-black">
+                      <span>➖</span>
+                      <span>طرح أفقي ({insertCount} مسائل)</span>
+                    </div>
+                    <div className="text-[11px] font-bold text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200" dir="rtl">
+                      ٨ - ٧ = ......
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => insertMathSnippet('subtraction_vertical')}
+                    className="px-3 py-2.5 bg-white hover:bg-rose-50 text-rose-950 border-2 border-rose-400 hover:border-rose-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1.5 shadow-2xs text-center"
+                  >
+                    <div className="flex items-center gap-1 text-rose-800 font-black">
+                      <span>➖</span>
+                      <span>طرح عمودي ({insertCount} مسائل)</span>
+                    </div>
+                    <div className="text-[11px] font-bold text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200 flex items-center gap-1">
+                      ٨ وتحتها ٧ مع -
+                    </div>
+                  </button>
+                </>
+              )}
+
+              {(activeMathCategory === 'fractions' || activeMathCategory === 'all') && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => insertMathSnippet('equation_fraction')}
+                    className="px-3 py-2.5 bg-white hover:bg-amber-50 text-amber-950 border-2 border-amber-400 hover:border-amber-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1.5 shadow-2xs group text-center"
+                  >
+                    <div className="flex items-center gap-1 text-amber-800 font-black">
+                      <span>📐</span>
+                      <span>معادلة كسور ([▢/▢] = ..)</span>
+                    </div>
+                    <div className="text-[11px] font-bold text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200 flex items-center gap-1">
+                      [ ▢ / ▢ ] = ....
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => insertMathSnippet('fractions_operation')}
+                    className="px-3 py-2.5 bg-white hover:bg-purple-50 text-purple-950 border-2 border-purple-400 hover:border-purple-500 rounded-xl text-xs font-black transition cursor-pointer flex flex-col items-center gap-1.5 shadow-2xs text-center"
+                  >
+                    <div className="flex items-center gap-1 text-purple-800 font-black">
+                      <span>🥧</span>
+                      <span>جمع وطرح الكسور</span>
+                    </div>
+                    <div className="text-[11px] font-bold text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200">
+                      كسور عادية موحدة المقامات
+                    </div>
+                  </button>
+                </>
+              )}
             </div>
           </div>
         ) : (
@@ -2592,6 +3249,45 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
           </button>
         </div>
 
+        <div className="h-5 w-[1px] bg-slate-200 mx-0.5" />
+
+        {/* Math Powers, Exponents & Roots Quick Toolbar Tools */}
+        <div className="flex items-center gap-1 bg-amber-50/80 border border-amber-300 p-0.5 rounded-xl">
+          <span className="text-[10px] font-black text-amber-900 px-1">القوى:</span>
+          <button
+            type="button"
+            onClick={() => formatDoc('superscript')}
+            className="px-2 py-1 bg-white hover:bg-amber-100 text-amber-950 rounded-lg font-black text-xs border border-amber-300 transition cursor-pointer"
+            title="أس علوي (Superscript)"
+          >
+            x²
+          </button>
+          <button
+            type="button"
+            onClick={() => formatDoc('subscript')}
+            className="px-2 py-1 bg-white hover:bg-amber-100 text-amber-950 rounded-lg font-black text-xs border border-amber-300 transition cursor-pointer"
+            title="دليل سفلي (Subscript)"
+          >
+            x₁
+          </button>
+          <button
+            type="button"
+            onClick={() => insertMathSnippet('inline_power')}
+            className="px-2 py-1 bg-white hover:bg-amber-100 text-amber-950 rounded-lg font-black text-xs border border-amber-300 transition cursor-pointer"
+            title="إدراج أس مخصص (سⁿ)"
+          >
+            xⁿ
+          </button>
+          <button
+            type="button"
+            onClick={() => insertMathSnippet('inline_root')}
+            className="px-2 py-1 bg-white hover:bg-amber-100 text-amber-950 rounded-lg font-black text-xs border border-amber-300 transition cursor-pointer"
+            title="إدراج جذر تربيعي (√)"
+          >
+            √
+          </button>
+        </div>
+
         <div className="mr-auto flex items-center gap-1">
           <button
             type="button"
@@ -2663,6 +3359,138 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
           </div>
         </div>
       )}
+
+      {/* Question Spacing Quick Control Strip - Direct Control Over Spacing */}
+      <div className="w-full max-w-5xl bg-gradient-to-r from-blue-50 via-indigo-50 to-amber-50 border-2 border-indigo-200 rounded-2xl p-3 mb-3 shadow-xs flex flex-wrap items-center justify-between gap-2.5 text-xs print:hidden">
+        <div className="flex items-center gap-2.5">
+          <div className="w-8 h-8 rounded-xl bg-indigo-600 text-white flex items-center justify-center font-black shadow-xs text-sm">
+            ↕️
+          </div>
+          <div>
+            <div className="font-black text-slate-900 flex items-center gap-1.5 flex-wrap">
+              <span>التحكم بالمسافة بين الأسئلة في الصفحة وWord:</span>
+              <span className="bg-indigo-600 text-white px-2 py-0.5 rounded-md font-black text-xs shadow-2xs">
+                {editorQuestionSpacing} pt {editorQuestionSpacing === 0 ? '(ملتصق تماماً)' : editorQuestionSpacing <= 4 ? '(فائق التقارب ⭐)' : editorQuestionSpacing <= 8 ? '(متقارب)' : '(عادي)'}
+              </span>
+            </div>
+            <div className="text-[11px] text-slate-600 font-medium">
+              التقريب يلغي الفراغات البيضاء نهائياً ويمنع التباعد المفرط بين الأسئلة في ملف Word
+            </div>
+          </div>
+        </div>
+
+        {/* Buttons for quick spacing */}
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <button
+            type="button"
+            onClick={() => applyQuestionSpacing(0)}
+            className={`px-2.5 py-1.5 rounded-xl font-black text-xs transition cursor-pointer border ${
+              editorQuestionSpacing === 0
+                ? 'bg-indigo-600 text-white border-indigo-700 shadow-xs'
+                : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200'
+            }`}
+            title="إلغاء المسافة تماماً (أقرب مسافة ممكنة)"
+          >
+            0pt (ملتصق تماماً)
+          </button>
+
+          <button
+            type="button"
+            onClick={() => applyQuestionSpacing(4)}
+            className={`px-3 py-1.5 rounded-xl font-black text-xs transition cursor-pointer border-2 ${
+              editorQuestionSpacing === 4
+                ? 'bg-indigo-600 text-white border-indigo-700 shadow-xs ring-2 ring-indigo-300'
+                : 'bg-white hover:bg-indigo-50 text-indigo-900 border-indigo-400'
+            }`}
+            title="تقريب الأسئلة لأقصى حد لمنع الفراغات الكبيرة (الخيار الموصى به)"
+          >
+            ⭐ 4pt (فائق التقارب)
+          </button>
+
+          <button
+            type="button"
+            onClick={() => applyQuestionSpacing(8)}
+            className={`px-2.5 py-1.5 rounded-xl font-black text-xs transition cursor-pointer border ${
+              editorQuestionSpacing === 8
+                ? 'bg-indigo-600 text-white border-indigo-700 shadow-xs'
+                : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200'
+            }`}
+          >
+            8pt (متقارب)
+          </button>
+
+          <button
+            type="button"
+            onClick={() => applyQuestionSpacing(14)}
+            className={`px-2.5 py-1.5 rounded-xl font-black text-xs transition cursor-pointer border ${
+              editorQuestionSpacing === 14
+                ? 'bg-indigo-600 text-white border-indigo-700 shadow-xs'
+                : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200'
+            }`}
+          >
+            14pt (متوسط)
+          </button>
+
+          <button
+            type="button"
+            onClick={() => applyQuestionSpacing(22)}
+            className={`px-2.5 py-1.5 rounded-xl font-black text-xs transition cursor-pointer border ${
+              editorQuestionSpacing === 22
+                ? 'bg-indigo-600 text-white border-indigo-700 shadow-xs'
+                : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200'
+            }`}
+          >
+            22pt (متباعد)
+          </button>
+
+          <div className="h-6 w-[1px] bg-indigo-200 mx-0.5 hidden sm:block" />
+
+          {/* Stepper buttons - and + */}
+          <div className="flex items-center gap-1 bg-white border border-slate-200 rounded-xl p-0.5">
+            <button
+              type="button"
+              onClick={() => applyQuestionSpacing(Math.max(0, editorQuestionSpacing - 2))}
+              className="w-6 h-6 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 font-black flex items-center justify-center cursor-pointer text-xs"
+              title="تقليل المسافة بمقدار 2pt"
+            >
+              -
+            </button>
+            <span className="text-xs font-black px-1.5 text-slate-900">{editorQuestionSpacing}pt</span>
+            <button
+              type="button"
+              onClick={() => applyQuestionSpacing(Math.min(60, editorQuestionSpacing + 2))}
+              className="w-6 h-6 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 font-black flex items-center justify-center cursor-pointer text-xs"
+              title="زيادة المسافة بمقدار 2pt"
+            >
+              +
+            </button>
+          </div>
+
+          {/* Clean Spacers Button */}
+          <button
+            type="button"
+            onClick={cleanAllEmptySpacers}
+            className="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 text-white rounded-xl font-black text-xs transition flex items-center gap-1 shadow-2xs cursor-pointer"
+            title="إزالة جميع الأسطر الفارغة والفواصل الزائدة نهائياً بين الأسئلة"
+          >
+            <span>🧹 تنظيف الفراغات بين الأسئلة</span>
+          </button>
+
+          {/* Toggle Example Borders Button - User requested feature */}
+          <button
+            type="button"
+            onClick={() => toggleExampleBorders(!hideExampleBorders)}
+            className={`px-3 py-1.5 rounded-xl font-black text-xs transition cursor-pointer border flex items-center gap-1.5 ${
+              hideExampleBorders
+                ? 'bg-emerald-600 hover:bg-emerald-700 text-white border-emerald-700 shadow-2xs'
+                : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-300'
+            }`}
+            title={hideExampleBorders ? 'المربعات مخفية حول الأمثلة والتمارين (انقر لإظهارها)' : 'انقر لإخفاء المربعات حول الأمثلة والتمارين'}
+          >
+            <span>{hideExampleBorders ? '✓ المربعات مخفية حول الأمثلة ⭐' : '🔲 إخفاء المربعات حول الأمثلة'}</span>
+          </button>
+        </div>
+      </div>
 
       {/* Main Word Document A4 Sheet Simulation */}
       <div 
@@ -2802,6 +3630,31 @@ export const ExamQuestionPaperEditor: React.FC<ExamQuestionPaperEditorProps> = (
             </p>
           )}
         </div>
+      )}
+
+      {/* Mobile-Friendly Word Export & PDF Print Modal */}
+      {showExportModal && (
+        <ExamExportModal
+          paper={{
+            id: paperId,
+            title: docTitle,
+            teacherId: paper?.teacherId || currentTeacherId,
+            teacherName: headerConfig.teacherName,
+            subject: headerConfig.subject,
+            classId: paper?.classId || defaultClassId,
+            className: headerConfig.className,
+            dateCreated: paper?.dateCreated || new Date().toISOString(),
+            headerConfig,
+            showHeader,
+            showFooter,
+            contentHtml: editorRef.current?.innerHTML || paper?.contentHtml || '',
+            status
+          }}
+          isOpen={true}
+          initialQuestionSpacing={editorQuestionSpacing}
+          initialHideExampleBorders={hideExampleBorders}
+          onClose={() => setShowExportModal(false)}
+        />
       )}
     </div>
   );

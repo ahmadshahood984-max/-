@@ -28,6 +28,7 @@ import {
 import { ExamQuestionPaper, Teacher, Class } from '../types';
 import { ExamQuestionPaperEditor } from './ExamQuestionPaperEditor';
 import { exportExamPaperToWord } from '../lib/wordExport';
+import { ExamExportModal } from './ExamExportModal';
 
 interface ExamQuestionsManagerProps {
   currentUserRole: 'teacher' | 'director';
@@ -51,6 +52,7 @@ export const ExamQuestionsManager: React.FC<ExamQuestionsManagerProps> = ({
   const [editingPaper, setEditingPaper] = useState<ExamQuestionPaper | null>(null);
   const [isCreatingNew, setIsCreatingNew] = useState<boolean>(false);
   const [paperToDelete, setPaperToDelete] = useState<ExamQuestionPaper | null>(null);
+  const [exportingPaper, setExportingPaper] = useState<ExamQuestionPaper | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedClassFilter, setSelectedClassFilter] = useState<string>('');
   const [selectedSubjectFilter, setSelectedSubjectFilter] = useState<string>('');
@@ -334,12 +336,12 @@ export const ExamQuestionsManager: React.FC<ExamQuestionsManagerProps> = ({
 
                 {/* Action Buttons */}
                 <div className="flex items-center gap-2 flex-wrap shrink-0">
-                  {/* Export Word Button - Primary highlight requested by user */}
+                  {/* Export Word Button - Primary highlight with full mobile options */}
                   <button
                     type="button"
-                    onClick={() => exportExamPaperToWord(paper)}
-                    className="px-3.5 py-2 bg-gradient-to-r from-blue-700 to-indigo-700 hover:from-blue-800 hover:to-indigo-800 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-xs"
-                    title="تصدير ملف وورد (.doc) جاهز للتعديل والطباعة في Microsoft Word"
+                    onClick={() => setExportingPaper(paper)}
+                    className="px-3.5 py-2 bg-gradient-to-r from-blue-700 to-indigo-700 hover:from-blue-800 hover:to-indigo-800 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-xs active:scale-95"
+                    title="تصدير وحفظ ملف وورد (.doc) أو PDF بالهاتف"
                   >
                     <FileDown className="w-4 h-4" />
                     <span>تصدير Word 📥</span>
@@ -407,6 +409,15 @@ export const ExamQuestionsManager: React.FC<ExamQuestionsManagerProps> = ({
             </div>
           </div>
         </div>
+      )}
+
+      {/* Mobile-Friendly Word & PDF Export Modal */}
+      {exportingPaper && (
+        <ExamExportModal
+          paper={exportingPaper}
+          isOpen={true}
+          onClose={() => setExportingPaper(null)}
+        />
       )}
     </div>
   );

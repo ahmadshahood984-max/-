@@ -21,6 +21,7 @@ import {
   Edit,
   UserCheck,
   Building,
+  Globe,
   ArrowLeftRight,
   Lock,
   Unlock,
@@ -73,7 +74,6 @@ import { generateEvaluationCardImage, shareOrDownloadEvaluationImage } from '../
 import { WhatsAppMessageCustomizerModal } from './WhatsAppMessageCustomizerModal';
 import { PortalDesignerBadge } from './PortalDesignerBadge';
 import { Teacher, Student, Parent, Class, AbsenceExcuse, Announcement, Grade, Attendance, Message, SentGradeSheet, ExamQuestionPaper } from '../types';
-import { ExamQuestionsManager } from './ExamQuestionsManager';
 import { sanitizeAndDeduplicateStudents, getSafeStudentKey } from '../lib/studentDeduplicator';
 import { GradeSheetSignatures } from './GradeSheetSignatures';
 import { SealAndSignaturesModal } from './SealAndSignaturesModal';
@@ -81,34 +81,36 @@ import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
 import { db } from '../lib/firebase';
 import { collection, addDoc, setDoc, deleteDoc, doc, serverTimestamp, writeBatch, getDocs } from 'firebase/firestore';
-import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead } from '../lib/firestoreTracker';
+import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead, checkDailyRollover, fetchCentralizedConsumptionOnce, resetCentralizedFirestoreConsumption } from '../lib/firestoreTracker';
+import { calculateStorageUsageReport, measureLiveCloudStorageAudit, StorageUsageReport } from '../lib/storageUsage';
 import { forceRefreshDataFromFirestore, persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate } from '../lib/firebaseSync';
-import { isFirestoreQuotaExceeded, markFirestoreQuotaExceeded, isQuotaError } from '../lib/quotaManager';
+import { isFirestoreQuotaExceeded, markFirestoreQuotaExceeded, isQuotaError, resetFirestoreQuotaBreaker } from '../lib/quotaManager';
 import { getStoredWelcomeMessages, saveWelcomeMessages, DEFAULT_WELCOME_MESSAGES, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { Bell, Activity, Info, Smartphone } from 'lucide-react';
 import { sendParentPushNotification, sendBroadcastPushNotification, getRegisteredPushDevicesCount } from '../lib/pushDispatcher';
 
-const getShareableOrigin = () => {
+const getShareableOrigin = (preferPublished = false) => {
   if (typeof window === 'undefined') return '';
-  return window.location.origin;
+  const origin = window.location.origin;
+  // If preferPublished is requested and running in AI Studio dev mode,
+  // use the public shared app URL (active after clicking 'Share' in AI Studio header).
+  // Otherwise, default to live origin so it works immediately without 404 errors!
+  if (preferPublished && origin.includes('ais-dev-')) {
+    return origin.replace('ais-dev-', 'ais-pre-');
+  }
+  return origin;
 };
 
 const copyToClipboard = async (text: string): Promise<boolean> => {
-  if (typeof window === 'undefined') return false;
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return true;
-    } catch (err) {
-      console.warn('navigator.clipboard failed, trying fallback:', err);
-    }
-  }
+  if (typeof window === 'undefined' || !text) return false;
+
+  // Layer 1: Synchronous execCommand while user gesture token is active
   try {
     const textArea = document.createElement('textarea');
     textArea.value = text;
     textArea.style.position = 'fixed';
     textArea.style.top = '0';
-    textArea.style.left = '0';
+    textArea.style.left = '-9999px';
     textArea.style.width = '2em';
     textArea.style.height = '2em';
     textArea.style.padding = '0';
@@ -117,17 +119,29 @@ const copyToClipboard = async (text: string): Promise<boolean> => {
     textArea.style.boxShadow = 'none';
     textArea.style.background = 'transparent';
     textArea.style.fontSize = '16px';
+    textArea.setAttribute('readonly', '');
     document.body.appendChild(textArea);
     textArea.focus();
     textArea.select();
-    textArea.setSelectionRange(0, 99999);
+    textArea.setSelectionRange(0, text.length);
     const successful = document.execCommand('copy');
     document.body.removeChild(textArea);
-    return successful;
+    if (successful) return true;
   } catch (err) {
-    console.error('Fallback copy to clipboard failed:', err);
-    return false;
+    console.warn('execCommand failed, trying navigator.clipboard:', err);
   }
+
+  // Layer 2: Modern Clipboard API
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (err) {
+      console.warn('navigator.clipboard failed:', err);
+    }
+  }
+
+  return false;
 };
 
 interface DirectorPortalProps {
@@ -191,17 +205,21 @@ export default function DirectorPortal({
   saveExamQuestionPaper,
   deleteExamQuestionPaper
 }: DirectorPortalProps) {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'teachers' | 'students' | 'excuses' | 'announcements' | 'grades' | 'settings' | 'sharing-links' | 'tuition' | 'messages' | 'subjects' | 'classes' | 'attendance' | 'student-registration' | 'questions'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'teachers' | 'students' | 'excuses' | 'announcements' | 'grades' | 'settings' | 'sharing-links' | 'tuition' | 'messages' | 'subjects' | 'classes' | 'attendance' | 'student-registration'>('dashboard');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [copiedState, setCopiedState] = useState<{ [key: string]: boolean }>({});
+  const [copyToastMessage, setCopyToastMessage] = useState<string | null>(null);
+  const [usePublishedLinks, setUsePublishedLinks] = useState<boolean>(false);
 
   const handleCopy = async (text: string, key: string, label?: string) => {
     const success = await copyToClipboard(text);
     if (success) {
       setCopiedState(prev => ({ ...prev, [key]: true }));
+      setCopyToastMessage(label ? `تم نسخ ${label} بنجاح! جاهز للإرسال الآن 📋` : 'تم نسخ الرابط بنجاح! جاهز للإرسال 📋');
       setTimeout(() => {
         setCopiedState(prev => ({ ...prev, [key]: false }));
-      }, 2000);
+        setCopyToastMessage(null);
+      }, 3000);
     } else {
       triggerClipboardExport(
         label ? `نسخ ${label}` : 'نسخ الرابط',
@@ -219,9 +237,23 @@ export default function DirectorPortal({
     simulatedReads: 0,
     simulatedWrites: 0,
     totalReads: 0,
-    totalWrites: 0
+    totalWrites: 0,
+    firestoreReads: 0,
+    firestoreWrites: 0
   });
   const [isMetricsModalOpen, setIsMetricsModalOpen] = useState(false);
+  const [storageReport, setStorageReport] = useState<StorageUsageReport>(() => calculateStorageUsageReport());
+  const [isAuditingStorage, setIsAuditingStorage] = useState(false);
+
+  const handleRunCloudStorageAudit = async () => {
+    setIsAuditingStorage(true);
+    try {
+      const report = await measureLiveCloudStorageAudit();
+      setStorageReport(report);
+    } finally {
+      setIsAuditingStorage(false);
+    }
+  };
   const [showWelcomeModal, setShowWelcomeModal] = useState<boolean>(() => {
     return !sessionStorage.getItem('director_welcome_dismissed');
   });
@@ -281,8 +313,11 @@ export default function DirectorPortal({
   const handleManualSync = async () => {
     setIsSyncingData(true);
     try {
-      // 1. Pull latest data from Firestore if available
-      await forceRefreshDataFromFirestore();
+      // 0. Reset client quota circuit-breaker to test live connection
+      resetFirestoreQuotaBreaker();
+
+      // 1. Pull latest data from Firestore server when user clicks manual sync
+      await forceRefreshDataFromFirestore({ forceServer: true });
 
       // 2. Dispatch custom storage events so App.tsx and other portals sync immediately
       window.dispatchEvent(new CustomEvent('school_storage_update'));
@@ -357,8 +392,14 @@ export default function DirectorPortal({
   React.useEffect(() => {
     return subscribeToFirestoreMetrics((data) => {
       setFirestoreMetrics(data);
-    });
+    }, { syncCentral: true });
   }, []);
+
+  React.useEffect(() => {
+    if (isMetricsModalOpen || activeTab === 'data-cleanup') {
+      setStorageReport(prev => calculateStorageUsageReport(prev.cloudCounts));
+    }
+  }, [isMetricsModalOpen, activeTab, students.length, grades.length, attendance.length, messages.length, announcements.length, excuses.length]);
 
   // Function to send a physical FCM Push Notification via REST API
   const sendPushNotificationViaFCM = async (parentId: string, title: string, body: string) => {
@@ -5119,7 +5160,9 @@ ${directivesFormatted}
           setMessages(updated);
           localStorage.setItem('school_messages', JSON.stringify(updated));
           if (db) {
-            deleteDoc(doc(db, 'notifications', itemId)).catch(() => {});
+            deleteDoc(doc(db, 'notifications', itemId)).then(() => {
+              trackFirestoreWrite(1, 'حذف إشعار رسالة');
+            }).catch(() => {});
           }
           alert(`✅ تم حذف الرسالة بنجاح.`);
         }
@@ -5248,6 +5291,7 @@ ${directivesFormatted}
           window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_messages', value: JSON.stringify(remaining) } }));
           if (db && !isFirestoreQuotaExceeded()) {
             getDocs(collection(db, 'notifications')).then(snap => {
+              trackFirestoreRead(snap.size || 1, `قراءة الإشعارات للحذف (${snap.size})`);
               let b = writeBatch(db);
               let c = 0;
               snap.forEach(d => {
@@ -5255,9 +5299,11 @@ ${directivesFormatted}
                 c++;
                 if (c % 400 === 0) {
                   b.commit();
+                  b = writeBatch(db);
                 }
               });
               if (c % 400 !== 0) b.commit();
+              if (c > 0) trackFirestoreWrite(c, `حذف دفعة إشعارات (${c})`);
             }).catch((err: any) => {
               if (isQuotaError(err)) markFirestoreQuotaExceeded(err);
             });
@@ -6196,7 +6242,12 @@ ${directivesFormatted}
               {/* Firestore metrics monitoring badge */}
               <button
                 type="button"
-                onClick={() => setIsMetricsModalOpen(true)}
+                onClick={() => {
+                  checkDailyRollover();
+                  fetchCentralizedConsumptionOnce().catch(() => {});
+                  setStorageReport(prev => calculateStorageUsageReport(prev.cloudCounts));
+                  setIsMetricsModalOpen(true);
+                }}
                 className={`relative p-1.5 rounded-lg border flex items-center gap-1 transition cursor-pointer ${
                   firestoreMetrics.totalReads >= 36000
                     ? 'bg-rose-950/40 text-rose-400 border-rose-900/50'
@@ -6454,31 +6505,6 @@ ${directivesFormatted}
             </button>
 
             <button
-              id="dir-nav-questions"
-              onClick={() => {
-                setActiveTab('questions');
-                setIsMobileMenuOpen(false);
-              }}
-              className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-xl text-right text-[11px] font-bold transition-all duration-200 cursor-pointer ${
-                activeTab === 'questions' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-300 hover:bg-slate-900 hover:text-white'
-              }`}
-            >
-              <FileText className="w-3.5 h-3.5 shrink-0 text-amber-400" />
-              <span>الأسئلة (ملف المذاكرات)</span>
-              {examQuestions.some(q => q.status === 'submitted') ? (
-                <span className="mr-auto px-2 py-0.5 rounded-full text-[8.5px] font-black bg-rose-600 text-white animate-pulse shadow-xs">
-                  {examQuestions.filter(q => q.status === 'submitted').length} بانتظار الاعتماد 🔔
-                </span>
-              ) : examQuestions.length > 0 ? (
-                <span className={`mr-auto px-1.5 py-0.5 rounded-full text-[8px] font-bold ${
-                  activeTab === 'questions' ? 'bg-indigo-500/40 text-white' : 'bg-amber-500/20 text-amber-300 border border-amber-400/30'
-                }`}>
-                  {examQuestions.length}
-                </span>
-              ) : null}
-            </button>
-
-            <button
               id="dir-nav-tuition"
               onClick={() => {
                 setActiveTab('tuition');
@@ -6614,38 +6640,8 @@ ${directivesFormatted}
                 </div>
               </div>
 
-              {/* Exam Questions Alert for Director */}
-              {examQuestions.some(q => q.status === 'submitted') && (
-                <div className="bg-gradient-to-r from-rose-600 via-indigo-600 to-indigo-700 text-white p-4 sm:p-5 rounded-2xl shadow-md border border-white/20 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4 animate-fade-in">
-                  <div className="flex items-center gap-3">
-                    <div className="w-11 h-11 rounded-2xl bg-white/20 backdrop-blur-xs flex items-center justify-center font-black text-xl shrink-0">
-                      🔔
-                    </div>
-                    <div>
-                      <h4 className="font-black text-sm sm:text-base text-white flex items-center gap-2">
-                        <span>وصلت أوراق أسئلة مذاكرة جديدة من المعلمين!</span>
-                        <span className="bg-white text-rose-700 text-[10px] font-black px-2 py-0.5 rounded-full">
-                          {examQuestions.filter(q => q.status === 'submitted').length} بانتظار الاعتماد
-                        </span>
-                      </h4>
-                      <p className="text-xs text-indigo-100 mt-1">
-                        قام المعلمون بكتابة وإرسال نماذج أسئلة جديدة للمذاكرات للاعتماد الرسمي وتصديرها بصيغة وورد (Word).
-                      </p>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('questions')}
-                    className="px-4 py-2.5 bg-white hover:bg-slate-100 text-indigo-900 rounded-xl text-xs font-black transition cursor-pointer shadow-sm flex items-center justify-center gap-2 shrink-0"
-                  >
-                    <FileText className="w-4 h-4 text-indigo-600" />
-                    <span>مراجعة واعتماد الأسئلة فوراً ⚡</span>
-                  </button>
-                </div>
-              )}
-
               {/* Subject Addition Button / Quick Actions Row */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 gap-4">
                 <button
                   onClick={() => setShowSubjectModal(true)}
                   className="group relative overflow-hidden bg-white hover:bg-slate-50 text-slate-850 p-5 rounded-2xl transition-all duration-300 flex items-center justify-between gap-4 cursor-pointer border border-slate-200 hover:border-indigo-200 hover:shadow-lg text-right w-full"
@@ -6656,24 +6652,6 @@ ${directivesFormatted}
                   <div className="flex-1">
                     <span className="block font-black text-sm text-indigo-600">إضافة مادة دراسية جديدة 📚</span>
                     <span className="block text-[10px] text-slate-500 mt-1 font-sans">إضافة مادة دراسية جديدة وتفعيلها لتخصيصها للمعلمين والدرجات</span>
-                  </div>
-                </button>
-
-                <button
-                  onClick={() => setActiveTab('questions')}
-                  className="group relative overflow-hidden bg-white hover:bg-slate-50 text-slate-850 p-5 rounded-2xl transition-all duration-300 flex items-center justify-between gap-4 cursor-pointer border border-slate-200 hover:border-amber-200 hover:shadow-lg text-right w-full"
-                >
-                  <div className="p-3 bg-amber-50 text-amber-600 rounded-xl group-hover:scale-110 transition-transform duration-300">
-                    <FileText className="w-6 h-6 text-amber-500" />
-                  </div>
-                  <div className="flex-1">
-                    <div className="flex items-center justify-between">
-                      <span className="block font-black text-sm text-amber-700">ملف الأسئلة والمذاكرات (Word) 📄</span>
-                      <span className="text-[10px] bg-amber-100 text-amber-800 font-bold px-2 py-0.5 rounded-full">
-                        {examQuestions.length} نماذج
-                      </span>
-                    </div>
-                    <span className="block text-[10px] text-slate-500 mt-1 font-sans">استعراض نماذج أسئلة المعلمين واعتمادها وتصديرها بصيغة وورد جاهزة</span>
                   </div>
                 </button>
               </div>
@@ -7053,23 +7031,79 @@ ${directivesFormatted}
                   <ArrowLeftRight className="w-4 h-4 text-indigo-600" />
                 </h3>
                 <p className="text-xs text-slate-500 leading-relaxed mb-4">
-                  نعم، يمكنك إرسال رابط مخصص لكل فئة ليعملوا عليه بمفردهم. عند فتح الرابط المخصص، سيتم إخفاء شريط التنقل العلوي تلقائياً وتثبيت البوابة المختارة فقط لضمان الخصوصية وسهولة الاستخدام. انسخ الروابط أدناه أو اضغط على الزر لتجربتها مباشرة:
+                  نعم، يمكنك إرسال رابط مخصص لكل فئة ليعملوا عليه بمفردهم. عند فتح الرابط المخصص، سيتم إخفاء شريط التنقل العلوي وتثبيت البوابة المختارة فقط لضمان الخصوصية وسهولة الاستخدام. انسخ الروابط أو أرسلها بالواتساب مباشرة:
                 </p>
 
-                {/* Important Sandbox Notice */}
-                <div className="mb-4 p-3 bg-amber-50/80 border border-amber-200 rounded-xl text-right">
-                  <span className="text-xs font-bold text-amber-900 block mb-1">⚠️ تنبيه هام حول تجربة الروابط في بيئة التطوير:</span>
-                  <p className="text-[11px] text-amber-800 leading-relaxed">
-                    الرابط المولد أدناه يحتوي على نطاق التطوير الخاص بك (<span className="font-mono bg-amber-100 px-1 py-0.5 rounded text-amber-950">ais-dev-...</span>) وهو يعمل لديك فقط. عند قيامك بمشاركة التطبيق بشكل عام (Publish أو Share)، ستقوم بمشاركة النطاق العام للجميع (<span className="font-mono bg-amber-100 px-1 py-0.5 rounded text-amber-950">ais-pre-...</span>) وسيعمل هذا الرابط تلقائياً لدى جميع المعلمين وأولياء الأمور دون أي مشاكل.
-                  </p>
+                {/* Link Mode Switcher */}
+                <div className="mb-4 bg-slate-100 p-3 rounded-2xl border border-slate-200 flex flex-wrap items-center justify-between gap-3 text-right">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-slate-800">اختر نوع الرابط المراد استخدامه:</span>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setUsePublishedLinks(false)}
+                      className={`px-3.5 py-2 rounded-xl text-xs font-extrabold transition cursor-pointer flex items-center gap-1.5 shadow-xs ${
+                        !usePublishedLinks
+                          ? 'bg-emerald-600 text-white shadow-emerald-200'
+                          : 'bg-white text-slate-700 hover:bg-slate-200 border border-slate-300'
+                      }`}
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>⚡ الرابط المباشر الفوري (شغال الآن 100%)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setUsePublishedLinks(true)}
+                      className={`px-3.5 py-2 rounded-xl text-xs font-extrabold transition cursor-pointer flex items-center gap-1.5 shadow-xs ${
+                        usePublishedLinks
+                          ? 'bg-indigo-600 text-white shadow-indigo-200'
+                          : 'bg-white text-slate-700 hover:bg-slate-200 border border-slate-300'
+                      }`}
+                    >
+                      <Globe className="w-3.5 h-3.5" />
+                      <span>🌐 رابط النشر العام (ais-pre)</span>
+                    </button>
+                  </div>
                 </div>
+
+                {/* Explanation Banner */}
+                {!usePublishedLinks ? (
+                  <div className="mb-4 p-3.5 bg-emerald-50 border border-emerald-200 rounded-xl text-right flex items-start gap-3">
+                    <div className="p-2 bg-emerald-100 text-emerald-800 rounded-lg shrink-0 mt-0.5">
+                      <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+                    </div>
+                    <div>
+                      <span className="text-xs font-bold text-emerald-950 block mb-1">
+                        ✅ الرابط المباشر الفوري نشط وشغال الآن بدون أي خطأ (404 Page Not Found):
+                      </span>
+                      <p className="text-[11px] text-emerald-900 leading-relaxed">
+                        هذا الرابط يعمل فوراً على هاتفك ومتصفحك الحالي. عند الضغط على <strong>«فتح للتجربة ↗»</strong> أو نسخه وفتحه، ستفتح بوابة المعلمين فوراً ودون أية مشاكل.
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mb-4 p-3.5 bg-amber-50 border border-amber-200 rounded-xl text-right flex items-start gap-3">
+                    <div className="p-2 bg-amber-100 text-amber-800 rounded-lg shrink-0 mt-0.5">
+                      <AlertTriangle className="w-5 h-5 text-amber-600" />
+                    </div>
+                    <div>
+                      <span className="text-xs font-bold text-amber-950 block mb-1">
+                        ⚠️ تنبيه هام حول سبب ظهور خطأ (Page not found 404):
+                      </span>
+                      <p className="text-[11px] text-amber-900 leading-relaxed">
+                        رابط النشر العام <code className="bg-amber-100 px-1 py-0.5 rounded text-[10px] font-mono">ais-pre-...</code> هو الرابط المخصص للمشاركة مع المعلمين وأولياء الأمور ليعمل لديهم دون تسجيل. <strong>لكن Google AI Studio لا يُفعّل هذا الرابط ويُظهر صفحة 404 إلا بعد الضغط على زر «Share» (مشاركة) في الشريط العلوي لمنصة Google AI Studio.</strong> فور ضغطك على Share في المنصة، يعمل هذا الرابط لجميع المعلمين في أي هاتف أو متصفح خارجي.
+                      </p>
+                    </div>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
                   {/* Director Direct Link Card */}
                   <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl flex flex-col justify-between gap-3 text-right">
                     <div>
                       <div className="flex items-center gap-2 mb-1 justify-end">
-                        <span className="text-xs font-bold text-slate-900">رابط لوحة المدير العام المباشر</span>
+                        <span className="text-xs font-bold text-slate-900">رابط لوحة المدير العام المباشر 🏢</span>
                         <Building className="w-4 h-4 text-slate-700" />
                       </div>
                       <p className="text-[10px] text-slate-500 leading-relaxed">
@@ -7080,44 +7114,53 @@ ${directivesFormatted}
                       <input
                         type="text"
                         readOnly
-                        value={`${getShareableOrigin()}${window.location.pathname}?portal=director`}
-                        className="text-[10px] font-mono bg-white border border-slate-200 px-2 py-1.5 rounded text-slate-600 w-full text-center select-all"
+                        value={`${getShareableOrigin(usePublishedLinks)}${window.location.pathname}?portal=director`}
+                        onClick={(e) => (e.target as HTMLInputElement).select()}
+                        className="text-[10px] font-mono bg-white border border-slate-200 px-2 py-2 rounded-lg text-slate-700 w-full text-center select-all focus:outline-none focus:ring-2 focus:ring-slate-400"
                       />
                       <div className="flex gap-2">
                         <a
-                          href={`${getShareableOrigin()}${window.location.pathname}?portal=director`}
+                          href={`${getShareableOrigin(false)}${window.location.pathname}?portal=director`}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="bg-slate-800 hover:bg-slate-900 text-white text-[11px] font-bold px-3 py-2 rounded-lg text-center transition flex-1 cursor-pointer shadow-xs inline-flex items-center justify-center gap-1"
+                          title="فتح الرابط الفوري المباشر للتجربة دون خطأ 404"
                         >
                           <span>فتح للتجربة ↗</span>
                         </a>
                         <button
-                          onClick={async () => {
-                            const url = `${getShareableOrigin()}${window.location.pathname}?portal=director`;
-                            try {
-                              await navigator.clipboard.writeText(url);
-                              alert('تم نسخ رابط لوحة المدير المباشر بنجاح! 📋');
-                            } catch (err) {
-                              alert('تمنع حما�ية المتصفح النسخ التلقائي في هذا الإطار. يرجى تحديد النص في المربع ونسخه يدوياً (Ctrl+C).');
-                            }
-                          }}
-                          className="bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 text-[11px] font-bold px-3 py-2 rounded-lg transition cursor-pointer shadow-xs"
+                          type="button"
+                          onClick={() => handleCopy(`${getShareableOrigin(usePublishedLinks)}${window.location.pathname}?portal=director`, 'director_portal_dash', 'رابط لوحة المدير العام')}
+                          className={`text-[11px] font-bold px-3 py-2 rounded-lg transition cursor-pointer flex-1 flex items-center justify-center gap-1 shadow-xs border ${
+                            copiedState['director_portal_dash']
+                              ? 'bg-emerald-600 text-white border-emerald-600'
+                              : 'bg-white hover:bg-slate-50 text-slate-800 border-slate-300'
+                          }`}
                         >
-                          نسخ الرابط
+                          {copiedState['director_portal_dash'] ? (
+                            <>
+                              <Check className="w-3.5 h-3.5 text-white" />
+                              <span>تم النسخ! ✓</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3.5 h-3.5 text-slate-500" />
+                              <span>نسخ الرابط</span>
+                            </>
+                          )}
                         </button>
                       </div>
                     </div>
                   </div>
 
                   {/* Teacher Direct Link Card */}
-                  <div className="p-4 bg-indigo-50/50 rounded-xl border border-indigo-100 flex flex-col justify-between gap-3 text-right">
+                  <div className="p-4 bg-indigo-50/70 rounded-xl border border-indigo-200 shadow-xs flex flex-col justify-between gap-3 text-right">
                     <div>
                       <div className="flex items-center gap-2 mb-1 justify-end">
-                        <span className="text-xs font-bold text-indigo-950">رابط بوابة المعلمين المباشر</span>
+                        <span className="text-xs font-bold text-indigo-950">رابط بوابة المعلمين المباشر 👨‍🏫</span>
                         <Users className="w-4 h-4 text-indigo-600" />
                       </div>
-                      <p className="text-[10px] text-slate-500 leading-relaxed">
+                      <p className="text-[10px] text-slate-600 leading-relaxed">
                         أرسل هذا الرابط للمعلمين للدخول برمزهم السري ورؤية واجهة التحضير ورصد الدرجات فقط.
                       </p>
                     </div>
@@ -7125,44 +7168,67 @@ ${directivesFormatted}
                       <input
                         type="text"
                         readOnly
-                        value={`${getShareableOrigin()}${window.location.pathname}?portal=teacher`}
-                        className="text-[10px] font-mono bg-white border border-slate-200 px-2 py-1.5 rounded text-slate-600 w-full text-center select-all"
+                        value={`${getShareableOrigin(usePublishedLinks)}${window.location.pathname}?portal=teacher`}
+                        onClick={(e) => (e.target as HTMLInputElement).select()}
+                        className="text-[10px] font-mono bg-white border border-indigo-200 px-2 py-2 rounded-lg text-slate-700 w-full text-center select-all focus:outline-none focus:ring-2 focus:ring-indigo-400"
                       />
+
+                      {/* Direct WhatsApp Share to Teachers */}
+                      <a
+                        href={`https://api.whatsapp.com/send?text=${encodeURIComponent(
+                          `السلام عليكم ورحمة الله وبركاته 🌹\nالسادة الزملاء المعلمون والمعلمات (المدرسة الدولية):\n\n📌 رابط الدخول المباشر لبوابة المعلمين:\n${getShareableOrigin(usePublishedLinks)}${window.location.pathname}?portal=teacher\n\n✅ يمكنكم عبر هذا الرابط رصد درجات وتقييمات الطلاب الشهرية، ومتابعة الحضور من هواتفكم مباشرة دون الحاجة لأي تسجيل دخول مسبق.\n\n💡 ملاحظة: يرجى حفظ الرابط أو تثبيته على الشاشة الرئيسية للهاتف.`
+                        )}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold px-3 py-2 rounded-lg text-center transition flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
+                      >
+                        <MessageSquare className="w-3.5 h-3.5" />
+                        <span>إرسال بالواتساب للمعلمين 💬</span>
+                      </a>
+
                       <div className="flex gap-2">
                         <a
-                          href={`${getShareableOrigin()}${window.location.pathname}?portal=teacher`}
+                          href={`${getShareableOrigin(false)}${window.location.pathname}?portal=teacher`}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-bold px-3 py-2 rounded-lg text-center transition flex-1 cursor-pointer shadow-xs inline-flex items-center justify-center gap-1"
+                          title="فتح الرابط الفوري المباشر للتجربة دون خطأ 404"
                         >
                           <span>فتح للتجربة ↗</span>
                         </a>
                         <button
-                          onClick={async () => {
-                            const url = `${getShareableOrigin()}${window.location.pathname}?portal=teacher`;
-                            try {
-                              await navigator.clipboard.writeText(url);
-                              alert('تم نسخ رابط بوابة المعلمين المباشر بنجاح!');
-                            } catch (err) {
-                              alert('تمنع حماية المتصفح النسخ التلقائي في هذا الإطار. يرجى تحديد النص في المربع ونسخه يدوياً (Ctrl+C).');
-                            }
-                          }}
-                          className="bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 text-[11px] font-bold px-3 py-2 rounded-lg transition cursor-pointer shadow-xs"
+                          type="button"
+                          onClick={() => handleCopy(`${getShareableOrigin(usePublishedLinks)}${window.location.pathname}?portal=teacher`, 'teacher_portal_dash', 'رابط بوابة المعلمين')}
+                          className={`text-[11px] font-bold px-3 py-2 rounded-lg transition cursor-pointer flex-1 flex items-center justify-center gap-1 shadow-xs border ${
+                            copiedState['teacher_portal_dash']
+                              ? 'bg-emerald-600 text-white border-emerald-600'
+                              : 'bg-white hover:bg-slate-50 text-slate-800 border-slate-300'
+                          }`}
                         >
-                          نسخ الرابط
+                          {copiedState['teacher_portal_dash'] ? (
+                            <>
+                              <Check className="w-3.5 h-3.5 text-white" />
+                              <span>تم النسخ! ✓</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3.5 h-3.5 text-slate-500" />
+                              <span>نسخ الرابط</span>
+                            </>
+                          )}
                         </button>
                       </div>
                     </div>
                   </div>
 
                   {/* Parent Direct Link Card */}
-                  <div className="p-4 bg-sky-50/50 rounded-xl border border-sky-100 flex flex-col justify-between gap-3 text-right">
+                  <div className="p-4 bg-sky-50/70 rounded-xl border border-sky-200 shadow-xs flex flex-col justify-between gap-3 text-right">
                     <div>
                       <div className="flex items-center gap-2 mb-1 justify-end">
-                        <span className="text-xs font-bold text-sky-950">رابط بوابة أولياء الأمور المباشر</span>
+                        <span className="text-xs font-bold text-sky-950">رابط بوابة أولياء الأمور والطلاب 🎓</span>
                         <GraduationCap className="w-4 h-4 text-sky-600" />
                       </div>
-                      <p className="text-[10px] text-slate-500 leading-relaxed">
+                      <p className="text-[10px] text-slate-600 leading-relaxed">
                         أرسل هذا الرابط لأولياء الأمور لمتابعة مستويات أبنائهم وإرسال تبريرات الغياب والتواصل مباشرة.
                       </p>
                     </div>
@@ -7170,31 +7236,54 @@ ${directivesFormatted}
                       <input
                         type="text"
                         readOnly
-                        value={`${getShareableOrigin()}${window.location.pathname}?portal=parent`}
-                        className="text-[10px] font-mono bg-white border border-slate-200 px-2 py-1.5 rounded text-slate-600 w-full text-center select-all"
+                        value={`${getShareableOrigin(usePublishedLinks)}${window.location.pathname}?portal=parent`}
+                        onClick={(e) => (e.target as HTMLInputElement).select()}
+                        className="text-[10px] font-mono bg-white border border-sky-200 px-2 py-2 rounded-lg text-slate-700 w-full text-center select-all focus:outline-none focus:ring-2 focus:ring-sky-400"
                       />
+
+                      {/* Direct WhatsApp Share to Parents */}
+                      <a
+                        href={`https://api.whatsapp.com/send?text=${encodeURIComponent(
+                          `السلام عليكم ورحمة الله وبركاته 🌹\nالسادة أولياء الأمور الكرام (المدرسة الدولية):\n\n📌 رابط متابعة نتائج وأداء الطلاب (بوابة أولياء الأمور):\n${getShareableOrigin(usePublishedLinks)}${window.location.pathname}?portal=parent\n\n✅ يمكنكم عبر هذا الرابط الاطلاع المباشر على نتائج وتقارير أبنائكم وإرسال تبريرات الغياب من هواتفكم الذكية بسهولة.`
+                        )}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold px-3 py-2 rounded-lg text-center transition flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
+                      >
+                        <MessageSquare className="w-3.5 h-3.5" />
+                        <span>إرسال بالواتساب لأولياء الأمور 💬</span>
+                      </a>
+
                       <div className="flex gap-2">
                         <a
-                          href={`${getShareableOrigin()}${window.location.pathname}?portal=parent`}
+                          href={`${getShareableOrigin(false)}${window.location.pathname}?portal=parent`}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="bg-sky-600 hover:bg-sky-700 text-white text-[11px] font-bold px-3 py-2 rounded-lg text-center transition flex-1 cursor-pointer shadow-xs inline-flex items-center justify-center gap-1"
+                          title="فتح الرابط الفوري المباشر للتجربة دون خطأ 404"
                         >
                           <span>فتح للتجربة ↗</span>
                         </a>
                         <button
-                          onClick={async () => {
-                            const url = `${getShareableOrigin()}${window.location.pathname}?portal=parent`;
-                            try {
-                              await navigator.clipboard.writeText(url);
-                              alert('تم نسخ رابط بوابة أولياء الأمور المباشر بنجاح!');
-                            } catch (err) {
-                              alert('تمنع حماية المتصفح النسخ التلقائي في هذا الإطار. يرجى تحديد النص في المربع ونسخه يدوياً (Ctrl+C).');
-                            }
-                          }}
-                          className="bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 text-[11px] font-bold px-3 py-2 rounded-lg transition cursor-pointer shadow-xs"
+                          type="button"
+                          onClick={() => handleCopy(`${getShareableOrigin(usePublishedLinks)}${window.location.pathname}?portal=parent`, 'parent_portal_dash', 'رابط بوابة أولياء الأمور')}
+                          className={`text-[11px] font-bold px-3 py-2 rounded-lg transition cursor-pointer flex-1 flex items-center justify-center gap-1 shadow-xs border ${
+                            copiedState['parent_portal_dash']
+                              ? 'bg-emerald-600 text-white border-emerald-600'
+                              : 'bg-white hover:bg-slate-50 text-slate-800 border-slate-300'
+                          }`}
                         >
-                          نسخ الرابط
+                          {copiedState['parent_portal_dash'] ? (
+                            <>
+                              <Check className="w-3.5 h-3.5 text-white" />
+                              <span>تم النسخ! ✓</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3.5 h-3.5 text-slate-500" />
+                              <span>نسخ الرابط</span>
+                            </>
+                          )}
                         </button>
                       </div>
                     </div>
@@ -11415,29 +11504,6 @@ ${sampleEval}
             </motion.div>
           )}
 
-          {/* Exam Questions & Question Bank Tab */}
-          {activeTab === 'questions' && (
-            <motion.div
-              key="questions-management"
-              initial={{ opacity: 0, y: 15 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -15 }}
-              className="space-y-6 text-right"
-            >
-              <ExamQuestionsManager
-                currentUserRole="director"
-                classes={classes}
-                examQuestions={examQuestions}
-                onSavePaper={(paper) => {
-                  if (saveExamQuestionPaper) saveExamQuestionPaper(paper);
-                }}
-                onDeletePaper={(id) => {
-                  if (deleteExamQuestionPaper) deleteExamQuestionPaper(id);
-                }}
-              />
-            </motion.div>
-          )}
-
           {/* Tuition Management Tab */}
           {activeTab === 'tuition' && (
             <motion.div
@@ -12955,6 +13021,50 @@ ${sampleEval}
                     أداة تحكم متقدمة ومباشرة للمدير لحذف أي سجلات أو درجات أو محادثات لمنع التراكم في التطبيق
                   </p>
                 </div>
+                <button
+                  type="button"
+                  onClick={handleRunCloudStorageAudit}
+                  disabled={isAuditingStorage}
+                  className="self-start sm:self-auto px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-xs"
+                >
+                  {isAuditingStorage ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Database className="w-3.5 h-3.5" />}
+                  <span>تحديث قياس سعة التخزين</span>
+                </button>
+              </div>
+
+              {/* Live Storage Capacity Overview Banner */}
+              <div className="bg-white border border-indigo-100 p-4 rounded-2xl shadow-xs space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <div className="p-2 rounded-xl bg-indigo-50 text-indigo-600">
+                      <Database className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h4 className="font-extrabold text-xs sm:text-sm text-slate-800">سعة التخزين السحابية الحالية (Firestore Free 1 GB)</h4>
+                      <p className="text-[10px] text-slate-500">المساحة المستخدمة فعلياً والمتبقي من الباقة المجانية</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 text-xs font-bold">
+                    <span className="px-2.5 py-1 rounded-lg bg-indigo-50 text-indigo-700 font-mono">
+                      المستخدم: {storageReport.estimatedFirestoreFormatted}
+                    </span>
+                    <span className="px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-700 font-mono">
+                      المتبقي: {storageReport.remainingFreeFormatted}
+                    </span>
+                  </div>
+                </div>
+                <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full transition-all duration-500 ${
+                      storageReport.percentUsed >= 85
+                        ? 'bg-rose-500'
+                        : storageReport.percentUsed >= 60
+                        ? 'bg-amber-500'
+                        : 'bg-indigo-600'
+                    }`}
+                    style={{ width: `${Math.max(1, Math.min(100, storageReport.percentUsed))}%` }}
+                  />
+                </div>
               </div>
 
               {/* Informative alert box explaining the role of this page */}
@@ -13267,23 +13377,37 @@ ${sampleEval}
                         <input
                           type="text"
                           readOnly
-                          value={`${getShareableOrigin()}${window.location.pathname}?portal=parent`}
+                          value={`${getShareableOrigin(usePublishedLinks)}${window.location.pathname}?portal=parent`}
                           className="w-full text-[10px] font-mono bg-slate-50 border border-slate-200 px-2 py-1.5 rounded-lg text-slate-600 text-center select-all focus:outline-none"
                         />
                       </div>
+                      {/* Direct WhatsApp Share to Parents */}
+                      <a
+                        href={`https://api.whatsapp.com/send?text=${encodeURIComponent(
+                          `السلام عليكم ورحمة الله وبركاته 🌹\nالسادة أولياء الأمور الكرام (المدرسة الدولية):\n\n📌 رابط متابعة نتائج وأداء الطلاب (بوابة أولياء الأمور):\n${getShareableOrigin(usePublishedLinks)}${window.location.pathname}?portal=parent\n\n✅ يمكنكم عبر هذا الرابط الاطلاع المباشر على نتائج وتقارير أبنائكم وإرسال تبريرات الغياب من هواتفكم الذكية بسهولة.`
+                        )}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold px-3 py-2 rounded-lg text-center transition flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
+                      >
+                        <MessageSquare className="w-3.5 h-3.5" />
+                        <span>إرسال بالواتساب لأولياء الأمور 💬</span>
+                      </a>
+
                       <div className="flex gap-2">
                         <a
-                          href={`${getShareableOrigin()}${window.location.pathname}?portal=parent`}
+                          href={`${getShareableOrigin(false)}${window.location.pathname}?portal=parent`}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="bg-sky-600 hover:bg-sky-700 text-white text-[11px] font-bold px-3 py-2 rounded-lg text-center transition flex-1 flex items-center justify-center gap-1 cursor-pointer"
+                          title="فتح الرابط الفوري المباشر للتجربة دون خطأ 404"
                         >
                           <span>فتح ↗</span>
                         </a>
                         <button
                           type="button"
-                          onClick={() => handleCopy(`${getShareableOrigin()}${window.location.pathname}?portal=parent`, 'parent_portal', 'رابط بوابة أولياء الأمور والطلاب')}
-                          className={`text-[11px] font-bold px-3 py-2 rounded-lg transition cursor-pointer flex items-center justify-center gap-1.5 ${
+                          onClick={() => handleCopy(`${getShareableOrigin(usePublishedLinks)}${window.location.pathname}?portal=parent`, 'parent_portal', 'رابط بوابة أولياء الأمور والطلاب')}
+                          className={`text-[11px] font-bold px-3 py-2 rounded-lg transition cursor-pointer flex-1 flex items-center justify-center gap-1.5 ${
                             copiedState['parent_portal']
                               ? 'bg-emerald-600 text-white border border-emerald-600 shadow-sm'
                               : 'bg-white hover:bg-slate-50 text-slate-700 border border-slate-200'
@@ -13328,23 +13452,39 @@ ${sampleEval}
                         <input
                           type="text"
                           readOnly
-                          value={`${getShareableOrigin()}${window.location.pathname}?portal=teacher`}
+                          value={`${getShareableOrigin(usePublishedLinks)}${window.location.pathname}?portal=teacher`}
+                          onClick={(e) => (e.target as HTMLInputElement).select()}
                           className="w-full text-[10px] font-mono bg-slate-50 border border-slate-200 px-2 py-1.5 rounded-lg text-slate-600 text-center select-all focus:outline-none"
                         />
                       </div>
+
+                      {/* Direct WhatsApp Share to Teachers */}
+                      <a
+                        href={`https://api.whatsapp.com/send?text=${encodeURIComponent(
+                          `السلام عليكم ورحمة الله وبركاته 🌹\nالسادة الزملاء المعلمون والمعلمات (المدرسة الدولية):\n\n📌 رابط الدخول المباشر لبوابة المعلمين:\n${getShareableOrigin(usePublishedLinks)}${window.location.pathname}?portal=teacher\n\n✅ يمكنكم عبر هذا الرابط رصد درجات وتقييمات الطلاب الشهرية، ومتابعة الحضور من هواتفكم مباشرة دون الحاجة لأي تسجيل دخول مسبق.\n\n💡 ملاحظة: يرجى حفظ الرابط أو تثبيته على الشاشة الرئيسية للهاتف.`
+                        )}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold px-3 py-2 rounded-lg text-center transition flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
+                      >
+                        <MessageSquare className="w-3.5 h-3.5" />
+                        <span>إرسال بالواتساب للمعلمين 💬</span>
+                      </a>
+
                       <div className="flex gap-2">
                         <a
-                          href={`${getShareableOrigin()}${window.location.pathname}?portal=teacher`}
+                          href={`${getShareableOrigin(false)}${window.location.pathname}?portal=teacher`}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-bold px-3 py-2 rounded-lg text-center transition flex-1 flex items-center justify-center gap-1 cursor-pointer"
+                          title="فتح الرابط الفوري المباشر للتجربة دون خطأ 404"
                         >
                           <span>فتح ↗</span>
                         </a>
                         <button
                           type="button"
-                          onClick={() => handleCopy(`${getShareableOrigin()}${window.location.pathname}?portal=teacher`, 'teacher_portal', 'رابط بوابة المعلمين')}
-                          className={`text-[11px] font-bold px-3 py-2 rounded-lg transition cursor-pointer flex items-center justify-center gap-1.5 ${
+                          onClick={() => handleCopy(`${getShareableOrigin(usePublishedLinks)}${window.location.pathname}?portal=teacher`, 'teacher_portal', 'رابط بوابة المعلمين')}
+                          className={`text-[11px] font-bold px-3 py-2 rounded-lg transition cursor-pointer flex-1 flex items-center justify-center gap-1.5 ${
                             copiedState['teacher_portal']
                               ? 'bg-emerald-600 text-white border border-emerald-600 shadow-sm'
                               : 'bg-white hover:bg-slate-50 text-slate-700 border border-slate-200'
@@ -13389,22 +13529,23 @@ ${sampleEval}
                         <input
                           type="text"
                           readOnly
-                          value={`${getShareableOrigin()}${window.location.pathname}?portal=director`}
+                          value={`${getShareableOrigin(usePublishedLinks)}${window.location.pathname}?portal=director`}
                           className="w-full text-[10px] font-mono bg-slate-50 border border-slate-200 px-2 py-1.5 rounded-lg text-slate-600 text-center select-all focus:outline-none"
                         />
                       </div>
                       <div className="flex gap-2">
                         <a
-                          href={`${getShareableOrigin()}${window.location.pathname}?portal=director`}
+                          href={`${getShareableOrigin(false)}${window.location.pathname}?portal=director`}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="bg-slate-800 hover:bg-slate-900 text-white text-[11px] font-bold px-3 py-2 rounded-lg text-center transition flex-1 flex items-center justify-center gap-1 cursor-pointer"
+                          title="فتح الرابط الفوري المباشر للتجربة دون خطأ 404"
                         >
                           <span>فتح ↗</span>
                         </a>
                         <button
                           type="button"
-                          onClick={() => handleCopy(`${getShareableOrigin()}${window.location.pathname}?portal=director`, 'director_portal', 'رابط لوحة المدير العام')}
+                          onClick={() => handleCopy(`${getShareableOrigin(usePublishedLinks)}${window.location.pathname}?portal=director`, 'director_portal', 'رابط لوحة المدير العام')}
                           className={`text-[11px] font-bold px-3 py-2 rounded-lg transition cursor-pointer flex items-center justify-center gap-1.5 ${
                             copiedState['director_portal']
                               ? 'bg-emerald-600 text-white border border-emerald-600 shadow-sm'
@@ -13858,7 +13999,7 @@ ${sampleEval}
                 initial={{ opacity: 0, scale: 0.95 }}
                 animate={{ opacity: 1, scale: 1 }}
                 exit={{ opacity: 0, scale: 0.95 }}
-                className="bg-white rounded-3xl max-w-xl w-full p-6 shadow-2xl border border-slate-100 space-y-6 text-right"
+                className="bg-white rounded-3xl max-w-xl w-full max-h-[90vh] overflow-y-auto p-6 shadow-2xl border border-slate-100 space-y-5 text-right"
                 style={{ direction: 'rtl' }}
               >
                 <div className="flex items-center justify-between border-b border-slate-100 pb-4">
@@ -13881,10 +14022,31 @@ ${sampleEval}
                 </div>
 
                 <div className="space-y-4">
+                  {/* Daily Auto-Reset & Centralized Sync Status Banner */}
+                  <div className="bg-emerald-50 border border-emerald-200/90 rounded-xl p-2.5 flex flex-col gap-1 text-xs">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+                        <span className="font-bold text-emerald-900">العداد المركزي الموحد نشط (system_stats/consumption) 🔄</span>
+                      </div>
+                      <span className="text-[10px] bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-md font-bold">
+                        {firestoreMetrics.syncedFromCentral ? 'متصل بالسحابة حيّاً ✅' : 'مزامنة تلقائية'}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between text-[11px] text-emerald-700 font-medium">
+                      <span>يتصفر العداد آلياً كل يوم جديد (12:00 ليلاً) ويرصد عمليات جميع الأجهزة</span>
+                      {firestoreMetrics.lastOperation && (
+                        <span className="text-[10px] text-emerald-800 font-bold truncate max-w-[200px]" title={firestoreMetrics.lastOperation}>
+                          آخر عملية: {firestoreMetrics.lastOperation}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
                   {/* Reads Bar */}
                   <div className="space-y-2">
                     <div className="flex justify-between items-center text-xs">
-                      <span className="font-bold text-slate-700">عمليات القراءة اليومية (Reads)</span>
+                      <span className="font-bold text-slate-700">إجمالي القراءات اليومية لجميع الأجهزة (Reads)</span>
                       <span className="font-mono text-slate-500 font-bold">
                         {firestoreMetrics.totalReads.toLocaleString()} / 50,000 (
                         {Math.min(100, Math.round((firestoreMetrics.totalReads / 50000) * 100))}%
@@ -13907,12 +14069,12 @@ ${sampleEval}
                     {/* Breakdown */}
                     <div className="grid grid-cols-2 gap-3 bg-slate-50 p-2.5 rounded-xl text-[11px] text-slate-500">
                       <div>
-                        <span>عملياتك الفعلية: </span>
+                        <span>قراءات هذا الجهاز: </span>
                         <strong className="font-mono text-slate-700">{firestoreMetrics.reads.toLocaleString()}</strong>
                       </div>
                       <div>
-                        <span>استعلامات وتحديثات المستخدمين: </span>
-                        <strong className="font-mono text-slate-700">{firestoreMetrics.simulatedReads.toLocaleString()}</strong>
+                        <span>العداد المركزي السحابي: </span>
+                        <strong className="font-mono text-indigo-700">{(firestoreMetrics.firestoreReads || 0).toLocaleString()}</strong>
                       </div>
                     </div>
                   </div>
@@ -13920,7 +14082,7 @@ ${sampleEval}
                   {/* Writes Bar */}
                   <div className="space-y-2">
                     <div className="flex justify-between items-center text-xs">
-                      <span className="font-bold text-slate-700">عمليات الكتابة اليومية (Writes)</span>
+                      <span className="font-bold text-slate-700">إجمالي الكتابات اليومية لجميع الأجهزة (Writes)</span>
                       <span className="font-mono text-slate-500 font-bold">
                         {firestoreMetrics.totalWrites.toLocaleString()} / 20,000 (
                         {Math.min(100, Math.round((firestoreMetrics.totalWrites / 20000) * 100))}%
@@ -13943,57 +14105,107 @@ ${sampleEval}
                     {/* Breakdown */}
                     <div className="grid grid-cols-2 gap-3 bg-slate-50 p-2.5 rounded-xl text-[11px] text-slate-500">
                       <div>
-                        <span>عملياتك الفعلية: </span>
+                        <span>كتابات هذا الجهاز: </span>
                         <strong className="font-mono text-slate-700">{firestoreMetrics.writes.toLocaleString()}</strong>
                       </div>
                       <div>
-                        <span>تعديلات وإشعارات المستخدمين: </span>
-                        <strong className="font-mono text-slate-700">{firestoreMetrics.simulatedWrites.toLocaleString()}</strong>
+                        <span>العداد المركزي السحابي: </span>
+                        <strong className="font-mono text-indigo-700">{(firestoreMetrics.firestoreWrites || 0).toLocaleString()}</strong>
                       </div>
                     </div>
                   </div>
 
-                  {/* Quick Testing Actions */}
+                  {/* Storage Capacity & Remaining Free Space Section */}
+                  <div className="bg-indigo-50/60 border border-indigo-200/80 rounded-2xl p-4 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <div className="p-1.5 bg-indigo-100 text-indigo-700 rounded-lg">
+                          <Database className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <span className="font-extrabold text-xs text-slate-800 block">سعة التخزين المستخدمة والمتبقية (Storage)</span>
+                          <span className="text-[10px] text-slate-500">الحد المجاني الكلي في Spark Plan: 1,024 MB (1 GiB)</span>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleRunCloudStorageAudit}
+                        disabled={isAuditingStorage}
+                        className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white rounded-lg text-[10px] font-bold flex items-center gap-1 transition cursor-pointer"
+                      >
+                        {isAuditingStorage ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+                        <span>فحص السحابة الآن</span>
+                      </button>
+                    </div>
+
+                    {/* Progress & Exact Numbers */}
+                    <div className="space-y-1.5">
+                      <div className="flex justify-between items-center text-xs">
+                        <span className="font-bold text-indigo-900">
+                          المستخدم: <span className="font-mono">{storageReport.estimatedFirestoreFormatted}</span>
+                        </span>
+                        <span className="font-bold text-emerald-700">
+                          المتبقي مجاناً: <span className="font-mono">{storageReport.remainingFreeFormatted}</span> ({storageReport.percentUsed.toFixed(3)}%)
+                        </span>
+                      </div>
+                      <div className="w-full h-3 bg-white rounded-full overflow-hidden border border-indigo-100">
+                        <div
+                          className={`h-full transition-all duration-500 ${
+                            storageReport.percentUsed >= 85
+                              ? 'bg-rose-500'
+                              : storageReport.percentUsed >= 60
+                              ? 'bg-amber-500'
+                              : 'bg-indigo-600'
+                          }`}
+                          style={{ width: `${Math.max(1.5, Math.min(100, storageReport.percentUsed))}%` }}
+                        />
+                      </div>
+                    </div>
+
+                    {/* Category Breakdown */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                      {storageReport.breakdown.slice(0, 6).map(cat => (
+                        <div key={cat.id} className="bg-white/90 border border-indigo-100 rounded-xl px-2.5 py-1.5 flex items-center justify-between gap-2 text-[10px]">
+                          <span className="text-slate-700 font-bold truncate" title={cat.label}>{cat.label}</span>
+                          <span className="font-mono font-extrabold text-indigo-700 shrink-0">{cat.formattedSize}</span>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Local Browser Cache & Cloud Collection Counts */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-indigo-100 text-[10px] text-slate-600">
+                      <span>
+                        ذاكرة المتصفح المحلية (Cache): <strong className="font-mono text-slate-800">{storageReport.localStorageFormatted}</strong> / 5 MB ({storageReport.localStoragePercent.toFixed(1)}%)
+                      </span>
+                      {storageReport.cloudCounts && (
+                        <span className="font-mono text-indigo-700 font-bold">
+                          مستندات السحابة: علامات {storageReport.cloudCounts.consolidatedGrades} | إشعارات {storageReport.cloudCounts.notifications} | مفاتيح {storageReport.cloudCounts.schoolLiveData}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Quick Centralized Controls */}
                   <div className="bg-slate-50 p-3 rounded-2xl border border-slate-100 space-y-2">
-                    <span className="text-[10px] text-slate-400 block font-bold">أدوات تحكم محاكاة الضغط وتجربة الحالات (Testing Area)</span>
+                    <span className="text-[10px] text-slate-400 block font-bold">إدارة ومزامنة العداد المركزي (System Stats Controls)</span>
                     <div className="flex gap-2">
                       <button
                         type="button"
                         onClick={() => {
-                          const raw = localStorage.getItem('school_firestore_metrics');
-                          if (raw) {
-                            const parsed = JSON.parse(raw);
-                            parsed.simulatedReads += 5000;
-                            parsed.simulatedWrites += 1000;
-                            parsed.totalReads = parsed.reads + parsed.simulatedReads;
-                            parsed.totalWrites = parsed.writes + parsed.simulatedWrites;
-                            localStorage.setItem('school_firestore_metrics', JSON.stringify(parsed));
-                            window.dispatchEvent(new CustomEvent('school_firestore_metrics_updated', { detail: parsed }));
-                          }
+                          fetchCentralizedConsumptionOnce().catch(() => {});
                         }}
                         className="flex-1 bg-slate-900 text-white text-[11px] font-bold py-1.5 px-3 rounded-xl hover:bg-slate-800 transition cursor-pointer"
                       >
-                        ⚡ محاكاة نشاط ذروة (+5,000 قراءة)
+                        ⚡ تحديث فوري من السحابة
                       </button>
                       <button
                         type="button"
                         onClick={() => {
-                          const today = new Date().toISOString().split('T')[0];
-                          const resetMetrics = {
-                            date: today,
-                            reads: 0,
-                            writes: 0,
-                            simulatedReads: 0,
-                            simulatedWrites: 0,
-                            totalReads: 0,
-                            totalWrites: 0
-                          };
-                          localStorage.setItem('school_firestore_metrics', JSON.stringify(resetMetrics));
-                          window.dispatchEvent(new CustomEvent('school_firestore_metrics_updated', { detail: resetMetrics }));
+                          resetCentralizedFirestoreConsumption().catch(() => {});
                         }}
                         className="bg-slate-200 text-slate-700 text-[11px] font-bold py-1.5 px-3 rounded-xl hover:bg-slate-300 transition cursor-pointer"
                       >
-                        🔄 تصفير العداد
+                        🔄 تصفير العداد المركزي
                       </button>
                     </div>
                   </div>
@@ -17045,6 +17257,21 @@ ${smartUrl}
               </div>
             );
           })()}
+        </AnimatePresence>
+
+        {/* Floating Copy Toast Notification */}
+        <AnimatePresence>
+          {copyToastMessage && (
+            <motion.div
+              initial={{ opacity: 0, y: 20, scale: 0.95 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 20, scale: 0.95 }}
+              className="fixed bottom-6 right-6 z-50 bg-emerald-600 text-white px-5 py-3 rounded-2xl shadow-2xl text-xs font-bold flex items-center gap-2.5 border border-emerald-400"
+            >
+              <CheckCircle2 className="w-5 h-5 text-emerald-100 shrink-0" />
+              <span>{copyToastMessage}</span>
+            </motion.div>
+          )}
         </AnimatePresence>
 
         {/* Portal Bottom Designer Signature - Aligned completely to the left */}

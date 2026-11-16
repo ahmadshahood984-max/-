@@ -419,21 +419,28 @@ export default function ParentPortal({
   const effectiveGrades = (grades && grades.length > 0) ? grades : directGrades;
   const effectiveMessages = (messages && messages.length > 0) ? messages : directMessages;
 
-  // Complete fetch function from Firestore directly to guarantee data on any new browser/device
-  const fetchAllParentDataFromFirestore = async () => {
-    if (isFirestoreQuotaExceeded()) return;
+  // Complete cache-first fetch function from Firestore:
+  // On reopen (forceServer = false), serves IndexedDB persistentLocalCache first (0 server reads!).
+  // Pass forceServer = true on manual user refresh to fetch latest updates from server.
+  const fetchAllParentDataFromFirestore = async (forceServer: boolean = false) => {
     try {
-      const { doc, getDoc } = await import('firebase/firestore');
-      const { db } = await import('../lib/firebase');
-      if (!db || isFirestoreQuotaExceeded()) return;
+      const { doc } = await import('firebase/firestore');
+      const { db, getDocCacheFirst } = await import('../lib/firebase');
+      const { trackFirestoreRead } = await import('../lib/firestoreTracker');
+      if (!db) return;
 
-      const fetchDocWithTimeout = async (docRef: any, ms = 1200): Promise<any> => {
+      const effectiveForceServer = isFirestoreQuotaExceeded() ? false : forceServer;
+
+      const fetchDocCacheOrServer = async (docRef: any, ms = 1200): Promise<any> => {
         try {
-          if (isFirestoreQuotaExceeded()) return null;
-          return await Promise.race([
-            getDoc(docRef),
-            new Promise<null>((resolve) => setTimeout(() => resolve(null), ms))
-          ]);
+          const { snap, fromCache } = await getDocCacheFirst(docRef, {
+            forceServer: effectiveForceServer,
+            timeoutMs: ms
+          });
+          if (snap && !fromCache) {
+            trackFirestoreRead(1, 'بيانات ولي الأمر');
+          }
+          return snap;
         } catch (err: any) {
           if (isQuotaError(err)) {
             markFirestoreQuotaExceeded(err);
@@ -442,18 +449,25 @@ export default function ParentPortal({
         }
       };
 
-      // Run parallel fetches with strict 1.2s timeout so connections never hang
-      // CRITICAL: Student grades query is strictly scoped to this student via where("studentId", "==", currentUserId)
+      // Run parallel cache-first fetches scoped to this student
       const targetStudentId = activeChild?.id || loggedInStudentId;
       const targetUnifiedNo = activeChild?.unifiedNo || activeChild?.rollNo;
 
       const [sentSnap, msgsSnap, evalSnap, monthSnap, studentGrades] = await Promise.all([
-        fetchDocWithTimeout(doc(db, 'school_live_data', 'school_sent_grade_sheets')),
-        fetchDocWithTimeout(doc(db, 'school_live_data', 'school_messages')),
-        fetchDocWithTimeout(doc(db, 'school_live_data', 'school_monthly_evaluations')),
-        fetchDocWithTimeout(doc(db, 'school_live_data', 'school_evaluation_current_month')),
-        targetStudentId ? fetchStudentGradesOnDemand(targetStudentId, undefined, targetUnifiedNo) : Promise.resolve([])
+        fetchDocCacheOrServer(doc(db, 'school_live_data', 'school_sent_grade_sheets')),
+        fetchDocCacheOrServer(doc(db, 'school_live_data', 'school_messages')),
+        fetchDocCacheOrServer(doc(db, 'school_live_data', 'school_monthly_evaluations')),
+        fetchDocCacheOrServer(doc(db, 'school_live_data', 'school_evaluation_current_month')),
+        targetStudentId ? fetchStudentGradesOnDemand(targetStudentId, undefined, targetUnifiedNo, effectiveForceServer) : Promise.resolve([])
       ]);
+
+      if (sentSnap && sentSnap.exists()) {
+        const sheetsData = sentSnap.data()?.data;
+        if (Array.isArray(sheetsData) && sheetsData.length > 0) {
+          setSentGradeSheets(prev => deduplicateGradeSheets([...prev, ...sheetsData]));
+          localStorage.setItem('school_sent_grade_sheets', JSON.stringify(sheetsData));
+        }
+      }
 
       if (Array.isArray(studentGrades) && studentGrades.length > 0) {
         setDirectGrades(prev => {
@@ -565,20 +579,20 @@ export default function ParentPortal({
     };
     window.addEventListener('school_storage_update', handleStorageUpdate);
 
-    // Initial direct Firestore sync on mount
-    fetchAllParentDataFromFirestore();
+    // Initial cache-first Firestore load on mount (serves IndexedDB cache first -> 0 server reads on reopen)
+    fetchAllParentDataFromFirestore(false);
 
     return () => window.removeEventListener('school_storage_update', handleStorageUpdate);
   }, []);
 
-  // Manual Refresh handler for parents to instantly sync latest grades and sheets
+  // Manual Refresh handler for parents to intentionally sync latest grades and sheets from server
   const [isParentRefreshing, setIsParentRefreshing] = useState(false);
   const [parentRefreshSuccess, setParentRefreshSuccess] = useState(false);
 
   const handleParentManualRefresh = async () => {
     setIsParentRefreshing(true);
     try {
-      await fetchAllParentDataFromFirestore();
+      await fetchAllParentDataFromFirestore(true);
       setParentRefreshSuccess(true);
       setTimeout(() => setParentRefreshSuccess(false), 3000);
     } finally {
@@ -660,7 +674,8 @@ export default function ParentPortal({
     const st = child || activeChild;
     if (!st) return '';
     const identifier = st.unifiedNo || st.rollNo || st.id;
-    return `${window.location.origin}${window.location.pathname}?portal=parent&unified=${encodeURIComponent(identifier)}`;
+    const origin = window.location.origin;
+    return `${origin}${window.location.pathname}?portal=parent&unified=${encodeURIComponent(identifier)}`;
   };
 
   const handleCopySmartLink = async (url: string) => {
@@ -819,15 +834,19 @@ ${url}
       return;
     }
 
-    // D. If not found locally (fresh browser/phone session), immediately query Firestore cloud directly in the background
+    // D. If not found in localStorage, check IndexedDB persistent cache first before hitting server
     (async () => {
-      if (isFirestoreQuotaExceeded()) return;
       try {
-        const { doc, getDoc } = await import('firebase/firestore');
-        const { db } = await import('../lib/firebase');
-        if (db && !isFirestoreQuotaExceeded()) {
-          const snap = await getDoc(doc(db, 'school_live_data', 'school_students'));
-          if (snap.exists()) {
+        const { doc } = await import('firebase/firestore');
+        const { db, getDocCacheFirst } = await import('../lib/firebase');
+        const { trackFirestoreRead } = await import('../lib/firestoreTracker');
+        if (db) {
+          const { snap, fromCache } = await getDocCacheFirst(
+            doc(db, 'school_live_data', 'school_students'),
+            { forceServer: false, timeoutMs: 2500 }
+          );
+          if (snap && !fromCache) trackFirestoreRead(1, 'التحقق من رقم الطالب الموحد');
+          if (snap && snap.exists()) {
             const allSt = snap.data()?.data;
             if (Array.isArray(allSt)) {
               const remoteMatch = findStudentByUnifiedInput(targetInput, allSt);
@@ -1219,6 +1238,7 @@ ${url}
             const { doc, setDoc } = await import('firebase/firestore');
             const { db } = await import('../lib/firebase');
             if (db && !isFirestoreQuotaExceeded()) {
+              const { trackFirestoreWrite } = await import('../lib/firestoreTracker');
               await setDoc(doc(db, 'fcm_tokens', selectedParentId), {
                 parentId: selectedParentId,
                 parentName: activeParent?.name || 'ولي أمر',
@@ -1228,6 +1248,7 @@ ${url}
                 permission: 'granted',
                 updatedAt: Date.now()
               }, { merge: true });
+              trackFirestoreWrite(1, 'تسجيل جهاز الإشعارات');
               console.log("[Push Registration] Device successfully registered for parent:", selectedParentId);
             }
           } catch (storeErr: any) {
@@ -1323,6 +1344,7 @@ ${url}
             const { doc, setDoc } = await import('firebase/firestore');
             const { db } = await import('../lib/firebase');
             if (db && !isFirestoreQuotaExceeded()) {
+              const { trackFirestoreWrite } = await import('../lib/firestoreTracker');
               await setDoc(doc(db, 'fcm_tokens', selectedParentId), {
                 parentId: selectedParentId,
                 parentName: activeParent?.name || 'ولي أمر',
@@ -1331,6 +1353,7 @@ ${url}
                 permission: 'granted',
                 updatedAt: Date.now()
               }, { merge: true });
+              trackFirestoreWrite(1, 'تحديث توكن الإشعارات');
             }
           } catch (e: any) {
             if (isQuotaError(e)) {
@@ -1370,15 +1393,16 @@ ${url}
       }
 
       try {
-        const { collection, getDocs, query, limit, where } = await import('firebase/firestore');
-        const { db } = await import('../lib/firebase');
+        const { collection, query, limit, where } = await import('firebase/firestore');
+        const { db, getDocsCacheFirst } = await import('../lib/firebase');
+        const { trackFirestoreRead } = await import('../lib/firestoreTracker');
 
-        if (!db || isFirestoreQuotaExceeded()) {
+        if (!db) {
           setIsFirebaseLive(false);
           return;
         }
 
-        // Fetch on-demand scoped specifically to notifications for this parent/student
+        // Fetch cache-first scoped specifically to notifications for this parent/student
         const q = selectedParentId 
           ? query(
               collection(db, 'notifications'),
@@ -1390,10 +1414,13 @@ ${url}
               limit(25)
             );
 
-        const snapshot = await Promise.race([
-          getDocs(q),
-          new Promise<null>((resolve) => setTimeout(() => resolve(null), 2500))
-        ]);
+        const { snap: snapshot, fromCache } = await getDocsCacheFirst(q, {
+          forceServer: false,
+          timeoutMs: 2500
+        });
+        if (snapshot && !fromCache) {
+          trackFirestoreRead(snapshot.size || 1, `قراءة إشعارات ولي الأمر (${snapshot.size || 1})`);
+        }
 
         if (snapshot && !snapshot.empty) {
           setIsFirebaseLive(true);
@@ -1666,11 +1693,14 @@ ${url}
       try {
         const { doc, updateDoc, collection, query, where, getDocs } = await import('firebase/firestore');
         const { db } = await import('../lib/firebase');
+        const { trackFirestoreRead, trackFirestoreWrite } = await import('../lib/firestoreTracker');
         if (db && !isFirestoreQuotaExceeded()) {
           // Direct document update
           updateDoc(doc(db, 'notifications', msgId), {
             read: true,
             status: 'read'
+          }).then(() => {
+            trackFirestoreWrite(1, 'تحديث حالة قراءة إشعار');
           }).catch((err: any) => {
             if (isQuotaError(err)) markFirestoreQuotaExceeded(err);
           });
@@ -1678,10 +1708,13 @@ ${url}
           // Query documents where id field matches
           const q = query(collection(db, 'notifications'), where('id', '==', msgId));
           getDocs(q).then(snap => {
+            trackFirestoreRead(snap.size || 1, 'بحث عن إشعار للتأكيد');
             snap.forEach(d => {
               updateDoc(doc(db, 'notifications', d.id), {
                 read: true,
                 status: 'read'
+              }).then(() => {
+                trackFirestoreWrite(1, 'تأكيد قراءة إشعار');
               }).catch(() => {});
             });
           }).catch((err: any) => {
@@ -1735,14 +1768,21 @@ ${url}
     try {
       const { collection, getDocs, query, where, updateDoc, doc } = await import('firebase/firestore');
       const { db } = await import('../lib/firebase');
+      const { trackFirestoreRead, trackFirestoreWrite } = await import('../lib/firestoreTracker');
       if (db && selectedParentId) {
         const q = query(collection(db, 'notifications'), where('receiverId', '==', selectedParentId));
         const snap = await getDocs(q);
+        trackFirestoreRead(snap.size || 1, 'قراءة إشعارات لتعليمها كمقروءة');
+        let updateCount = 0;
         snap.forEach(d => {
           if (!d.data().read) {
+            updateCount++;
             updateDoc(doc(db, 'notifications', d.id), { read: true, status: 'read' }).catch(() => {});
           }
         });
+        if (updateCount > 0) {
+          trackFirestoreWrite(updateCount, `تحديث قراءة (${updateCount}) إشعار`);
+        }
       }
     } catch {
       // ignore

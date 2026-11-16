@@ -424,12 +424,28 @@ export default function App() {
   // Simulator Active Portal: 'director' | 'teacher' | 'parent'
   const [activePortal, setActivePortal] = useState<'director' | 'teacher' | 'parent'>(() => {
     const params = new URLSearchParams(window.location.search);
-    const portalParam = params.get('portal');
+    let portalParam = params.get('portal') || params.get('role') || params.get('p');
+    if (!portalParam && typeof window !== 'undefined' && window.location.hash) {
+      const hash = window.location.hash;
+      if (hash.includes('portal=teacher') || hash.includes('role=teacher') || hash.includes('teacher')) {
+        portalParam = 'teacher';
+      } else if (hash.includes('portal=parent') || hash.includes('role=parent') || hash.includes('parent')) {
+        portalParam = 'parent';
+      } else if (hash.includes('portal=director') || hash.includes('role=director') || hash.includes('director')) {
+        portalParam = 'director';
+      }
+    }
     if (portalParam === 'teacher' || portalParam === 'parent' || portalParam === 'director') {
+      try {
+        localStorage.setItem('school_active_portal', portalParam);
+      } catch {}
       return portalParam as 'director' | 'teacher' | 'parent';
     }
     // If URL has unified, roll, or student, automatically open Parent Portal directly
     if (params.get('unified') || params.get('roll') || params.get('student') || params.get('studentId')) {
+      try {
+        localStorage.setItem('school_active_portal', 'parent');
+      } catch {}
       return 'parent';
     }
     return 'director';
@@ -438,7 +454,17 @@ export default function App() {
   // Check if portal is locked based on URL parameter
   const [isPortalLocked] = useState<boolean>(() => {
     const params = new URLSearchParams(window.location.search);
-    const portalParam = params.get('portal');
+    let portalParam = params.get('portal') || params.get('role') || params.get('p');
+    if (!portalParam && typeof window !== 'undefined' && window.location.hash) {
+      const hash = window.location.hash;
+      if (hash.includes('portal=teacher') || hash.includes('role=teacher') || hash.includes('teacher')) {
+        portalParam = 'teacher';
+      } else if (hash.includes('portal=parent') || hash.includes('role=parent') || hash.includes('parent')) {
+        portalParam = 'parent';
+      } else if (hash.includes('portal=director') || hash.includes('role=director') || hash.includes('director')) {
+        portalParam = 'director';
+      }
+    }
     return portalParam === 'teacher' || portalParam === 'parent' || portalParam === 'director' || !!(params.get('unified') || params.get('roll') || params.get('student') || params.get('studentId'));
   });
 
@@ -650,11 +676,11 @@ export default function App() {
 
     reloadFromLocalStorage();
 
-    // High-speed parallel force refresh from Firestore cloud so any device/browser loads 100% fresh remote data immediately
-    forceRefreshDataFromFirestore().then(() => {
+    // Cache-first startup sync: displays IndexedDB persistentLocalCache immediately (0 server reads for cached docs)
+    forceRefreshDataFromFirestore({ forceServer: false }).then(() => {
       reloadFromLocalStorage();
     }).catch(err => {
-      console.warn('Startup Firestore refresh notice:', err);
+      console.warn('Startup Firestore cache refresh notice:', err);
     });
 
     return () => {

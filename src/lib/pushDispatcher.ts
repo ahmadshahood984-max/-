@@ -65,7 +65,7 @@ export async function sendParentPushNotification(
           read: false,
           status: 'unread'
         });
-        trackFirestoreWrite(1);
+        trackFirestoreWrite(1, `حفظ إشعار (${parentId})`);
         success = true;
         console.log(`[PushDispatcher] Saved notification to Firestore for parent: ${parentId} (ID: ${msgId})`);
       }
@@ -86,7 +86,7 @@ export async function sendParentPushNotification(
       if (db && !isFirestoreQuotaExceeded()) {
         const tokenDocRef = doc(db, 'fcm_tokens', parentId);
         const tokenDoc = await getDoc(tokenDocRef);
-        trackFirestoreRead(1);
+        trackFirestoreRead(1, `قراءة توكن إشعارات (${parentId})`);
 
         if (tokenDoc.exists()) {
           const tokenData = tokenDoc.data();
@@ -109,6 +109,7 @@ export async function sendParentPushNotification(
             if (!serverKey && db && !isFirestoreQuotaExceeded()) {
               try {
                 const configDoc = await getDoc(doc(db, 'school_live_data', 'school_fcm_config'));
+                trackFirestoreRead(1, 'قراءة إعدادات FCM');
                 if (configDoc.exists()) {
                   const cfg = configDoc.data()?.data;
                   if (typeof cfg === 'string') {
@@ -224,7 +225,7 @@ export async function sendBroadcastPushNotification(
         read: false,
         status: 'unread'
       });
-      trackFirestoreWrite(1);
+      trackFirestoreWrite(1, 'إرسال تعميم جماعي');
     } catch (err: any) {
       if (isQuotaError(err)) {
         markFirestoreQuotaExceeded(err);
@@ -259,7 +260,7 @@ export async function getRegisteredPushDevicesCount(): Promise<number> {
   if (!db || isFirestoreQuotaExceeded()) return 0;
   try {
     const snap = await getDocs(collection(db, 'fcm_tokens'));
-    trackFirestoreRead(snap.size || 1);
+    trackFirestoreRead(snap.size || 1, `عد الأجهزة المسجلة (${snap.size})`);
     return snap.size;
   } catch (err: any) {
     if (isQuotaError(err)) {

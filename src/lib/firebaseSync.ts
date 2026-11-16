@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { db } from './firebase';
-import { doc, onSnapshot, setDoc, getDoc } from 'firebase/firestore';
+import { db, getDocCacheFirst } from './firebase';
+import { doc, onSnapshot, setDoc } from 'firebase/firestore';
 import { trackFirestoreRead, trackFirestoreWrite } from './firestoreTracker';
 import { sanitizeAndDeduplicateStudents } from './studentDeduplicator';
 import { 
@@ -13,7 +13,7 @@ import {
   isQuotaError, 
   registerActiveFirestoreListener 
 } from './quotaManager';
-import { seedGradesToStudentCollection } from './studentGradesQuery';
+import { seedGradesToStudentCollection, syncSentGradeSheetsToConsolidatedCollection } from './studentGradesQuery';
 
 export const PARENT_STUDENT_KEYS = [
   'school_students',
@@ -147,7 +147,7 @@ export async function persistDirectToFirestore(key: string, data: any): Promise<
       const docRef = doc(db, 'school_live_data', key);
       try {
         await setDoc(docRef, { data, updatedAt: now }, { merge: true });
-        trackFirestoreWrite(1);
+        trackFirestoreWrite(1, `حفظ مباشر (${key})`);
         initialLoadCompletedKeys.add(key);
 
         // When grades are persisted, sync to student_grades collection for on-demand student queries
@@ -193,7 +193,12 @@ export async function persistGradeReportBatchDirect({
   const syncPromises: Promise<boolean>[] = [];
   if (grades !== undefined) syncPromises.push(persistDirectToFirestore('school_grades', grades));
   if (messages !== undefined) syncPromises.push(persistDirectToFirestore('school_messages', messages));
-  if (sentSheets !== undefined) syncPromises.push(persistDirectToFirestore('school_sent_grade_sheets', sentSheets));
+  if (sentSheets !== undefined) {
+    syncPromises.push(persistDirectToFirestore('school_sent_grade_sheets', sentSheets));
+    if (Array.isArray(sentSheets)) {
+      syncSentGradeSheetsToConsolidatedCollection(sentSheets).catch(() => {});
+    }
+  }
   if (monthlyEvaluations !== undefined) syncPromises.push(persistDirectToFirestore('school_monthly_evaluations', monthlyEvaluations));
   if (currentMonth !== undefined) syncPromises.push(persistDirectToFirestore('school_evaluation_current_month', currentMonth));
 
@@ -203,18 +208,19 @@ export async function persistGradeReportBatchDirect({
 
 /**
  * Ultra-fast targeted single-document fetch for school_students ONLY.
- * Resolves within ~100-200ms without waiting on other Firestore documents.
+ * Uses IndexedDB cache first by default (0 server reads on reopen).
  */
-export async function fetchStudentsOnlyDirectly(): Promise<any[]> {
-  if (!db || isFirestoreQuotaExceeded()) return [];
+export async function fetchStudentsOnlyDirectly(forceServer: boolean = false): Promise<any[]> {
+  if (!db) return [];
+  const effectiveForceServer = isFirestoreQuotaExceeded() ? false : forceServer;
   try {
     const docRef = doc(db, 'school_live_data', 'school_students');
-    const snap = await Promise.race([
-      getDoc(docRef),
-      new Promise<any>((_, reject) => setTimeout(() => reject(new Error('timeout')), 1500))
-    ]);
+    const { snap, fromCache } = await getDocCacheFirst(docRef, {
+      forceServer: effectiveForceServer,
+      timeoutMs: 1500
+    });
     if (snap && snap.exists()) {
-      trackFirestoreRead(1);
+      if (!fromCache) trackFirestoreRead(1, 'جلب قائمة الطلاب');
       const docData = snap.data();
       if (docData && Array.isArray(docData.data)) {
         const clean = sanitizeAndDeduplicateStudents(docData.data);
@@ -237,21 +243,35 @@ export async function fetchStudentsOnlyDirectly(): Promise<any[]> {
 }
 
 /**
- * High-speed parallel force refresh from Firestore.
- * Retrieves all keys concurrently with anti-wipe protection.
+ * Parallel refresh from Firestore with Cache-First persistence.
+ * When `forceServer` is false (default on app open), reads from IndexedDB persistent cache FIRST
+ * (0 server reads for already-cached documents) and skips full SYNC_KEYS scan for Student/Parent sessions.
+ * Pass `{ forceServer: true }` on manual user sync buttons to fetch fresh server updates.
  */
-export async function forceRefreshDataFromFirestore(): Promise<boolean> {
-  if (!db || isFirestoreQuotaExceeded()) return false;
+export async function forceRefreshDataFromFirestore(options?: { forceServer?: boolean }): Promise<boolean> {
+  const forceServer = options?.forceServer ?? false;
+  if (!db) return false;
+  if (forceServer && isFirestoreQuotaExceeded()) return false;
+
+  // CRITICAL QUOTA SAVER: Student/Parent portals never pull all 26 admin keys on startup.
+  if (!forceServer && isStudentOrParentPortal()) {
+    return true;
+  }
+
+  const effectiveForceServer = isFirestoreQuotaExceeded() ? false : forceServer;
+
   try {
     const refreshTasks = SYNC_KEYS.map(async (key) => {
-      if (isFirestoreQuotaExceeded()) return;
+      if (effectiveForceServer && isFirestoreQuotaExceeded()) return;
       try {
         const docRef = doc(db, 'school_live_data', key);
-        const snap = await Promise.race([
-          getDoc(docRef),
-          new Promise<any>((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000))
-        ]);
-        trackFirestoreRead(1);
+        const { snap, fromCache } = await getDocCacheFirst(docRef, {
+          forceServer: effectiveForceServer,
+          timeoutMs: 5000
+        });
+        if (snap && !fromCache) {
+          trackFirestoreRead(1, `مزامنة بيانات (${key})`);
+        }
         if (snap && snap.exists()) {
           const docData = snap.data();
           if (docData && docData.data !== undefined) {
@@ -269,6 +289,7 @@ export async function forceRefreshDataFromFirestore(): Promise<boolean> {
                   if (newLocal.length > 0 && !isFirestoreQuotaExceeded()) {
                     payload = [...payload, ...newLocal];
                     await setDoc(docRef, { data: payload, updatedAt: Date.now() }, { merge: true });
+                    trackFirestoreWrite(1, `تحديث المعلمين (${key})`);
                   }
                 }
               } catch {}
@@ -283,6 +304,7 @@ export async function forceRefreshDataFromFirestore(): Promise<boolean> {
                   if (newLocal.length > 0 && !isFirestoreQuotaExceeded()) {
                     payload = [...payload, ...newLocal];
                     await setDoc(docRef, { data: payload, updatedAt: Date.now() }, { merge: true });
+                    trackFirestoreWrite(1, `تحديث الصفوف (${key})`);
                   }
                 }
               } catch {}
@@ -307,6 +329,7 @@ export async function forceRefreshDataFromFirestore(): Promise<boolean> {
               console.warn(`[Fast Sync] Protected local key ${key} from being wiped out by empty remote. Re-seeding remote...`);
               if (!isFirestoreQuotaExceeded()) {
                 await setDoc(docRef, { data: localParsed ?? localVal, updatedAt: Date.now() }, { merge: true });
+                trackFirestoreWrite(1, `استعادة بيانات (${key})`);
               }
               initialLoadCompletedKeys.add(key);
               return;
@@ -424,7 +447,7 @@ export function setupFirebaseSync() {
         if (db && !isFirestoreQuotaExceeded()) {
           const docRef = doc(db, 'school_live_data', key);
           setDoc(docRef, { data: parsedData, updatedAt: now }, { merge: true }).then(() => {
-            trackFirestoreWrite(1);
+            trackFirestoreWrite(1, `تحديث تلقائي (${key})`);
             initialLoadCompletedKeys.add(key);
           }).catch(err => {
             if (isQuotaError(err)) {
@@ -459,13 +482,16 @@ export function setupFirebaseSync() {
     return;
   }
 
-  // Teacher & Director portals maintain full real-time sync for immediate grade publishing & school management
+  // Teacher & Director portals maintain real-time sync for immediate grade publishing & school management
+  // CRITICAL QUOTA RULE: All snapshot callbacks are strictly READ-ONLY. NEVER call setDoc inside onSnapshot!
   SYNC_KEYS.forEach(key => {
     if (isFirestoreQuotaExceeded()) return;
     try {
       const docRef = doc(db, 'school_live_data', key);
       const unsub = onSnapshot(docRef, (snapshot) => {
-        trackFirestoreRead(1);
+        if (!snapshot.metadata?.fromCache) {
+          trackFirestoreRead(1, `استماع فوري (${key})`);
+        }
         if (snapshot.exists()) {
           const docData = snapshot.data();
           if (docData && docData.data !== undefined) {
@@ -473,66 +499,25 @@ export function setupFirebaseSync() {
             if (key === 'school_students' && Array.isArray(payload)) {
               payload = sanitizeAndDeduplicateStudents(payload);
             }
-            if (key === 'school_teachers' && Array.isArray(payload)) {
-              try {
-                const localStr = localStorage.getItem('school_teachers');
-                const localList = localStr ? JSON.parse(localStr) : null;
-                if (Array.isArray(localList) && localList.length > payload.length) {
-                  const remoteIds = new Set(payload.map((t: any) => t.id));
-                  const newLocal = localList.filter((t: any) => t.id && !remoteIds.has(t.id));
-                  if (newLocal.length > 0 && !isFirestoreQuotaExceeded()) {
-                    payload = [...payload, ...newLocal];
-                    if (db) {
-                      setDoc(docRef, { data: payload, updatedAt: Date.now() }, { merge: true }).catch(() => {});
-                    }
-                  }
-                }
-              } catch {}
-            }
-            if (key === 'school_classes' && Array.isArray(payload)) {
-              try {
-                const localStr = localStorage.getItem('school_classes');
-                const localList = localStr ? JSON.parse(localStr) : null;
-                if (Array.isArray(localList) && localList.length > payload.length) {
-                  const remoteIds = new Set(payload.map((c: any) => c.id));
-                  const newLocal = localList.filter((c: any) => c.id && !remoteIds.has(c.id));
-                  if (newLocal.length > 0 && !isFirestoreQuotaExceeded()) {
-                    payload = [...payload, ...newLocal];
-                    if (db) {
-                      setDoc(docRef, { data: payload, updatedAt: Date.now() }, { merge: true }).catch(() => {});
-                    }
-                  }
-                }
-              } catch {}
-            }
 
             const remoteUpdatedAt = Number(docData.updatedAt) || 0;
             const localUpdatedAt = localUpdateTimestamps.get(key) || 0;
 
-            // SAFEGUARD 1: If user recently edited this key locally (< 20s ago) and local is newer than snapshot,
-            // DO NOT let the slower incoming snapshot overwrite the fresh local data!
-            if (localUpdatedAt > remoteUpdatedAt && (Date.now() - localUpdatedAt < 20000)) {
-              console.log(`[Firestore Sync] Protected local edit for ${key} (local is newer than snapshot). Re-pushing...`);
-              const currentLocal = localStorage.getItem(key);
-              if (currentLocal && db && !isFirestoreQuotaExceeded()) {
-                try {
-                  const parsed = JSON.parse(currentLocal);
-                  setDoc(docRef, { data: parsed, updatedAt: localUpdatedAt }, { merge: true }).catch(() => {});
-                } catch {}
-              }
+            // SAFEGUARD 1: If user recently edited this key locally (< 10s ago) and local is newer than snapshot,
+            // do not let the snapshot overwrite the user's current local typing session
+            if (localUpdatedAt > remoteUpdatedAt && (Date.now() - localUpdatedAt < 10000)) {
               initialLoadCompletedKeys.add(key);
               return;
             }
 
             // SAFEGUARD 2: Anti-wipe. If remote snapshot contains empty data (e.g. wiped [] or null),
-            // but local storage currently has real, populated data (e.g. 181 students, existing classes),
-            // NEVER wipe out the local data! Instead, repair Firestore by sending the local data.
+            // but local storage currently has real populated data, do not overwrite local data.
+            // Note: We do NOT write back to Firestore here to avoid ping-pong write loops.
             const localVal = localStorage.getItem(key);
             let localHasRealData = false;
-            let localParsed: any = null;
             if (localVal) {
               try {
-                localParsed = JSON.parse(localVal);
+                const localParsed = JSON.parse(localVal);
                 if (!isDataEmpty(localParsed)) {
                   localHasRealData = true;
                 }
@@ -542,10 +527,6 @@ export function setupFirebaseSync() {
             }
 
             if (isDataEmpty(payload) && localHasRealData) {
-              console.warn(`[Firestore Sync] Prevented wiping populated local data for ${key} with empty remote snapshot! Re-saving local data to Firestore...`);
-              if (!isFirestoreQuotaExceeded()) {
-                setDoc(docRef, { data: localParsed ?? localVal, updatedAt: Date.now() }, { merge: true }).catch(() => {});
-              }
               initialLoadCompletedKeys.add(key);
               return;
             }
@@ -555,8 +536,6 @@ export function setupFirebaseSync() {
               : String(payload);
             
             if (localVal !== valueString) {
-              console.log(`[Firestore Sync] Key ${key} updated from remote database.`);
-              
               isRemoteSyncing = true;
               originalSetItem(key, valueString);
               isRemoteSyncing = false;
@@ -566,33 +545,9 @@ export function setupFirebaseSync() {
               broadcastLocalUpdate(key, valueString);
             }
           }
-          // Mark as completed so subsequent local updates can sync to remote
           initialLoadCompletedKeys.add(key);
         } else {
-          // Document does not exist yet in Firestore.
-          const localVal = localStorage.getItem(key);
-          if (localVal && !isDataEmpty(localVal) && !isFirestoreQuotaExceeded()) {
-            try {
-              let parsedData;
-              try {
-                parsedData = JSON.parse(localVal);
-              } catch {
-                parsedData = localVal;
-              }
-              if (!isDataEmpty(parsedData)) {
-                isRemoteSyncing = true;
-                setDoc(docRef, { data: parsedData, updatedAt: Date.now() }, { merge: true }).then(() => {
-                  trackFirestoreWrite(1);
-                }).catch(() => {}).finally(() => {
-                  isRemoteSyncing = false;
-                  initialLoadCompletedKeys.add(key);
-                });
-                return;
-              }
-            } catch (e) {
-              console.warn(`Notice seeding key ${key}:`, e);
-            }
-          }
+          // Document does not exist in Firestore. Do not auto-seed inside snapshot callback to prevent loops.
           initialLoadCompletedKeys.add(key);
         }
       }, (error) => {

@@ -36,7 +36,6 @@ import {
   Phone,
   ArrowLeft,
   CheckCircle2,
-  FileText,
   FileSpreadsheet,
   Printer,
   Download,
@@ -50,10 +49,10 @@ import { sendParentPushNotification } from '../lib/pushDispatcher';
 import { WhatsAppMessageCustomizerModal } from './WhatsAppMessageCustomizerModal';
 import { PortalDesignerBadge } from './PortalDesignerBadge';
 import { Teacher, Student, Class, Attendance, Grade, Parent, Message, Announcement, ExamQuestionPaper, SentGradeSheet, SentGradeSheetStudentSummary } from '../types';
-import { ExamQuestionsManager } from './ExamQuestionsManager';
 import { sanitizeAndDeduplicateStudents, getSafeStudentKey } from '../lib/studentDeduplicator';
 import { getStoredWelcomeMessages, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { persistDirectToFirestore, safeDispatchStorageUpdate } from '../lib/firebaseSync';
+import { batchSaveStudentsGradesConsolidated } from '../lib/studentGradesQuery';
 import { printElementById } from '../lib/printUtils';
 import { GradeSheetSignatures } from './GradeSheetSignatures';
 import { motion, AnimatePresence } from 'motion/react';
@@ -297,7 +296,7 @@ export default function TeacherPortal({
   }, [teachers]);
 
   // Tabs
-  const [activeTab, setActiveTab] = useState<'grades' | 'students' | 'messages' | 'announcements' | 'questions'>('grades');
+  const [activeTab, setActiveTab] = useState<'grades' | 'students' | 'messages' | 'announcements'>('grades');
   const [gradingMode, setGradingMode] = useState<'single' | 'all'>('single');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
@@ -699,6 +698,32 @@ export default function TeacherPortal({
     await persistDirectToFirestore('school_sent_grade_sheets', updatedSentSheets);
     await persistDirectToFirestore('school_monthly_evaluations', monthlyEvaluations);
     await persistDirectToFirestore('school_grades', latestGrades);
+
+    // Atomically persist consolidated single-document student grades (students_grades/{studentId}) via writeBatch
+    const consolidatedBatch = studentsSummary.map(s => {
+      const subjectsMap: Record<string, { score: number | null; maxScore: number; examName?: string; notes?: string }> = {};
+      (s.scores || []).forEach(sc => {
+        subjectsMap[sc.subject] = {
+          score: sc.score !== null ? Number(sc.score) : null,
+          maxScore: Number(sc.maxScore) || 100,
+          examName: currentEvaluationMonth,
+          notes: ''
+        };
+      });
+      return {
+        studentId: s.studentId,
+        studentName: s.studentName,
+        classId: targetClass.id,
+        className: targetClass.name,
+        unifiedNo: s.unifiedNo,
+        rollNo: s.rollNo,
+        month: currentEvaluationMonth,
+        subjects: subjectsMap,
+        teacherNotes: s.teacherNotes,
+        directorNotes: s.directorNotes
+      };
+    });
+    batchSaveStudentsGradesConsolidated(consolidatedBatch).catch(() => {});
 
     safeDispatchStorageUpdate('school_grades', JSON.stringify(latestGrades));
     safeDispatchStorageUpdate('school_monthly_evaluations', JSON.stringify(monthlyEvaluations));
@@ -1313,25 +1338,6 @@ export default function TeacherPortal({
                 <span>نشر تعميم وإعلان</span>
               </button>
 
-              <button
-                onClick={() => {
-                  setActiveTab('questions');
-                  setIsMobileMenuOpen(false);
-                }}
-                className={`w-full flex items-center gap-2 px-3 py-2 rounded-xl text-right text-[11px] font-bold transition-all duration-200 cursor-pointer ${
-                  activeTab === 'questions' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-900 hover:bg-white hover:text-indigo-900'
-                }`}
-              >
-                <FileText className="w-4 h-4 shrink-0 text-amber-600" />
-                <span>الأسئلة (كتابة المذاكرة)</span>
-                {examQuestions.filter(q => q.teacherId === selectedTeacherId || q.teacherName === activeTeacher?.name).length > 0 && (
-                  <span className={`mr-auto px-1.5 py-0.5 rounded-full text-[8px] font-bold ${
-                    activeTab === 'questions' ? 'bg-indigo-500/40 text-white' : 'bg-amber-100 text-amber-800 border border-amber-200'
-                  }`}>
-                    {examQuestions.filter(q => q.teacherId === selectedTeacherId || q.teacherName === activeTeacher?.name).length} نماذج
-                  </span>
-                )}
-              </button>
             </nav>
           </div>
         </div>
@@ -2868,29 +2874,6 @@ export default function TeacherPortal({
             </motion.div>
           )}
 
-          {/* Questions & Exam Papers Tab */}
-          {activeTab === 'questions' && (
-            <motion.div
-              key="questions"
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              className="space-y-6"
-            >
-              <ExamQuestionsManager
-                currentUserRole="teacher"
-                currentTeacher={activeTeacher}
-                classes={classes}
-                examQuestions={examQuestions}
-                onSavePaper={(paper) => {
-                  if (saveExamQuestionPaper) saveExamQuestionPaper(paper);
-                }}
-                onDeletePaper={(id) => {
-                  if (deleteExamQuestionPaper) deleteExamQuestionPaper(id);
-                }}
-              />
-            </motion.div>
-          )}
         </AnimatePresence>
 
         {/* Portal Bottom Designer Signature - Aligned completely to the left */}

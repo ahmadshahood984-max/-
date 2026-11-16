@@ -13,6 +13,11 @@ service cloud.firestore {
       allow read, write: if true;
     }
 
+    // Rules for consolidated single-document student grades (on-demand direct getDoc by studentId)
+    match /students_grades/{studentId} {
+      allow read, write: if true;
+    }
+
     // Rules for scoped student grades collection (on-demand query by studentId)
     match /student_grades/{gradeId} {
       allow read, write: if true;
@@ -30,6 +35,11 @@ service cloud.firestore {
 
     // Rules for system usage tracking
     match /system_usage/{dateId} {
+      allow read, write: if true;
+    }
+
+    // Rules for centralized Firestore consumption tracking (system_stats/consumption)
+    match /system_stats/{statId} {
       allow read, write: if true;
     }
   }

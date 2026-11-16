@@ -46,12 +46,51 @@
         "teacherId": { "type": "string" },
         "updatedAt": { "type": "number" }
       }
+    },
+    "ConsolidatedStudentGrades": {
+      "title": "Consolidated Student Grades",
+      "description": "Consolidated single-document student grade record with all 7 subjects, total, and percentage",
+      "type": "object",
+      "properties": {
+        "studentId": { "type": "string" },
+        "studentName": { "type": "string" },
+        "classId": { "type": "string" },
+        "className": { "type": "string" },
+        "unifiedNo": { "type": "string" },
+        "rollNo": { "type": "string" },
+        "evaluationMonth": { "type": "string" },
+        "totalScore": { "type": "number" },
+        "maxTotalScore": { "type": "number" },
+        "percentage": { "type": "number" },
+        "estimation": { "type": "string" },
+        "teacherNotes": { "type": "string" },
+        "directorNotes": { "type": "string" },
+        "updatedAt": { "type": "number" }
+      }
+    },
+    "SystemConsumption": {
+      "title": "Centralized Firestore Consumption Stats",
+      "description": "Shared system-wide daily and lifetime Firestore read/write consumption counter",
+      "type": "object",
+      "properties": {
+        "date": { "type": "string" },
+        "reads": { "type": "number" },
+        "writes": { "type": "number" },
+        "lifetimeReads": { "type": "number" },
+        "lifetimeWrites": { "type": "number" },
+        "lastOperation": { "type": "string" },
+        "lastUpdatedAt": { "type": "number" }
+      }
     }
   },
   "firestore": {
     "/school_live_data/{key}": {
       "schema": "SchoolLiveData",
       "description": "Collection for school dataset key-value syncing"
+    },
+    "/students_grades/{studentId}": {
+      "schema": "ConsolidatedStudentGrades",
+      "description": "Consolidated single-document per student storing all 7 subject grades, totals, and percentage"
     },
     "/student_grades/{gradeId}": {
       "schema": "StudentGrade",
@@ -60,6 +99,10 @@
     "/fcm_tokens/{parentId}": {
       "schema": "FCMToken",
       "description": "Collection for FCM device tokens"
+    },
+    "/system_stats/{statId}": {
+      "schema": "SystemConsumption",
+      "description": "Centralized consumption counter document (e.g. system_stats/consumption)"
     }
   }
 }

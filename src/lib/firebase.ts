@@ -8,7 +8,18 @@ import {
   initializeFirestore, 
   persistentLocalCache, 
   persistentMultipleTabManager, 
-  setLogLevel 
+  memoryLocalCache,
+  CACHE_SIZE_UNLIMITED,
+  getDoc,
+  getDocFromCache,
+  getDocs,
+  getDocsFromCache,
+  setLogLevel,
+  type DocumentReference,
+  type DocumentSnapshot,
+  type Query,
+  type QuerySnapshot,
+  type Firestore
 } from 'firebase/firestore';
 import { getAuth } from 'firebase/auth';
 import firebaseConfigJson from '../../firebase-applet-config.json';
@@ -34,14 +45,123 @@ try {
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 
-// Initialize Cloud Firestore with forced long polling and IndexedDB persistent cache
-// This reuses cached documents across tab reloads and saves tens of thousands of daily reads
-export const db = initializeFirestore(app, {
-  experimentalForceLongPolling: true,
-  localCache: persistentLocalCache({
-    tabManager: persistentMultipleTabManager()
-  })
-}, databaseId);
+// Initialize Cloud Firestore with forced long polling and unlimited IndexedDB persistent cache
+// Student grades and school data are cached locally in the browser across sessions (0 server reads on reopen)
+let firestoreInstance: Firestore;
+try {
+  firestoreInstance = initializeFirestore(app, {
+    experimentalForceLongPolling: true,
+    localCache: persistentLocalCache({
+      cacheSizeBytes: CACHE_SIZE_UNLIMITED,
+      tabManager: persistentMultipleTabManager()
+    })
+  }, databaseId);
+} catch (cacheErr) {
+  console.warn('[Firestore] IndexedDB persistentLocalCache unavailable, falling back to memoryLocalCache:', cacheErr);
+  firestoreInstance = initializeFirestore(app, {
+    experimentalForceLongPolling: true,
+    localCache: memoryLocalCache()
+  }, databaseId);
+}
+
+export const db = firestoreInstance;
+
+/**
+ * Cache-First Document Reader:
+ * Reads from IndexedDB persistent local cache FIRST (0 Firestore server reads!).
+ * Only queries the Firestore server if the document is not yet cached locally or if `forceServer` is true.
+ */
+export async function getDocCacheFirst<T = any>(
+  docRef: DocumentReference<T>,
+  options?: { forceServer?: boolean; timeoutMs?: number }
+): Promise<{ snap: DocumentSnapshot<T> | null; fromCache: boolean }> {
+  const forceServer = options?.forceServer ?? false;
+  const timeoutMs = options?.timeoutMs ?? 2500;
+
+  if (!forceServer) {
+    try {
+      const cachedSnap = await getDocFromCache(docRef);
+      if (cachedSnap && cachedSnap.exists()) {
+        return { snap: cachedSnap, fromCache: true };
+      }
+    } catch {
+      // Cache miss (document not yet in local IndexedDB cache) -> fall through to server
+    }
+  }
+
+  try {
+    const serverSnap = await Promise.race([
+      getDoc(docRef),
+      new Promise<null>((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs))
+    ]);
+    if (serverSnap) {
+      return { snap: serverSnap, fromCache: serverSnap.metadata?.fromCache ?? false };
+    }
+  } catch (err) {
+    // If server fetch fails or times out while forceServer was true, fall back to cache
+    if (forceServer) {
+      try {
+        const fallbackCache = await getDocFromCache(docRef);
+        if (fallbackCache && fallbackCache.exists()) {
+          return { snap: fallbackCache, fromCache: true };
+        }
+      } catch {
+        // ignore
+      }
+    }
+    throw err;
+  }
+
+  return { snap: null, fromCache: false };
+}
+
+/**
+ * Cache-First Collection/Query Reader:
+ * Reads matching documents from IndexedDB persistent cache FIRST (0 Firestore server reads!).
+ * Only queries the Firestore server if cache is empty or `forceServer` is true.
+ */
+export async function getDocsCacheFirst<T = any>(
+  q: Query<T>,
+  options?: { forceServer?: boolean; timeoutMs?: number }
+): Promise<{ snap: QuerySnapshot<T> | null; fromCache: boolean }> {
+  const forceServer = options?.forceServer ?? false;
+  const timeoutMs = options?.timeoutMs ?? 2500;
+
+  if (!forceServer) {
+    try {
+      const cachedSnap = await getDocsFromCache(q);
+      if (cachedSnap && !cachedSnap.empty) {
+        return { snap: cachedSnap, fromCache: true };
+      }
+    } catch {
+      // Cache miss -> fall through to server
+    }
+  }
+
+  try {
+    const serverSnap = await Promise.race([
+      getDocs(q),
+      new Promise<null>((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs))
+    ]);
+    if (serverSnap) {
+      return { snap: serverSnap, fromCache: serverSnap.metadata?.fromCache ?? false };
+    }
+  } catch (err) {
+    if (forceServer) {
+      try {
+        const fallbackCache = await getDocsFromCache(q);
+        if (fallbackCache && !fallbackCache.empty) {
+          return { snap: fallbackCache, fromCache: true };
+        }
+      } catch {
+        // ignore
+      }
+    }
+    throw err;
+  }
+
+  return { snap: null, fromCache: false };
+}
 
 // Initialize Firebase Authentication
 export const auth = getAuth(app);
