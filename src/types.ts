@@ -85,6 +85,9 @@ export interface Grade {
   subject: string;
   examName: string;
   score: number;
+  oralScore?: number | null;
+  homeworkScore?: number | null;
+  quizScore?: number | null;
   maxScore: number;
   date: string;
   teacherId: string;

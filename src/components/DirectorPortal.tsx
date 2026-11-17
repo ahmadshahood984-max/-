@@ -73,10 +73,12 @@ import { buildWhatsAppUrl, openWhatsAppDirectly, getWhatsAppSentRecords, recordW
 import { generateEvaluationCardImage, shareOrDownloadEvaluationImage } from '../lib/generateCardImage';
 import { WhatsAppMessageCustomizerModal } from './WhatsAppMessageCustomizerModal';
 import { PortalDesignerBadge } from './PortalDesignerBadge';
-import { Teacher, Student, Parent, Class, AbsenceExcuse, Announcement, Grade, Attendance, Message, SentGradeSheet, ExamQuestionPaper } from '../types';
+import { Teacher, Student, Parent, Class, AbsenceExcuse, Announcement, Grade, Attendance, Message, SentGradeSheet, SentGradeSheetStudentSummary, ExamQuestionPaper } from '../types';
 import { sanitizeAndDeduplicateStudents, getSafeStudentKey } from '../lib/studentDeduplicator';
 import { GradeSheetSignatures } from './GradeSheetSignatures';
 import { SealAndSignaturesModal } from './SealAndSignaturesModal';
+import { GradeCellInput } from './GradeCellInput';
+import { applyGradePartUpdate, computeGradeTotal, hasSubGradeParts } from '../lib/gradeSplitUtils';
 import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
 import { db } from '../lib/firebase';
@@ -1125,16 +1127,58 @@ export default function DirectorPortal({
     const nowIso = new Date().toISOString();
     const newMessagesList: Message[] = [];
 
-    // Dispatch messages and push notifications to parents for all students in the sheet
+    const updatedSummaryList: SentGradeSheetStudentSummary[] = [];
+
+    // Dispatch messages and push notifications to parents for all students in the sheet (Total score ONLY)
     for (const stSummary of sheet.studentsSummary) {
       const studentClass = sheet.className || 'الصف الدراسي';
       const studentParent = parents.find(p => p.id === stSummary.parentId || p.childrenIds.includes(stSummary.studentId));
       const receiverParentId = stSummary.parentId || studentParent?.id || 'parent';
       const receiverParentName = stSummary.parentName || studentParent?.name || 'ولي الأمر';
 
-      const scoresDetails = stSummary.scores.map(sc => {
+      // Always pull latest live total (المجموع) from grades if available, fallback to sheet summary score
+      const liveStudentGrades = grades.filter(
+        g => g.studentId === stSummary.studentId && (g.examName === sheet.month || !g.examName)
+      );
+      let totalSum = 0;
+      let totalCount = 0;
+      const totalOnlyScores = stSummary.scores.map(sc => {
+        const liveGrade = liveStudentGrades.find(g => g.subject && g.subject.trim() === sc.subject.trim());
+        const liveTotal = computeGradeTotal(liveGrade);
+        const finalScore = liveTotal !== null ? liveTotal : (sc.score !== null && sc.score !== undefined ? Number(sc.score) : null);
+        if (finalScore !== null && !Number.isNaN(finalScore)) {
+          totalSum += finalScore;
+          totalCount++;
+        }
+        return {
+          subject: sc.subject,
+          score: finalScore,
+          maxScore: Number(sc.maxScore || liveGrade?.maxScore || numericMaxGrade || 100)
+        };
+      });
+
+      const computedAvg = totalCount > 0 ? `${(totalSum / totalCount).toFixed(1)}%` : (stSummary.average || '---');
+      let computedEstimation = stSummary.estimation || '---';
+      if (totalCount > 0) {
+        const avgNum = totalSum / totalCount;
+        if (avgNum > 90) computedEstimation = 'ممتاز';
+        else if (avgNum > 80) computedEstimation = 'جيد جداً';
+        else if (avgNum > 60) computedEstimation = 'جيد';
+        else if (avgNum > 40) computedEstimation = 'وسط';
+        else computedEstimation = 'ضعيف';
+      }
+
+      updatedSummaryList.push({
+        ...stSummary,
+        average: computedAvg,
+        estimation: computedEstimation,
+        scores: totalOnlyScores
+      });
+
+      const scoresDetails = totalOnlyScores.map(sc => {
         const scoreVal = sc.score !== null && sc.score !== undefined ? sc.score : 'لم ترصد';
-        return `• 📘 *${sc.subject}:* ❪ *${scoreVal}* ${sc.score !== null ? '/100' : ''} ❫`;
+        const scaleSuffix = sc.score !== null && directorMaxGradeType !== 'unspecified' ? ` /${sc.maxScore || 100}` : '';
+        return `• 📘 *${sc.subject}:* ❪ *${scoreVal}*${scaleSuffix} ❫`;
       }).join('\n');
 
       let directivesFormatted = '';
@@ -1157,7 +1201,7 @@ export default function DirectorPortal({
 📚 نتائج المواد الدراسية:
 ${scoresDetails}
 
-📊 المعدل العام: ❪ ${stSummary.average} ❫ | 🌟 التقدير العام: ${stSummary.estimation}
+📊 المعدل العام: ❪ ${computedAvg} ❫ | 🌟 التقدير العام: ${computedEstimation}
 
 📝 توجيهات وتقارير المتابعة:
 ${directivesFormatted}
@@ -1186,7 +1230,7 @@ ${directivesFormatted}
       if (studentParent?.id) {
         sendParentPushNotification(studentParent.id, {
           title: `📊 كشف درجات معتمد: ${stSummary.studentName} - ${sheet.month}`,
-          body: `اعتمدت إدارة المدرسة كشف الدرجات لشهر (${sheet.month}) بمعدل (${stSummary.average}) وتقدير (${stSummary.estimation}). اضغط للمعاينة.`,
+          body: `اعتمدت إدارة المدرسة كشف الدرجات لشهر (${sheet.month}) بمعدل (${computedAvg}) وتقدير (${computedEstimation}). اضغط للمعاينة.`,
           tag: `grades_${stSummary.studentId}_${sheet.month}`,
           url: `/?portal=parent&tab=grades&unified=${encodeURIComponent(stSummary.unifiedNo || stSummary.rollNo || stSummary.studentId)}`,
           msgId: msgId,
@@ -1216,11 +1260,12 @@ ${directivesFormatted}
       }
     }
 
-    // Update the sheet status to 'approved'
+    // Update the sheet status to 'approved' with total-only scores for parents
     const updatedSheet: SentGradeSheet = {
       ...sheet,
       status: 'approved',
-      sentBy: sheet.sentBy?.includes('(معتمد)') ? sheet.sentBy : `${sheet.sentBy} (معتمد من الإدارة ✅)`
+      sentBy: sheet.sentBy?.includes('(معتمد)') ? sheet.sentBy : `${sheet.sentBy} (معتمد من الإدارة ✅)`,
+      studentsSummary: updatedSummaryList
     };
 
     const updatedSentSheets = sentGradeSheets.map(s => s.id === sheet.id ? updatedSheet : s);
@@ -1313,13 +1358,15 @@ ${lateDays > 0 ? `• 🟡 *أيام التأخر:* ❪ *${lateDays} يوم* ❫
 
     let subjectsDetails = allSubjectsForStudent.map(sub => {
       const g = targetStudentGrades.find(x => x.subject && x.subject.trim() === sub.trim());
-      const hasScore = g !== undefined && g.score !== undefined && g.score !== null;
+      const totalForSub = computeGradeTotal(g);
+      const hasScore = totalForSub !== null && !Number.isNaN(totalForSub);
       if (hasScore) {
-        calculatedTotal += Number(g.score);
+        calculatedTotal += totalForSub;
         calculatedScoredCount++;
       }
-      const scoreVal = hasScore ? g.score : 'لم ترصد';
-      return `• 📘 *${sub}:* ❪ *${scoreVal}* ${hasScore ? '/100' : ''} ❫`;
+      const scoreVal = hasScore ? totalForSub : 'لم ترصد';
+      const scaleSuffix = hasScore && directorMaxGradeType !== 'unspecified' ? ` /${g?.maxScore || numericMaxGrade || 100}` : '';
+      return `• 📘 *${sub}:* ❪ *${scoreVal}*${scaleSuffix} ❫`;
     }).join('\n');
 
     const finalTotalScore = calculatedScoredCount > 0 ? calculatedTotal : totalScore;
@@ -4649,14 +4696,15 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       let studentScoredCount = 0;
       const studentScoresList = uniqueSubjects.map(sub => {
         const g = studentGrades.find(x => x.subject && x.subject.trim() === sub.trim());
-        const hasScore = g !== undefined && g.score !== undefined && g.score !== null;
+        const totalForSub = computeGradeTotal(g);
+        const hasScore = totalForSub !== null && !Number.isNaN(totalForSub);
         if (hasScore) {
-          studentTotalScore += Number(g.score);
+          studentTotalScore += totalForSub;
           studentScoredCount++;
         }
         return {
           subject: sub,
-          score: hasScore ? Number(g.score) : null,
+          score: hasScore ? totalForSub : null,
           maxScore: Number(g?.maxScore || numericMaxGrade || 100)
         };
       });
@@ -4701,7 +4749,9 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       }
 
       const subjectsDetails = studentScoresList.map(s => {
-        const scoreVal = s.score !== null ? `${s.score} / ${s.maxScore}` : 'قيد الرصد ⏳';
+        const scoreVal = s.score !== null
+          ? (directorMaxGradeType === 'unspecified' ? `${s.score}` : `${s.score} / ${s.maxScore}`)
+          : 'قيد الرصد ⏳';
         return `• 📘 ${s.subject}: ❪ ${scoreVal} ❫`;
       }).join('\n');
 
@@ -10714,21 +10764,33 @@ ${sampleEval}
                         <table className="w-full text-right border-collapse">
                           <thead>
                             <tr className="bg-slate-50 text-slate-600 text-xs font-semibold border-b border-slate-100">
-                              <th className="p-4">الرقم الموحد</th>
-                              <th className="p-4">اسم الطالب</th>
-                              <th className="p-4 text-center min-w-[200px] bg-emerald-50/70 text-emerald-900 border-x border-emerald-100 font-bold">
+                              <th rowSpan={2} className="p-3 border-b border-slate-200">الرقم الموحد</th>
+                              <th rowSpan={2} className="p-3 border-b border-slate-200 sticky right-0 z-20 bg-slate-50 shadow-[-2px_0_6px_-2px_rgba(0,0,0,0.06)] print:static">اسم الطالب</th>
+                              <th rowSpan={2} className="p-3 text-center min-w-[200px] bg-emerald-50/70 text-emerald-900 border-x border-b border-emerald-100 font-bold">
                                 إرسال التقييم عبر واتساب 📲
                               </th>
                               {uniqueSubjects.map(sub => (
-                                <th key={sub} className="p-4 text-center">{sub}</th>
+                                <th key={sub} colSpan={4} className="p-2 text-center border-x-2 border-b border-slate-200 bg-slate-100/70 font-black text-slate-800 whitespace-nowrap">
+                                  {sub}
+                                </th>
                               ))}
-                              <th className="p-4 text-center">المعدل</th>
-                              <th className="p-4 text-center">التقدير</th>
-                              <th className="p-4 text-center min-w-[180px]">توجيهات المعلم</th>
-                              <th className="p-4 text-center min-w-[180px]">توجيهات الإدارة</th>
-                              <th className="p-4 text-center min-w-[320px]">
+                              <th rowSpan={2} className="p-3 text-center border-b border-slate-200">المعدل</th>
+                              <th rowSpan={2} className="p-3 text-center border-b border-slate-200">التقدير</th>
+                              <th rowSpan={2} className="p-3 text-center min-w-[180px] border-b border-slate-200">توجيهات المعلم</th>
+                              <th rowSpan={2} className="p-3 text-center min-w-[180px] border-b border-slate-200">توجيهات الإدارة</th>
+                              <th rowSpan={2} className="p-3 text-center min-w-[320px] border-b border-slate-200">
                                 <span className="text-slate-600 block text-xs">حجب كشف الدرجات للطلب</span>
                               </th>
+                            </tr>
+                            <tr className="bg-white text-[10px] font-extrabold text-slate-600 border-b border-slate-200">
+                              {uniqueSubjects.map(sub => (
+                                <React.Fragment key={`${sub}_d_subcols`}>
+                                  <th className="p-1.5 text-center min-w-[54px] border-r-2 border-r-slate-200">شفهي</th>
+                                  <th className="p-1.5 text-center min-w-[54px] border-r border-slate-100">وظائف</th>
+                                  <th className="p-1.5 text-center min-w-[54px] border-r border-slate-100">مذاكرة</th>
+                                  <th className="p-1.5 text-center min-w-[60px] bg-indigo-50/80 text-indigo-800 font-black border-l-2 border-l-slate-200 border-r border-r-indigo-100">المجموع</th>
+                                </React.Fragment>
+                              ))}
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-slate-100 text-slate-700 text-xs">
@@ -10747,8 +10809,9 @@ ${sampleEval}
                               let scoredCount = 0;
                               uniqueSubjects.forEach(sub => {
                                 const subGrade = studentGrades.find(g => g.subject === sub);
-                                if (subGrade && typeof subGrade.score === 'number' && !isNaN(subGrade.score)) {
-                                  totalScore += subGrade.score;
+                                const totalForSub = computeGradeTotal(subGrade);
+                                if (totalForSub !== null && !isNaN(totalForSub)) {
+                                  totalScore += totalForSub;
                                   scoredCount++;
                                 }
                               });
@@ -10759,12 +10822,12 @@ ${sampleEval}
 
                           return (
                             <tr key={getSafeStudentKey(student, idx, 'grade_tr')} className="hover:bg-slate-50/40 transition">
-                              <td className="p-4 font-mono font-bold text-indigo-700">
+                              <td className="p-3 font-mono font-bold text-indigo-700">
                                 <span className="inline-flex items-center px-2.5 py-1 rounded-lg bg-indigo-50 border border-indigo-100 text-indigo-700 font-mono font-bold text-xs shadow-2xs">
                                   #{student.unifiedNo || student.rollNo}
                                 </span>
                               </td>
-                              <td className="p-4 font-bold text-slate-800">{student.name}</td>
+                              <td className="p-3 font-bold text-slate-800 whitespace-nowrap sticky right-0 z-10 bg-white shadow-[-2px_0_6px_-2px_rgba(0,0,0,0.06)] print:static">{student.name}</td>
                               {/* WhatsApp Send Column directly next to student's name */}
                               <td className="p-2 text-center min-w-[200px] bg-emerald-50/20 border-x border-emerald-100/60">
                                 {(() => {
@@ -10833,44 +10896,71 @@ ${sampleEval}
                               </td>
                               {uniqueSubjects.map(sub => {
                                 const subGrade = studentGrades.find(g => g.subject === sub);
+                                const hasParts = hasSubGradeParts(subGrade);
+                                const totalVal = computeGradeTotal(subGrade);
+                                const handlePartChange = (part: 'oralScore' | 'homeworkScore' | 'quizScore' | 'total', score: number | null) => {
+                                  setGrades(prev => {
+                                    const next = applyGradePartUpdate(prev, {
+                                      studentId: student.id,
+                                      subject: sub,
+                                      month: currentEvaluationMonth,
+                                      part,
+                                      value: score,
+                                      maxScore: numericMaxGrade || 100,
+                                      teacherId: 'director',
+                                      idPrefix: 'g_dir_edt',
+                                      matchEmptyMonth: true
+                                    });
+                                    localStorage.setItem('school_grades', JSON.stringify(next));
+                                    return next;
+                                  });
+                                };
+                                const cellInputCls = "w-11 text-center border border-slate-200 hover:border-indigo-400 focus:border-indigo-600 focus:ring-1 focus:ring-indigo-100 rounded-lg p-1 text-xs font-bold font-mono focus:outline-none bg-white";
                                 return (
-                                  <td key={sub} className="p-2 text-center font-semibold text-slate-700 min-w-[70px]">
-                                    <input
-                                      type="number"
-                                      min="0"
-                                      max={directorMaxGradeType === 'unspecified' ? undefined : (numericMaxGrade || 100)}
-                                      value={subGrade ? subGrade.score : ''}
-                                      onChange={e => {
-                                        const valStr = e.target.value.trim();
-                                        const score = valStr === '' ? 0 : parseFloat(valStr) || 0;
-                                        setGrades(prev => {
-                                          const copy = [...prev];
-                                          const idx = copy.findIndex(g => g.studentId === student.id && g.subject === sub && g.examName === currentEvaluationMonth);
-                                          if (idx !== -1) {
-                                            copy[idx] = {
-                                              ...copy[idx],
-                                              score: score
-                                            };
-                                          } else {
-                                            copy.push({
-                                              id: 'g_dir_edt_' + Date.now() + Math.random().toString(36).substring(2, 7),
-                                              studentId: student.id,
-                                              subject: sub,
-                                              examName: currentEvaluationMonth,
-                                              score: score,
-                                              maxScore: numericMaxGrade || 100,
-                                              date: new Date().toISOString().split('T')[0],
-                                              teacherId: 'director'
-                                            });
-                                          }
-                                          localStorage.setItem('school_grades', JSON.stringify(copy));
-                                          return copy;
-                                        });
-                                      }}
-                                      className="w-12 text-center border border-slate-200 hover:border-indigo-450 focus:border-indigo-600 focus:ring-1 focus:ring-indigo-100 rounded-lg p-1 text-xs font-bold font-mono focus:outline-none"
-                                      placeholder="---"
-                                    />
-                                  </td>
+                                  <React.Fragment key={sub}>
+                                    <td className="p-1.5 text-center border-r-2 border-r-slate-200">
+                                      <GradeCellInput
+                                        value={subGrade?.oralScore ?? null}
+                                        onChangeScore={score => handlePartChange('oralScore', score)}
+                                        className={cellInputCls}
+                                        placeholder="---"
+                                      />
+                                    </td>
+                                    <td className="p-1.5 text-center">
+                                      <GradeCellInput
+                                        value={subGrade?.homeworkScore ?? null}
+                                        onChangeScore={score => handlePartChange('homeworkScore', score)}
+                                        className={cellInputCls}
+                                        placeholder="---"
+                                      />
+                                    </td>
+                                    <td className="p-1.5 text-center">
+                                      <GradeCellInput
+                                        value={subGrade?.quizScore ?? null}
+                                        onChangeScore={score => handlePartChange('quizScore', score)}
+                                        className={cellInputCls}
+                                        placeholder="---"
+                                      />
+                                    </td>
+                                    <td className="p-1.5 text-center bg-indigo-50/40 border-l-2 border-l-slate-200">
+                                      {hasParts ? (
+                                        <span
+                                          className="inline-flex items-center justify-center min-w-[2.75rem] px-2 py-1 rounded-lg bg-indigo-50 border border-indigo-200 text-indigo-900 font-mono font-black text-xs"
+                                          title="المجموع التلقائي (يُرسل للأهل فقط عند الاعتماد)"
+                                        >
+                                          {totalVal !== null ? totalVal : '---'}
+                                        </span>
+                                      ) : (
+                                        <GradeCellInput
+                                          max={directorMaxGradeType === 'unspecified' ? undefined : (numericMaxGrade || 100)}
+                                          value={totalVal}
+                                          onChangeScore={score => handlePartChange('total', score)}
+                                          className="w-12 text-center border border-indigo-200 bg-indigo-50/50 text-indigo-900 focus:border-indigo-600 focus:ring-1 focus:ring-indigo-100 rounded-lg p-1 text-xs font-black font-mono focus:outline-none"
+                                          placeholder="---"
+                                        />
+                                      )}
+                                    </td>
+                                  </React.Fragment>
                                 );
                               })}
                               {/* Average Column */}

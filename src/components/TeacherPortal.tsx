@@ -55,6 +55,8 @@ import { persistDirectToFirestore, safeDispatchStorageUpdate } from '../lib/fire
 import { batchSaveStudentsGradesConsolidated } from '../lib/studentGradesQuery';
 import { printElementById } from '../lib/printUtils';
 import { GradeSheetSignatures } from './GradeSheetSignatures';
+import { GradeCellInput } from './GradeCellInput';
+import { applyGradePartUpdate, computeGradeTotal, hasSubGradeParts } from '../lib/gradeSplitUtils';
 import { motion, AnimatePresence } from 'motion/react';
 
 interface TeacherPortalProps {
@@ -628,12 +630,13 @@ export default function TeacherPortal({
 
       uniqueSubjects.forEach(sub => {
         const subGrade = studentGrades.find(g => g.subject === sub);
-        if (subGrade && typeof subGrade.score === 'number' && !isNaN(subGrade.score)) {
-          totalScore += subGrade.score;
+        const totalForSub = computeGradeTotal(subGrade);
+        if (totalForSub !== null && !isNaN(totalForSub)) {
+          totalScore += totalForSub;
           scoredCount++;
-          studentScoresList.push({ subject: sub, score: subGrade.score, maxScore: numericMaxGrade });
+          studentScoresList.push({ subject: sub, score: totalForSub, maxScore: numericMaxGrade || 100 });
         } else {
-          studentScoresList.push({ subject: sub, score: null, maxScore: numericMaxGrade });
+          studentScoresList.push({ subject: sub, score: null, maxScore: numericMaxGrade || 100 });
         }
       });
 
@@ -758,7 +761,6 @@ export default function TeacherPortal({
       return;
     }
 
-    const headers = ['الرقم الموحد', 'اسم الطالب', 'الصف', ...uniqueSubjects, 'المعدل', 'التقدير', 'توجيهات وملاحظات المعلم'];
     const data = classStudents.map(s => {
       const studentGrades = grades.filter(g => g.studentId === s.id && g.examName === currentEvaluationMonth);
       const evalForMonth = monthlyEvaluations[`${s.id}_${currentEvaluationMonth}`] || (monthlyEvaluations[s.id]?.month === currentEvaluationMonth ? monthlyEvaluations[s.id] : undefined);
@@ -774,12 +776,16 @@ export default function TeacherPortal({
 
       uniqueSubjects.forEach(sub => {
         const subGrade = studentGrades.find(g => g.subject === sub);
-        if (subGrade && typeof subGrade.score === 'number' && !isNaN(subGrade.score)) {
-          row[sub] = subGrade.score;
-          totalScore += subGrade.score;
+        const totalForSub = computeGradeTotal(subGrade);
+        row[`${sub} (شفهي)`] = subGrade?.oralScore ?? '';
+        row[`${sub} (وظائف)`] = subGrade?.homeworkScore ?? '';
+        row[`${sub} (مذاكرة)`] = subGrade?.quizScore ?? '';
+        if (totalForSub !== null && !isNaN(totalForSub)) {
+          row[`${sub} (المجموع)`] = totalForSub;
+          totalScore += totalForSub;
           subjectCount++;
         } else {
-          row[sub] = '';
+          row[`${sub} (المجموع)`] = '';
         }
       });
 
@@ -1593,30 +1599,46 @@ export default function TeacherPortal({
                         <table className="w-full text-right border-collapse text-xs">
                           <thead className="bg-slate-50 text-slate-700 border-b border-slate-200 font-black">
                             <tr>
-                              <th className="p-3 text-center w-24">الرقم الموحد</th>
-                              <th className="p-3 min-w-[150px]">اسم الطالب</th>
+                              <th rowSpan={2} className="p-2.5 text-center w-20 border-b border-slate-200">الرقم الموحد</th>
+                              <th rowSpan={2} className="p-2.5 min-w-[140px] border-b border-slate-200 sticky right-0 z-20 bg-slate-50 shadow-[-2px_0_6px_-2px_rgba(0,0,0,0.06)] print:static">اسم الطالب</th>
                               {uniqueSubjects.map(sub => {
                                 const isTeacherSub = teacherClassSubjects.includes(sub);
                                 return (
                                   <th
                                     key={sub}
-                                    className={`p-3 text-center min-w-[85px] ${
-                                      isTeacherSub ? 'bg-indigo-100/70 text-indigo-950 font-black border-x border-indigo-200' : ''
+                                    colSpan={4}
+                                    className={`p-2 text-center border-x-2 border-b border-slate-200 ${
+                                      isTeacherSub ? 'bg-indigo-100/80 text-indigo-950 font-black border-x-indigo-200' : 'bg-slate-100/70'
                                     }`}
                                   >
-                                    <div>{sub}</div>
-                                    {isTeacherSub && (
-                                      <span className="text-[8px] bg-indigo-600 text-white px-1.5 py-0.2 rounded-full font-bold block mt-0.5">
-                                        ⭐ مادتك
-                                      </span>
-                                    )}
+                                    <div className="flex items-center justify-center gap-1.5 whitespace-nowrap">
+                                      <span>{sub}</span>
+                                      {isTeacherSub && (
+                                        <span className="text-[8px] bg-indigo-600 text-white px-1.5 py-0.5 rounded-full font-bold">
+                                          ⭐ مادتك
+                                        </span>
+                                      )}
+                                    </div>
                                   </th>
                                 );
                               })}
-                              <th className="p-3 text-center w-20">المعدل</th>
-                              <th className="p-3 text-center w-24">التقدير</th>
-                              <th className="p-3 min-w-[200px]">توجيهات وملاحظات المعلم</th>
-                              <th className="p-3 min-w-[160px]">توجيهات الإدارة</th>
+                              <th rowSpan={2} className="p-2.5 text-center w-20 border-b border-slate-200">المعدل</th>
+                              <th rowSpan={2} className="p-2.5 text-center w-24 border-b border-slate-200">التقدير</th>
+                              <th rowSpan={2} className="p-2.5 min-w-[200px] border-b border-slate-200">توجيهات وملاحظات المعلم</th>
+                              <th rowSpan={2} className="p-2.5 min-w-[160px] border-b border-slate-200">توجيهات الإدارة</th>
+                            </tr>
+                            <tr className="text-[10px] font-extrabold text-slate-600 border-b border-slate-200">
+                              {uniqueSubjects.map(sub => {
+                                const isTeacherSub = teacherClassSubjects.includes(sub);
+                                return (
+                                  <React.Fragment key={`${sub}_subcols`}>
+                                    <th className={`p-1.5 text-center min-w-[56px] border-r-2 ${isTeacherSub ? 'bg-indigo-50/60 border-r-indigo-200' : 'bg-white border-r-slate-200'}`}>شفهي</th>
+                                    <th className={`p-1.5 text-center min-w-[56px] border-r border-slate-100 ${isTeacherSub ? 'bg-indigo-50/60' : 'bg-white'}`}>وظائف</th>
+                                    <th className={`p-1.5 text-center min-w-[56px] border-r border-slate-100 ${isTeacherSub ? 'bg-indigo-50/60' : 'bg-white'}`}>مذاكرة</th>
+                                    <th className={`p-1.5 text-center min-w-[62px] border-x border-l-2 font-black ${isTeacherSub ? 'bg-indigo-100/90 text-indigo-900 border-l-indigo-200 border-r-indigo-200' : 'bg-indigo-50/70 text-indigo-800 border-l-slate-200 border-r-indigo-100'}`}>المجموع</th>
+                                  </React.Fragment>
+                                );
+                              })}
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-slate-100">
@@ -1626,8 +1648,9 @@ export default function TeacherPortal({
                               let scoredCount = 0;
                               uniqueSubjects.forEach(sub => {
                                 const subGrade = studentGrades.find(g => g.subject === sub);
-                                if (subGrade && typeof subGrade.score === 'number' && !isNaN(subGrade.score)) {
-                                  totalScore += subGrade.score;
+                                const totalForSub = computeGradeTotal(subGrade);
+                                if (totalForSub !== null && !isNaN(totalForSub)) {
+                                  totalScore += totalForSub;
                                   scoredCount++;
                                 }
                               });
@@ -1637,63 +1660,90 @@ export default function TeacherPortal({
 
                               return (
                                 <tr key={getSafeStudentKey(student, idx, 't_grade_row')} className="hover:bg-slate-50/70 transition">
-                                  <td className="p-3 text-center font-mono font-bold text-indigo-700">
+                                  <td className="p-2.5 text-center font-mono font-bold text-indigo-700">
                                     <span className="inline-block px-2 py-0.5 rounded-lg bg-indigo-50 border border-indigo-100 text-xs">
                                       #{student.unifiedNo || student.rollNo}
                                     </span>
                                   </td>
-                                  <td className="p-3 font-extrabold text-slate-800 whitespace-nowrap">
+                                  <td className="p-2.5 font-extrabold text-slate-800 whitespace-nowrap sticky right-0 z-10 bg-white shadow-[-2px_0_6px_-2px_rgba(0,0,0,0.06)] print:static">
                                     {student.name}
                                   </td>
                                   {uniqueSubjects.map(sub => {
                                     const subGrade = studentGrades.find(g => g.subject === sub);
                                     const isTeacherSub = teacherClassSubjects.includes(sub);
+                                    const hasParts = hasSubGradeParts(subGrade);
+                                    const totalVal = computeGradeTotal(subGrade);
+                                    const handlePartChange = (part: 'oralScore' | 'homeworkScore' | 'quizScore' | 'total', score: number | null) => {
+                                      if (!setGrades) return;
+                                      setGrades(prev => {
+                                        const next = applyGradePartUpdate(prev, {
+                                          studentId: student.id,
+                                          subject: sub,
+                                          month: currentEvaluationMonth,
+                                          part,
+                                          value: score,
+                                          maxScore: numericMaxGrade || 100,
+                                          teacherId: selectedTeacherId,
+                                          idPrefix: 'g_t_edt'
+                                        });
+                                        localStorage.setItem('school_grades', JSON.stringify(next));
+                                        return next;
+                                      });
+                                    };
+                                    const inputCls = `w-12 text-center border rounded-lg py-1 px-1 text-xs font-bold font-mono focus:outline-none transition ${
+                                      isTeacherSub
+                                        ? 'border-indigo-300 bg-white hover:border-indigo-500 focus:ring-1 focus:ring-indigo-400'
+                                        : 'border-slate-200 bg-slate-50/60 hover:border-slate-400'
+                                    }`;
                                     return (
-                                      <td
-                                        key={sub}
-                                        className={`p-2 text-center ${
-                                          isTeacherSub ? 'bg-indigo-50/30 border-x border-indigo-100/50' : ''
-                                        }`}
-                                      >
-                                        <input
-                                          type="number"
-                                          min="0"
-                                          max={directorMaxGradeSetting === 'unspecified' ? undefined : (numericMaxGrade || 100)}
-                                          value={subGrade && subGrade.score !== null ? subGrade.score : ''}
-                                          onChange={e => {
-                                            const valStr = e.target.value.trim();
-                                            const score = valStr === '' ? 0 : parseFloat(valStr) || 0;
-                                            if (setGrades) {
-                                              setGrades(prev => {
-                                                const copy = [...prev];
-                                                const existingIdx = copy.findIndex(g => g.studentId === student.id && g.subject === sub && g.examName === currentEvaluationMonth);
-                                                if (existingIdx !== -1) {
-                                                  copy[existingIdx] = { ...copy[existingIdx], score };
-                                                } else {
-                                                  copy.push({
-                                                    id: 'g_t_edt_' + Date.now() + Math.random().toString(36).substring(2, 7),
-                                                    studentId: student.id,
-                                                    subject: sub,
-                                                    examName: currentEvaluationMonth,
-                                                    score,
-                                                    maxScore: numericMaxGrade || 100,
-                                                    date: new Date().toISOString().split('T')[0],
-                                                    teacherId: selectedTeacherId
-                                                  });
-                                                }
-                                                localStorage.setItem('school_grades', JSON.stringify(copy));
-                                                return copy;
-                                              });
-                                            }
-                                          }}
-                                          className={`w-14 text-center border rounded-lg p-1 text-xs font-bold font-mono focus:outline-none transition ${
-                                            isTeacherSub
-                                              ? 'border-indigo-300 bg-white hover:border-indigo-500 focus:ring-1 focus:ring-indigo-400'
-                                              : 'border-slate-200 bg-slate-50/50 hover:border-slate-400'
-                                          }`}
-                                          placeholder="---"
-                                        />
-                                      </td>
+                                      <React.Fragment key={sub}>
+                                        <td className={`p-1.5 text-center border-r-2 ${isTeacherSub ? 'bg-indigo-50/20 border-r-indigo-200' : 'border-r-slate-200'}`}>
+                                          <GradeCellInput
+                                            value={subGrade?.oralScore ?? null}
+                                            onChangeScore={score => handlePartChange('oralScore', score)}
+                                            className={inputCls}
+                                            placeholder="---"
+                                          />
+                                        </td>
+                                        <td className={`p-1.5 text-center ${isTeacherSub ? 'bg-indigo-50/20' : ''}`}>
+                                          <GradeCellInput
+                                            value={subGrade?.homeworkScore ?? null}
+                                            onChangeScore={score => handlePartChange('homeworkScore', score)}
+                                            className={inputCls}
+                                            placeholder="---"
+                                          />
+                                        </td>
+                                        <td className={`p-1.5 text-center ${isTeacherSub ? 'bg-indigo-50/20' : ''}`}>
+                                          <GradeCellInput
+                                            value={subGrade?.quizScore ?? null}
+                                            onChangeScore={score => handlePartChange('quizScore', score)}
+                                            className={inputCls}
+                                            placeholder="---"
+                                          />
+                                        </td>
+                                        <td className={`p-1.5 text-center border-l-2 ${isTeacherSub ? 'bg-indigo-100/40 border-l-indigo-200' : 'bg-indigo-50/30 border-l-slate-200'}`}>
+                                          {hasParts ? (
+                                            <span
+                                              className="inline-flex items-center justify-center min-w-[3rem] px-2 py-1 rounded-lg bg-indigo-50 border border-indigo-200 text-indigo-900 font-mono font-black text-xs"
+                                              title="المجموع التلقائي (شفهي + وظائف + مذاكرة)"
+                                            >
+                                              {totalVal !== null ? totalVal : '---'}
+                                            </span>
+                                          ) : (
+                                            <GradeCellInput
+                                              max={directorMaxGradeSetting === 'unspecified' ? undefined : (numericMaxGrade || 100)}
+                                              value={totalVal}
+                                              onChangeScore={score => handlePartChange('total', score)}
+                                              className={`w-13 text-center border rounded-lg py-1 px-1 text-xs font-black font-mono focus:outline-none transition ${
+                                                isTeacherSub
+                                                  ? 'border-indigo-400 bg-indigo-50/60 text-indigo-950 focus:ring-1 focus:ring-indigo-400'
+                                                  : 'border-indigo-200 bg-indigo-50/40 text-indigo-900'
+                                              }`}
+                                              placeholder="---"
+                                            />
+                                          )}
+                                        </td>
+                                      </React.Fragment>
                                     );
                                   })}
                                   {/* Average */}
