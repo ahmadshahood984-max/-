@@ -166,8 +166,10 @@ export async function fetchStudentGradesOnDemand(
       timeoutMs: 2500
     });
 
+    if (snap && !fromCache) {
+      trackFirestoreRead(1, `قراءة درجات طالب (${cleanUserId})`);
+    }
     if (snap && snap.exists()) {
-      if (!fromCache) trackFirestoreRead(1, `قراءة درجات طالب (${cleanUserId})`);
       const data = snap.data() as ConsolidatedStudentGradeRecord;
       if (data && data.subjects) {
         const studentGrades = unpackConsolidatedGrades(data);
@@ -185,8 +187,10 @@ export async function fetchStudentGradesOnDemand(
         timeoutMs: 2000
       });
 
+      if (altSnap && !altFromCache) {
+        trackFirestoreRead(1, `قراءة درجات طالب (${cleanUnified})`);
+      }
       if (altSnap && altSnap.exists()) {
-        if (!altFromCache) trackFirestoreRead(1, `قراءة درجات طالب (${cleanUnified})`);
         const data = altSnap.data() as ConsolidatedStudentGradeRecord;
         if (data && data.subjects) {
           const altGrades = unpackConsolidatedGrades(data);
@@ -231,8 +235,10 @@ export async function fetchConsolidatedStudentRecord(
       timeoutMs: 2500
     });
 
+    if (snap && !fromCache) {
+      trackFirestoreRead(1, `قراءة السجل الموحد (${cleanId})`);
+    }
     if (snap && snap.exists()) {
-      if (!fromCache) trackFirestoreRead(1, `قراءة السجل الموحد (${cleanId})`);
       return snap.data() as ConsolidatedStudentGradeRecord;
     }
 
@@ -242,8 +248,10 @@ export async function fetchConsolidatedStudentRecord(
         forceServer: effectiveForceServer,
         timeoutMs: 2000
       });
+      if (altSnap && !altFromCache) {
+        trackFirestoreRead(1, `قراءة السجل الموحد (${fallbackUnifiedNo})`);
+      }
       if (altSnap && altSnap.exists()) {
-        if (!altFromCache) trackFirestoreRead(1, `قراءة السجل الموحد (${fallbackUnifiedNo})`);
         return altSnap.data() as ConsolidatedStudentGradeRecord;
       }
     }
@@ -549,8 +557,24 @@ export async function saveSingleStudentGradesConsolidated(
   }
 }
 
+const lastSyncedConsolidatedSignatures = new Map<string, string>();
+
+function computeRecordSignature(rec: { subjects: any; teacherNotes?: string; directorNotes?: string; month?: string }): string {
+  try {
+    return JSON.stringify({
+      m: rec.month || '',
+      s: rec.subjects || {},
+      tn: rec.teacherNotes || '',
+      dn: rec.directorNotes || ''
+    });
+  } catch {
+    return String(Date.now());
+  }
+}
+
 /**
  * Migration helper to batch seed existing Grade[] array into consolidated documents
+ * Only writes students whose consolidated subjects actually changed to avoid write amplification.
  */
 export async function seedGradesToStudentCollection(grades: Grade[]): Promise<void> {
   if (!Array.isArray(grades) || grades.length === 0) return;
@@ -575,16 +599,30 @@ export async function seedGradesToStudentCollection(grades: Grade[]): Promise<vo
     };
   });
 
-  const records = Array.from(studentMap.values()).map(r => ({
-    studentId: r.studentId,
-    subjects: r.subjects
-  }));
+  const changedRecords: Array<{
+    studentId: string;
+    subjects: { [sub: string]: { score: number | null; maxScore: number; examName?: string } };
+  }> = [];
 
-  await batchSaveStudentsGradesConsolidated(records);
+  studentMap.forEach((r) => {
+    const sig = computeRecordSignature({ subjects: r.subjects });
+    if (lastSyncedConsolidatedSignatures.get(`seed_${r.studentId}`) !== sig) {
+      lastSyncedConsolidatedSignatures.set(`seed_${r.studentId}`, sig);
+      changedRecords.push({
+        studentId: r.studentId,
+        subjects: r.subjects
+      });
+    }
+  });
+
+  if (changedRecords.length > 0) {
+    await batchSaveStudentsGradesConsolidated(changedRecords);
+  }
 }
 
 /**
- * Sync all student summaries from SentGradeSheet records into consolidated single-document records
+ * Sync student summaries from SentGradeSheet records into consolidated single-document records,
+ * skipping previously synced identical student snapshots to avoid redundant Firestore writes.
  */
 export async function syncSentGradeSheetsToConsolidatedCollection(sheets: SentGradeSheet[]): Promise<void> {
   if (!Array.isArray(sheets) || sheets.length === 0) return;
@@ -617,7 +655,7 @@ export async function syncSentGradeSheetsToConsolidatedCollection(sheets: SentGr
         };
       });
 
-      records.push({
+      const rec = {
         studentId: cleanId,
         studentName: st.studentName,
         classId: sheet.classId,
@@ -628,7 +666,13 @@ export async function syncSentGradeSheetsToConsolidatedCollection(sheets: SentGr
         subjects: subjectsMap,
         teacherNotes: st.teacherNotes,
         directorNotes: st.directorNotes
-      });
+      };
+
+      const sig = computeRecordSignature(rec);
+      if (lastSyncedConsolidatedSignatures.get(`sheet_${cleanId}`) !== sig) {
+        lastSyncedConsolidatedSignatures.set(`sheet_${cleanId}`, sig);
+        records.push(rec);
+      }
     });
   });
 

@@ -81,7 +81,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
 import { db } from '../lib/firebase';
 import { collection, addDoc, setDoc, deleteDoc, doc, serverTimestamp, writeBatch, getDocs } from 'firebase/firestore';
-import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead, checkDailyRollover, fetchCentralizedConsumptionOnce, resetCentralizedFirestoreConsumption } from '../lib/firestoreTracker';
+import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead, checkDailyRollover, fetchCentralizedConsumptionOnce, resetCentralizedFirestoreConsumption, calibrateCentralConsumptionBaseline, getRecentUtcDates, FIREBASE_PROJECT_ID, FIREBASE_DATABASE_ID } from '../lib/firestoreTracker';
 import { calculateStorageUsageReport, measureLiveCloudStorageAudit, StorageUsageReport } from '../lib/storageUsage';
 import { forceRefreshDataFromFirestore, persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate, recordDeletedStudentIds, queueOfflineNotification, flushPendingLocalSyncKeys } from '../lib/firebaseSync';
 import { isFirestoreQuotaExceeded, markFirestoreQuotaExceeded, isQuotaError, resetFirestoreQuotaBreaker } from '../lib/quotaManager';
@@ -244,6 +244,14 @@ export default function DirectorPortal({
   const [isMetricsModalOpen, setIsMetricsModalOpen] = useState(false);
   const [storageReport, setStorageReport] = useState<StorageUsageReport>(() => calculateStorageUsageReport());
   const [isAuditingStorage, setIsAuditingStorage] = useState(false);
+  const [showCalibratePanel, setShowCalibratePanel] = useState(false);
+  const [calibTodayReads, setCalibTodayReads] = useState('');
+  const [calibTodayWrites, setCalibTodayWrites] = useState('');
+  const [calibTodayRealtime, setCalibTodayRealtime] = useState('');
+  const [calibWeekReads, setCalibWeekReads] = useState('');
+  const [calibWeekWrites, setCalibWeekWrites] = useState('');
+  const [calibWeekRealtime, setCalibWeekRealtime] = useState('');
+  const [isCalibrating, setIsCalibrating] = useState(false);
 
   const handleRunCloudStorageAudit = async () => {
     setIsAuditingStorage(true);
@@ -397,8 +405,8 @@ export default function DirectorPortal({
   React.useEffect(() => {
     return subscribeToFirestoreMetrics((data) => {
       setFirestoreMetrics(data);
-    }, { syncCentral: true });
-  }, []);
+    }, { syncCentral: true, realtimeCentral: isMetricsModalOpen });
+  }, [isMetricsModalOpen]);
 
   React.useEffect(() => {
     if (isMetricsModalOpen || activeTab === 'data-cleanup') {
@@ -5313,20 +5321,24 @@ ${directivesFormatted}
           localStorage.setItem('school_messages', JSON.stringify(remaining));
           window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_messages', value: JSON.stringify(remaining) } }));
           if (db && !isFirestoreQuotaExceeded()) {
-            getDocs(collection(db, 'notifications')).then(snap => {
+            getDocs(collection(db, 'notifications')).then(async snap => {
               trackFirestoreRead(snap.size || 1, `قراءة الإشعارات للحذف (${snap.size})`);
+              const commitPromises: Promise<void>[] = [];
               let b = writeBatch(db);
               let c = 0;
               snap.forEach(d => {
                 b.delete(d.ref);
                 c++;
                 if (c % 400 === 0) {
-                  b.commit();
+                  commitPromises.push(b.commit());
                   b = writeBatch(db);
                 }
               });
-              if (c % 400 !== 0) b.commit();
-              if (c > 0) trackFirestoreWrite(c, `حذف دفعة إشعارات (${c})`);
+              if (c % 400 !== 0) commitPromises.push(b.commit());
+              if (commitPromises.length > 0) {
+                await Promise.all(commitPromises);
+                if (c > 0) trackFirestoreWrite(c, `حذف دفعة إشعارات (${c})`);
+              }
             }).catch((err: any) => {
               if (isQuotaError(err)) markFirestoreQuotaExceeded(err);
             });
@@ -14026,7 +14038,7 @@ ${sampleEval}
                 initial={{ opacity: 0, scale: 0.95 }}
                 animate={{ opacity: 1, scale: 1 }}
                 exit={{ opacity: 0, scale: 0.95 }}
-                className="bg-white rounded-3xl max-w-xl w-full max-h-[90vh] overflow-y-auto p-6 shadow-2xl border border-slate-100 space-y-5 text-right"
+                className="bg-white rounded-3xl max-w-2xl w-full max-h-[92vh] overflow-y-auto p-6 shadow-2xl border border-slate-100 space-y-5 text-right"
                 style={{ direction: 'rtl' }}
               >
                 <div className="flex items-center justify-between border-b border-slate-100 pb-4">
@@ -14043,15 +14055,15 @@ ${sampleEval}
                     </div>
                     <div>
                       <h3 className="font-bold text-slate-800 text-sm">مراقبة حصة واستهلاك Firebase Firestore 📈</h3>
-                      <p className="text-[10px] text-slate-400">الخطة المجانية Spark Plan (محدث بشكل حي ومباشر)</p>
+                      <p className="text-[10px] text-slate-400">متوافق مع توقيت حصة Spark Plan (PT) + نطاق آخر 7 أيام (UTC)</p>
                     </div>
                   </div>
                 </div>
 
                 <div className="space-y-4">
                   {/* Daily Auto-Reset & Centralized Sync Status Banner */}
-                  <div className="bg-emerald-50 border border-emerald-200/90 rounded-xl p-2.5 flex flex-col gap-1 text-xs">
-                    <div className="flex items-center justify-between">
+                  <div className="bg-emerald-50 border border-emerald-200/90 rounded-xl p-3 flex flex-col gap-1.5 text-xs">
+                    <div className="flex items-center justify-between flex-wrap gap-2">
                       <div className="flex items-center gap-2">
                         <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
                         <span className="font-bold text-emerald-900">العداد المركزي الموحد نشط (system_stats/consumption) 🔄</span>
@@ -14060,17 +14072,23 @@ ${sampleEval}
                         {firestoreMetrics.syncedFromCentral ? 'متصل بالسحابة حيّاً ✅' : 'مزامنة تلقائية'}
                       </span>
                     </div>
-                    <div className="flex items-center justify-between text-[11px] text-emerald-700 font-medium">
-                      <span>يتصفر العداد آلياً كل يوم جديد (12:00 ليلاً) ويرصد عمليات جميع الأجهزة</span>
+                    <div className="flex items-center justify-between flex-wrap gap-1 text-[11px] text-emerald-700 font-medium">
+                      <span>تاريخ حصة اليوم (توقيت Firebase الرسمي PT): <strong className="font-mono">{firestoreMetrics.date || '-'}</strong></span>
                       {firestoreMetrics.lastOperation && (
-                        <span className="text-[10px] text-emerald-800 font-bold truncate max-w-[200px]" title={firestoreMetrics.lastOperation}>
+                        <span className="text-[10px] text-emerald-800 font-bold truncate max-w-[240px]" title={firestoreMetrics.lastOperation}>
                           آخر عملية: {firestoreMetrics.lastOperation}
                         </span>
                       )}
                     </div>
+                    <div className="bg-white/80 border border-emerald-200/70 rounded-lg px-2.5 py-1.5 text-[10px] text-slate-600 leading-relaxed">
+                      <span className="font-bold text-slate-800">نطاق الرصد:</span> المشروع <strong className="font-mono text-indigo-700">{FIREBASE_PROJECT_ID}</strong> / قاعدة البيانات <strong className="font-mono text-indigo-700">{FIREBASE_DATABASE_ID}</strong>.
+                      <span className="block text-[9.5px] text-slate-500 mt-0.5">
+                        ملاحظة: صفحة &laquo;نظرة عامة&raquo; في Firebase Console قد تجمع عدة قواعد بيانات مشتركة بالحصة وتعرض مجموع 7 أيام؛ للمطابقة 1:1 حدد نفس اسم قاعدة البيانات أعلاه داخل وحدة تحكم Firebase.
+                      </span>
+                    </div>
                   </div>
 
-                  {/* Reads Bar */}
+                  {/* Today's Quota: Reads + Realtime Reads Breakdown */}
                   <div className="space-y-2">
                     <div className="flex justify-between items-center text-xs">
                       <span className="font-bold text-slate-700">إجمالي القراءات اليومية لجميع الأجهزة (Reads)</span>
@@ -14080,7 +14098,6 @@ ${sampleEval}
                         )
                       </span>
                     </div>
-                    {/* Progress Bar */}
                     <div className="w-full h-3 bg-slate-100 rounded-full overflow-hidden">
                       <div
                         className={`h-full transition-all duration-500 ${
@@ -14093,20 +14110,23 @@ ${sampleEval}
                         style={{ width: `${Math.min(100, (firestoreMetrics.totalReads / 50000) * 100)}%` }}
                       />
                     </div>
-                    {/* Breakdown */}
-                    <div className="grid grid-cols-2 gap-3 bg-slate-50 p-2.5 rounded-xl text-[11px] text-slate-500">
+                    <div className="grid grid-cols-3 gap-2 bg-slate-50 p-2.5 rounded-xl text-[11px] text-slate-500">
                       <div>
-                        <span>قراءات هذا الجهاز: </span>
+                        <span className="block text-[10px]">قراءات هذا الجهاز</span>
                         <strong className="font-mono text-slate-700">{firestoreMetrics.reads.toLocaleString()}</strong>
                       </div>
                       <div>
-                        <span>العداد المركزي السحابي: </span>
+                        <span className="block text-[10px]">قراءات فورية (Realtime)</span>
+                        <strong className="font-mono text-pink-600">{(firestoreMetrics.totalRealtimeReads || 0).toLocaleString()}</strong>
+                      </div>
+                      <div>
+                        <span className="block text-[10px]">العداد المركزي السحابي</span>
                         <strong className="font-mono text-indigo-700">{(firestoreMetrics.firestoreReads || 0).toLocaleString()}</strong>
                       </div>
                     </div>
                   </div>
 
-                  {/* Writes Bar */}
+                  {/* Today's Quota: Writes */}
                   <div className="space-y-2">
                     <div className="flex justify-between items-center text-xs">
                       <span className="font-bold text-slate-700">إجمالي الكتابات اليومية لجميع الأجهزة (Writes)</span>
@@ -14116,7 +14136,6 @@ ${sampleEval}
                         )
                       </span>
                     </div>
-                    {/* Progress Bar */}
                     <div className="w-full h-3 bg-slate-100 rounded-full overflow-hidden">
                       <div
                         className={`h-full transition-all duration-500 ${
@@ -14129,16 +14148,57 @@ ${sampleEval}
                         style={{ width: `${Math.min(100, (firestoreMetrics.totalWrites / 20000) * 100)}%` }}
                       />
                     </div>
-                    {/* Breakdown */}
-                    <div className="grid grid-cols-2 gap-3 bg-slate-50 p-2.5 rounded-xl text-[11px] text-slate-500">
+                    <div className="grid grid-cols-3 gap-2 bg-slate-50 p-2.5 rounded-xl text-[11px] text-slate-500">
                       <div>
-                        <span>كتابات هذا الجهاز: </span>
+                        <span className="block text-[10px]">كتابات هذا الجهاز</span>
                         <strong className="font-mono text-slate-700">{firestoreMetrics.writes.toLocaleString()}</strong>
                       </div>
                       <div>
-                        <span>العداد المركزي السحابي: </span>
+                        <span className="block text-[10px]">بانتظار الرفع السحابي</span>
+                        <strong className="font-mono text-amber-600">{(firestoreMetrics.pendingLocalWrites || 0).toLocaleString()}</strong>
+                      </div>
+                      <div>
+                        <span className="block text-[10px]">العداد المركزي السحابي</span>
                         <strong className="font-mono text-indigo-700">{(firestoreMetrics.firestoreWrites || 0).toLocaleString()}</strong>
                       </div>
+                    </div>
+                  </div>
+
+                  {/* Last 7 Days Summary (Matches Firebase Console 7-Day Overview Chart) */}
+                  <div className="bg-slate-900 text-white rounded-2xl p-4 space-y-3">
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                      <div>
+                        <span className="text-xs font-extrabold block">ملخص آخر 7 أيام (مطابق لنطاق Firebase Console)</span>
+                        <span className="text-[10px] text-slate-400">
+                          الأيام بتوقيت UTC • الإجمالي التراكمي: {(firestoreMetrics.lifetimeReads || 0).toLocaleString()} قراءة / {(firestoreMetrics.lifetimeWrites || 0).toLocaleString()} كتابة
+                        </span>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2.5">
+                      <div className="bg-slate-800/90 border border-sky-500/30 rounded-xl p-2.5">
+                        <span className="text-[10px] text-sky-300 block font-bold">يقرأ (7 أيام)</span>
+                        <strong className="text-base font-mono text-white">{(firestoreMetrics.reads7d || 0).toLocaleString()}</strong>
+                      </div>
+                      <div className="bg-slate-800/90 border border-amber-500/30 rounded-xl p-2.5">
+                        <span className="text-[10px] text-amber-300 block font-bold">يكتب (7 أيام)</span>
+                        <strong className="text-base font-mono text-white">{(firestoreMetrics.writes7d || 0).toLocaleString()}</strong>
+                      </div>
+                      <div className="bg-slate-800/90 border border-pink-500/30 rounded-xl p-2.5">
+                        <span className="text-[10px] text-pink-300 block font-bold">قراءات فورية (7 أيام)</span>
+                        <strong className="text-base font-mono text-white">{(firestoreMetrics.realtimeReads7d || 0).toLocaleString()}</strong>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-7 gap-1 pt-1">
+                      {getRecentUtcDates(7).map((utcDay) => {
+                        const b = firestoreMetrics.dailyHistory?.[utcDay];
+                        return (
+                          <div key={utcDay} className="bg-slate-800/70 rounded-lg p-1.5 text-center border border-slate-700/60">
+                            <span className="block text-[9px] text-slate-400 font-mono">{utcDay.slice(5)}</span>
+                            <span className="block text-[10px] font-mono font-bold text-sky-300" title="القراءات">{b?.reads || 0}</span>
+                            <span className="block text-[9px] font-mono text-amber-300" title="الكتابات">{b?.writes || 0}</span>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
 
@@ -14165,7 +14225,6 @@ ${sampleEval}
                       </button>
                     </div>
 
-                    {/* Progress & Exact Numbers */}
                     <div className="space-y-1.5">
                       <div className="flex justify-between items-center text-xs">
                         <span className="font-bold text-indigo-900">
@@ -14189,7 +14248,6 @@ ${sampleEval}
                       </div>
                     </div>
 
-                    {/* Category Breakdown */}
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
                       {storageReport.breakdown.slice(0, 6).map(cat => (
                         <div key={cat.id} className="bg-white/90 border border-indigo-100 rounded-xl px-2.5 py-1.5 flex items-center justify-between gap-2 text-[10px]">
@@ -14199,7 +14257,6 @@ ${sampleEval}
                       ))}
                     </div>
 
-                    {/* Local Browser Cache & Cloud Collection Counts */}
                     <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-indigo-100 text-[10px] text-slate-600">
                       <span>
                         ذاكرة المتصفح المحلية (Cache): <strong className="font-mono text-slate-800">{storageReport.localStorageFormatted}</strong> / 5 MB ({storageReport.localStoragePercent.toFixed(1)}%)
@@ -14212,10 +14269,10 @@ ${sampleEval}
                     </div>
                   </div>
 
-                  {/* Quick Centralized Controls */}
-                  <div className="bg-slate-50 p-3 rounded-2xl border border-slate-100 space-y-2">
+                  {/* Quick Centralized Controls & Optional Console Baseline Calibration */}
+                  <div className="bg-slate-50 p-3 rounded-2xl border border-slate-100 space-y-2.5">
                     <span className="text-[10px] text-slate-400 block font-bold">إدارة ومزامنة العداد المركزي (System Stats Controls)</span>
-                    <div className="flex gap-2">
+                    <div className="flex flex-wrap gap-2">
                       <button
                         type="button"
                         onClick={() => {
@@ -14228,13 +14285,135 @@ ${sampleEval}
                       <button
                         type="button"
                         onClick={() => {
-                          resetCentralizedFirestoreConsumption().catch(() => {});
+                          setShowCalibratePanel(prev => {
+                            const next = !prev;
+                            if (next) {
+                              setCalibTodayReads(String(firestoreMetrics.totalReads || 0));
+                              setCalibTodayWrites(String(firestoreMetrics.totalWrites || 0));
+                              setCalibTodayRealtime(String(firestoreMetrics.totalRealtimeReads || 0));
+                              setCalibWeekReads(String(firestoreMetrics.reads7d || firestoreMetrics.totalReads || 0));
+                              setCalibWeekWrites(String(firestoreMetrics.writes7d || firestoreMetrics.totalWrites || 0));
+                              setCalibWeekRealtime(String(firestoreMetrics.realtimeReads7d || firestoreMetrics.totalRealtimeReads || 0));
+                            }
+                            return next;
+                          });
+                        }}
+                        className="bg-indigo-100 text-indigo-800 text-[11px] font-bold py-1.5 px-3 rounded-xl hover:bg-indigo-200 transition cursor-pointer"
+                      >
+                        🎛️ معايرة مع Console
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          resetCentralizedFirestoreConsumption(false).catch(() => {});
                         }}
                         className="bg-slate-200 text-slate-700 text-[11px] font-bold py-1.5 px-3 rounded-xl hover:bg-slate-300 transition cursor-pointer"
                       >
-                        🔄 تصفير العداد المركزي
+                        🔄 تصفير عداد اليوم
                       </button>
                     </div>
+
+                    {showCalibratePanel && (
+                      <div className="bg-white border border-indigo-200 rounded-xl p-3 space-y-2.5 mt-2">
+                        <p className="text-[10px] text-slate-600 leading-relaxed">
+                          أدخل الأرقام الظاهرة في لوحة <strong className="text-indigo-700">Firebase Console</strong> لقاعدة البيانات <span className="font-mono">{FIREBASE_DATABASE_ID.slice(0, 18)}...</span> لمطابقة خط الأساس التاريخي مع الرصد الحي القادم:
+                        </p>
+                        <div className="grid grid-cols-3 gap-2">
+                          <div>
+                            <label className="block text-[9.5px] font-bold text-slate-500 mb-0.5">قراءات اليوم</label>
+                            <input
+                              type="number"
+                              min={0}
+                              value={calibTodayReads}
+                              onChange={e => setCalibTodayReads(e.target.value)}
+                              className="w-full text-xs font-mono border border-slate-200 rounded-lg px-2 py-1"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[9.5px] font-bold text-slate-500 mb-0.5">كتابات اليوم</label>
+                            <input
+                              type="number"
+                              min={0}
+                              value={calibTodayWrites}
+                              onChange={e => setCalibTodayWrites(e.target.value)}
+                              className="w-full text-xs font-mono border border-slate-200 rounded-lg px-2 py-1"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[9.5px] font-bold text-slate-500 mb-0.5">فورية اليوم</label>
+                            <input
+                              type="number"
+                              min={0}
+                              value={calibTodayRealtime}
+                              onChange={e => setCalibTodayRealtime(e.target.value)}
+                              className="w-full text-xs font-mono border border-slate-200 rounded-lg px-2 py-1"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[9.5px] font-bold text-slate-500 mb-0.5">قراءات 7 أيام</label>
+                            <input
+                              type="number"
+                              min={0}
+                              value={calibWeekReads}
+                              onChange={e => setCalibWeekReads(e.target.value)}
+                              className="w-full text-xs font-mono border border-slate-200 rounded-lg px-2 py-1"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[9.5px] font-bold text-slate-500 mb-0.5">كتابات 7 أيام</label>
+                            <input
+                              type="number"
+                              min={0}
+                              value={calibWeekWrites}
+                              onChange={e => setCalibWeekWrites(e.target.value)}
+                              className="w-full text-xs font-mono border border-slate-200 rounded-lg px-2 py-1"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[9.5px] font-bold text-slate-500 mb-0.5">فورية 7 أيام</label>
+                            <input
+                              type="number"
+                              min={0}
+                              value={calibWeekRealtime}
+                              onChange={e => setCalibWeekRealtime(e.target.value)}
+                              className="w-full text-xs font-mono border border-slate-200 rounded-lg px-2 py-1"
+                            />
+                          </div>
+                        </div>
+                        <div className="flex justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setShowCalibratePanel(false)}
+                            className="px-3 py-1 text-[10px] font-bold text-slate-500 hover:bg-slate-100 rounded-lg cursor-pointer"
+                          >
+                            إلغاء
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isCalibrating}
+                            onClick={async () => {
+                              setIsCalibrating(true);
+                              try {
+                                await calibrateCentralConsumptionBaseline({
+                                  todayReads: Number(calibTodayReads) || 0,
+                                  todayWrites: Number(calibTodayWrites) || 0,
+                                  todayRealtimeReads: Number(calibTodayRealtime) || 0,
+                                  weekReads: calibWeekReads !== '' ? Number(calibWeekReads) : undefined,
+                                  weekWrites: calibWeekWrites !== '' ? Number(calibWeekWrites) : undefined,
+                                  weekRealtimeReads: calibWeekRealtime !== '' ? Number(calibWeekRealtime) : undefined
+                                });
+                                setShowCalibratePanel(false);
+                              } finally {
+                                setIsCalibrating(false);
+                              }
+                            }}
+                            className="px-3 py-1 bg-indigo-600 hover:bg-indigo-700 text-white text-[10px] font-bold rounded-lg cursor-pointer disabled:opacity-60"
+                          >
+                            {isCalibrating ? 'جاري الحفظ...' : 'اعتماد ومطابقة الأرقام ✅'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   {/* Close button */}

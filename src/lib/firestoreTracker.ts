@@ -1,15 +1,15 @@
 /**
  * Centralized Firestore Consumption Tracker
- * Tracks every actual server read, write, and batch operation across ALL user devices
- * and synchronizes atomically with the shared Firestore document: `system_stats/consumption`.
- *
- * Loop-Prevention Guarantees:
- * 1. Flushing deltas to `system_stats/consumption` NEVER calls `trackFirestoreWrite` on itself.
- * 2. Listening to `system_stats/consumption` in the Admin dashboard NEVER triggers a read-back or write-back.
- * 3. Cache hits (`fromCache === true`) NEVER increment server consumption counters.
+ * Accurately mirrors Firebase Console & Spark Plan quota accounting:
+ * - Daily Spark quota resets at Midnight Pacific Time (`America/Los_Angeles`).
+ * - 7-day rolling UTC daily buckets (`dailyHistory`) match Firebase Console Overview (`آخر 7 أيام`).
+ * - Separately tracks Realtime Reads (`onSnapshot` server snapshots) vs Direct Reads, plus Writes.
+ * - Counts `system_stats/consumption` own flush reads/writes inline without triggering loops.
+ * - Persists pending deltas in localStorage so reloads never drop unflushed writes.
  */
 
 import { db } from './firebase';
+import firebaseConfigJson from '../../firebase-applet-config.json';
 import {
   doc,
   setDoc,
@@ -23,72 +23,231 @@ import {
   markFirestoreQuotaExceeded,
   isQuotaError,
   registerActiveFirestoreListener,
-  resetFirestoreQuotaBreaker
+  resetFirestoreQuotaBreaker,
+  getFirebaseQuotaDateStr,
+  getUtcDateStr
 } from './quotaManager';
 
+export const FIREBASE_PROJECT_ID = firebaseConfigJson.projectId || 'aesthetic-night-p8gvj';
+export const FIREBASE_DATABASE_ID =
+  firebaseConfigJson.firestoreDatabaseId || 'ai-studio-c3b19e71-cc85-420b-8314-cb9b70b9467c';
+
+export interface DailyUsageBucket {
+  reads: number;
+  writes: number;
+  realtimeReads: number;
+}
+
 export interface FirestoreMetrics {
-  date: string;           // YYYY-MM-DD
-  reads: number;          // Local device reads today
-  writes: number;         // Local device writes today
-  simulatedReads: number; // Kept as 0 for backward-compatibility
-  simulatedWrites: number;// Kept as 0 for backward-compatibility
-  totalReads: number;     // Global total reads today across ALL devices
-  totalWrites: number;    // Global total writes today across ALL devices
-  firestoreReads: number; // Central counter from `system_stats/consumption`
-  firestoreWrites: number;// Central counter from `system_stats/consumption`
+  date: string;                    // Official Firebase Quota Date YYYY-MM-DD (America/Los_Angeles)
+  utcDate?: string;                // Current UTC Date YYYY-MM-DD
+  reads: number;                   // Local device reads today (PT)
+  writes: number;                  // Local device writes today (PT)
+  realtimeReads?: number;          // Local device realtime onSnapshot server reads today (PT)
+  simulatedReads: number;          // Kept as 0 for backward-compatibility
+  simulatedWrites: number;         // Kept as 0 for backward-compatibility
+  totalReads: number;              // Global total reads today across ALL devices (PT)
+  totalWrites: number;             // Global total writes today across ALL devices (PT)
+  totalRealtimeReads?: number;     // Global realtime reads today across ALL devices (PT)
+  firestoreReads: number;          // Central counter reads today from `system_stats/consumption`
+  firestoreWrites: number;         // Central counter writes today from `system_stats/consumption`
+  firestoreRealtimeReads?: number; // Central counter realtime reads today from `system_stats/consumption`
+  reads7d?: number;                // Sum of last 7 UTC days (matches Firebase Console 7d chart)
+  writes7d?: number;               // Sum of last 7 UTC days (matches Firebase Console 7d chart)
+  realtimeReads7d?: number;        // Sum of last 7 UTC days (matches Firebase Console 7d chart)
+  lifetimeReads?: number;          // Cumulative tracked reads across lifetime
+  lifetimeWrites?: number;         // Cumulative tracked writes across lifetime
+  lifetimeRealtimeReads?: number;  // Cumulative tracked realtime reads across lifetime
+  dailyHistory?: Record<string, DailyUsageBucket>; // Keyed by UTC YYYY-MM-DD
+  pendingLocalReads?: number;      // Pending local delta awaiting flush
+  pendingLocalWrites?: number;     // Pending local delta awaiting flush
   lastOperation?: string;
   lastUpdatedAt?: number;
   syncedFromCentral?: boolean;
 }
 
 const METRICS_KEY = 'school_firestore_metrics';
+const PENDING_DELTAS_KEY = 'school_firestore_pending_deltas';
 const METRICS_EVENT = 'school_firestore_metrics_updated';
 const CONSUMPTION_COLLECTION = 'system_stats';
 const CONSUMPTION_DOC_ID = 'consumption';
 
-// Helper to get current YYYY-MM-DD date in local timezone
+/**
+ * Returns today's YYYY-MM-DD in Firebase Spark Plan's official quota timezone (America/Los_Angeles PT).
+ */
 export function getTodayDateString(): string {
-  const d = new Date();
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+  return getFirebaseQuotaDateStr();
 }
 
-// Pending deltas waiting to be flushed to `system_stats/consumption`
-let pendingReads = 0;
-let pendingWrites = 0;
-let lastOperationLabel = '';
+/**
+ * Returns the last `days` UTC date strings YYYY-MM-DD (oldest -> newest, inclusive of today UTC),
+ * matching Firebase Console's 7-day Overview buckets.
+ */
+export function getRecentUtcDates(days: number = 7): string[] {
+  const result: string[] = [];
+  const now = new Date();
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(now.getTime() - i * 86400000);
+    result.push(getUtcDateStr(d));
+  }
+  return result;
+}
+
+interface PendingDeltasState {
+  quotaDate: string;
+  reads: number;
+  writes: number;
+  realtimeReads: number;
+  utcBuckets: Record<string, DailyUsageBucket>;
+  lastOperation?: string;
+}
+
+function loadPendingDeltas(): PendingDeltasState {
+  const quotaDate = getTodayDateString();
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const raw = localStorage.getItem(PENDING_DELTAS_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as PendingDeltasState;
+        if (parsed && typeof parsed === 'object') {
+          return {
+            quotaDate: parsed.quotaDate || quotaDate,
+            reads: Number(parsed.reads) || 0,
+            writes: Number(parsed.writes) || 0,
+            realtimeReads: Number(parsed.realtimeReads) || 0,
+            utcBuckets: parsed.utcBuckets && typeof parsed.utcBuckets === 'object' ? parsed.utcBuckets : {},
+            lastOperation: parsed.lastOperation || ''
+          };
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return {
+    quotaDate,
+    reads: 0,
+    writes: 0,
+    realtimeReads: 0,
+    utcBuckets: {},
+    lastOperation: ''
+  };
+}
+
+let pendingState: PendingDeltasState = loadPendingDeltas();
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 let isFlushing = false;
 let knownCentralDate: string | null = null;
 let hasVerifiedCentralDateThisSession = false;
 
+function persistPendingDeltas() {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(PENDING_DELTAS_KEY, JSON.stringify(pendingState));
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function pruneOldUtcBuckets(history: Record<string, DailyUsageBucket>, keepDays: number = 14): Record<string, DailyUsageBucket> {
+  const validDates = new Set(getRecentUtcDates(keepDays));
+  const pruned: Record<string, DailyUsageBucket> = {};
+  for (const [utcDay, bucket] of Object.entries(history || {})) {
+    if (validDates.has(utcDay) && bucket) {
+      pruned[utcDay] = {
+        reads: Number(bucket.reads) || 0,
+        writes: Number(bucket.writes) || 0,
+        realtimeReads: Number(bucket.realtimeReads) || 0
+      };
+    }
+  }
+  return pruned;
+}
+
+function mergeBuckets(
+  base: Record<string, DailyUsageBucket> | undefined,
+  delta: Record<string, DailyUsageBucket> | undefined
+): Record<string, DailyUsageBucket> {
+  const out: Record<string, DailyUsageBucket> = {};
+  for (const [d, b] of Object.entries(base || {})) {
+    if (!b) continue;
+    out[d] = {
+      reads: Number(b.reads) || 0,
+      writes: Number(b.writes) || 0,
+      realtimeReads: Number(b.realtimeReads) || 0
+    };
+  }
+  for (const [d, b] of Object.entries(delta || {})) {
+    if (!b) continue;
+    const prev = out[d] || { reads: 0, writes: 0, realtimeReads: 0 };
+    out[d] = {
+      reads: prev.reads + (Number(b.reads) || 0),
+      writes: prev.writes + (Number(b.writes) || 0),
+      realtimeReads: prev.realtimeReads + (Number(b.realtimeReads) || 0)
+    };
+  }
+  return pruneOldUtcBuckets(out, 14);
+}
+
+function compute7dSums(history: Record<string, DailyUsageBucket> | undefined): DailyUsageBucket {
+  const recent7 = getRecentUtcDates(7);
+  let reads = 0;
+  let writes = 0;
+  let realtimeReads = 0;
+  for (const day of recent7) {
+    const b = history?.[day];
+    if (b) {
+      reads += Number(b.reads) || 0;
+      writes += Number(b.writes) || 0;
+      realtimeReads += Number(b.realtimeReads) || 0;
+    }
+  }
+  return { reads, writes, realtimeReads };
+}
+
 /**
- * Automatically checks if a new calendar day has started.
- * Resets local daily metrics & circuit breaker automatically without user interaction.
+ * Automatically checks if a new official Firebase Spark quota day (America/Los_Angeles PT) has started.
+ * Resets daily Spark counters while preserving 7-day UTC history & lifetime totals.
  */
 export function checkDailyRollover(): boolean {
   const today = getTodayDateString();
+  const utcToday = getUtcDateStr();
   try {
     const raw = localStorage.getItem(METRICS_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as FirestoreMetrics;
       if (parsed.date !== today) {
+        const preservedHistory = pruneOldUtcBuckets(parsed.dailyHistory || {}, 14);
         const freshMetrics: FirestoreMetrics = {
           date: today,
+          utcDate: utcToday,
           reads: 0,
           writes: 0,
+          realtimeReads: 0,
           simulatedReads: 0,
           simulatedWrites: 0,
           totalReads: 0,
           totalWrites: 0,
+          totalRealtimeReads: 0,
           firestoreReads: 0,
           firestoreWrites: 0,
-          lastOperation: 'تصفير يومي تلقائي',
+          firestoreRealtimeReads: 0,
+          lifetimeReads: Number(parsed.lifetimeReads) || 0,
+          lifetimeWrites: Number(parsed.lifetimeWrites) || 0,
+          lifetimeRealtimeReads: Number(parsed.lifetimeRealtimeReads) || 0,
+          dailyHistory: preservedHistory,
+          lastOperation: 'تصفير يومي تلقائي (توقيت حصة Firebase PT)',
           lastUpdatedAt: Date.now(),
           syncedFromCentral: false
         };
+        if (pendingState.quotaDate !== today) {
+          pendingState.quotaDate = today;
+          pendingState.reads = 0;
+          pendingState.writes = 0;
+          pendingState.realtimeReads = 0;
+          persistPendingDeltas();
+        }
         knownCentralDate = null;
         hasVerifiedCentralDateThisSession = false;
         saveMetrics(freshMetrics);
@@ -108,6 +267,7 @@ export function checkDailyRollover(): boolean {
 // Load metrics from LocalStorage with automatic daily rollover detection
 export function loadFirestoreMetrics(): FirestoreMetrics {
   const today = getTodayDateString();
+  const utcToday = getUtcDateStr();
   try {
     const raw = localStorage.getItem(METRICS_KEY);
     if (raw) {
@@ -115,6 +275,16 @@ export function loadFirestoreMetrics(): FirestoreMetrics {
       if (parsed.date === today) {
         if (parsed.firestoreReads === undefined) parsed.firestoreReads = 0;
         if (parsed.firestoreWrites === undefined) parsed.firestoreWrites = 0;
+        if (parsed.firestoreRealtimeReads === undefined) parsed.firestoreRealtimeReads = 0;
+        if (parsed.realtimeReads === undefined) parsed.realtimeReads = 0;
+        if (!parsed.dailyHistory) parsed.dailyHistory = {};
+        parsed.utcDate = utcToday;
+        const sums7d = compute7dSums(mergeBuckets(parsed.dailyHistory, pendingState.utcBuckets));
+        parsed.reads7d = sums7d.reads;
+        parsed.writes7d = sums7d.writes;
+        parsed.realtimeReads7d = sums7d.realtimeReads;
+        parsed.pendingLocalReads = pendingState.quotaDate === today ? pendingState.reads : 0;
+        parsed.pendingLocalWrites = pendingState.quotaDate === today ? pendingState.writes : 0;
         return parsed;
       }
     }
@@ -122,16 +292,39 @@ export function loadFirestoreMetrics(): FirestoreMetrics {
     console.warn('Notice loading firestore metrics:', e);
   }
 
+  let preservedHistory: Record<string, DailyUsageBucket> = {};
+  let preservedLifetimeR = 0;
+  let preservedLifetimeW = 0;
+  let preservedLifetimeRt = 0;
+  try {
+    const raw = localStorage.getItem(METRICS_KEY);
+    if (raw) {
+      const old = JSON.parse(raw) as FirestoreMetrics;
+      preservedHistory = pruneOldUtcBuckets(old.dailyHistory || {}, 14);
+      preservedLifetimeR = Number(old.lifetimeReads) || 0;
+      preservedLifetimeW = Number(old.lifetimeWrites) || 0;
+      preservedLifetimeRt = Number(old.lifetimeRealtimeReads) || 0;
+    }
+  } catch {}
+
   const newMetrics: FirestoreMetrics = {
     date: today,
+    utcDate: utcToday,
     reads: 0,
     writes: 0,
+    realtimeReads: 0,
     simulatedReads: 0,
     simulatedWrites: 0,
     totalReads: 0,
     totalWrites: 0,
+    totalRealtimeReads: 0,
     firestoreReads: 0,
     firestoreWrites: 0,
+    firestoreRealtimeReads: 0,
+    lifetimeReads: preservedLifetimeR,
+    lifetimeWrites: preservedLifetimeW,
+    lifetimeRealtimeReads: preservedLifetimeRt,
+    dailyHistory: preservedHistory,
     syncedFromCentral: false
   };
   saveMetrics(newMetrics);
@@ -141,10 +334,30 @@ export function loadFirestoreMetrics(): FirestoreMetrics {
 
 // Save metrics to LocalStorage and compute accurate non-duplicated totals
 export function saveMetrics(metrics: FirestoreMetrics) {
-  const centralR = (metrics.firestoreReads || 0) + pendingReads;
-  const centralW = (metrics.firestoreWrites || 0) + pendingWrites;
+  const today = getTodayDateString();
+  const utcToday = getUtcDateStr();
+  metrics.utcDate = utcToday;
+
+  const pReads = pendingState.quotaDate === today ? pendingState.reads : 0;
+  const pWrites = pendingState.quotaDate === today ? pendingState.writes : 0;
+  const pRealtime = pendingState.quotaDate === today ? pendingState.realtimeReads : 0;
+
+  const centralR = (metrics.firestoreReads || 0) + pReads;
+  const centralW = (metrics.firestoreWrites || 0) + pWrites;
+  const centralRt = (metrics.firestoreRealtimeReads || 0) + pRealtime;
+
   metrics.totalReads = Math.max(centralR, metrics.reads);
   metrics.totalWrites = Math.max(centralW, metrics.writes);
+  metrics.totalRealtimeReads = Math.max(centralRt, metrics.realtimeReads || 0);
+
+  const combinedHistory = mergeBuckets(metrics.dailyHistory, pendingState.utcBuckets);
+  const sums7d = compute7dSums(combinedHistory);
+  metrics.reads7d = Math.max(sums7d.reads, metrics.totalReads);
+  metrics.writes7d = Math.max(sums7d.writes, metrics.totalWrites);
+  metrics.realtimeReads7d = Math.max(sums7d.realtimeReads, metrics.totalRealtimeReads || 0);
+  metrics.pendingLocalReads = pReads;
+  metrics.pendingLocalWrites = pWrites;
+
   try {
     localStorage.setItem(METRICS_KEY, JSON.stringify(metrics));
   } catch {
@@ -156,66 +369,147 @@ export function saveMetrics(metrics: FirestoreMetrics) {
 }
 
 /**
+ * Adds a real tracked operation delta into local metrics & pending queue without scheduling another flush
+ * (used for reading `system_stats/consumption` itself so monitoring never creates self-loops).
+ */
+function recordSilentSelfRead(count: number, isRealtime: boolean, operationLabel?: string) {
+  if (count <= 0) return;
+  const today = getTodayDateString();
+  const utcToday = getUtcDateStr();
+
+  if (pendingState.quotaDate !== today) {
+    pendingState.quotaDate = today;
+    pendingState.reads = 0;
+    pendingState.writes = 0;
+    pendingState.realtimeReads = 0;
+  }
+
+  pendingState.reads += count;
+  if (isRealtime) pendingState.realtimeReads += count;
+  const ub = pendingState.utcBuckets[utcToday] || { reads: 0, writes: 0, realtimeReads: 0 };
+  ub.reads += count;
+  if (isRealtime) ub.realtimeReads += count;
+  pendingState.utcBuckets[utcToday] = ub;
+  persistPendingDeltas();
+
+  const metrics = loadFirestoreMetrics();
+  metrics.reads += count;
+  if (isRealtime) metrics.realtimeReads = (metrics.realtimeReads || 0) + count;
+  metrics.lifetimeReads = (metrics.lifetimeReads || 0) + count;
+  if (isRealtime) metrics.lifetimeRealtimeReads = (metrics.lifetimeRealtimeReads || 0) + count;
+  if (operationLabel) metrics.lastOperation = operationLabel;
+  metrics.lastUpdatedAt = Date.now();
+  saveMetrics(metrics);
+}
+
+/**
  * Flushes pending read/write deltas atomically to `system_stats/consumption`.
- * Safe against infinite loops: NEVER invokes `trackFirestoreRead` or `trackFirestoreWrite`.
+ * Inline-accounts for its own transaction read (+1 if tx) and write (+1) directly inside the committed payload
+ * so 100% of Firestore traffic is tracked with ZERO infinite loops.
  */
 export async function flushConsumptionToFirestore(): Promise<void> {
   if (isFlushing) return;
-  if (pendingReads <= 0 && pendingWrites <= 0) return;
+  const today = getTodayDateString();
+  const utcToday = getUtcDateStr();
+
+  // Prune pending reads/writes if from an expired quota day, while still flushing recent UTC buckets if needed
+  if (pendingState.quotaDate !== today) {
+    pendingState.quotaDate = today;
+    pendingState.reads = 0;
+    pendingState.writes = 0;
+    pendingState.realtimeReads = 0;
+  }
+
+  const hasUtcPending = Object.values(pendingState.utcBuckets || {}).some(
+    (b) => (b?.reads || 0) > 0 || (b?.writes || 0) > 0 || (b?.realtimeReads || 0) > 0
+  );
+
+  if (pendingState.reads <= 0 && pendingState.writes <= 0 && !hasUtcPending) return;
   if (!db || isFirestoreQuotaExceeded()) return;
   if (typeof navigator !== 'undefined' && !navigator.onLine) return;
 
   isFlushing = true;
-  const deltaReads = pendingReads;
-  const deltaWrites = pendingWrites;
-  const opLabel = lastOperationLabel;
-  pendingReads = 0;
-  pendingWrites = 0;
+  const deltaReads = pendingState.reads;
+  const deltaWrites = pendingState.writes;
+  const deltaRealtimeReads = pendingState.realtimeReads;
+  const deltaUtcBuckets = pendingState.utcBuckets || {};
+  const opLabel = pendingState.lastOperation || '';
+
+  // Clear pending immediately before async commit; restored on catch if commit fails
+  pendingState = {
+    quotaDate: today,
+    reads: 0,
+    writes: 0,
+    realtimeReads: 0,
+    utcBuckets: {},
+    lastOperation: ''
+  };
+  persistPendingDeltas();
 
   if (flushTimer) {
     clearTimeout(flushTimer);
     flushTimer = null;
   }
 
-  const today = getTodayDateString();
+  const needsTx = !hasVerifiedCentralDateThisSession || (knownCentralDate !== null && knownCentralDate !== today);
+  const selfReadCost = needsTx ? 1 : 0;
+  const selfWriteCost = 1;
+
+  const effectiveReads = deltaReads + selfReadCost;
+  const effectiveWrites = deltaWrites + selfWriteCost;
+  const effectiveRealtimeReads = deltaRealtimeReads;
+
+  const finalUtcBuckets = mergeBuckets(deltaUtcBuckets, {
+    [utcToday]: { reads: selfReadCost, writes: selfWriteCost, realtimeReads: 0 }
+  });
+
   const consumptionRef = doc(db, CONSUMPTION_COLLECTION, CONSUMPTION_DOC_ID);
 
   try {
-    // On first flush of the day/session or when date rolled over, run an atomic transaction
-    // so yesterday's counts are cleanly rolled over to 0 before applying today's increments.
-    if (!hasVerifiedCentralDateThisSession || (knownCentralDate && knownCentralDate !== today)) {
+    if (needsTx) {
       await runTransaction(db, async (tx) => {
         const snap = await tx.get(consumptionRef);
         const existing = snap.exists() ? snap.data() : null;
         const existingDate = existing?.date;
+        const existingHistory = (existing?.dailyHistory || {}) as Record<string, DailyUsageBucket>;
+        const mergedHistory = mergeBuckets(existingHistory, finalUtcBuckets);
 
-        if (!existing || existingDate !== today) {
+        if (!existing || !existingDate || existingDate < today) {
           tx.set(
             consumptionRef,
             {
               date: today,
-              reads: deltaReads,
-              writes: deltaWrites,
-              lifetimeReads: (existing?.lifetimeReads || 0) + deltaReads,
-              lifetimeWrites: (existing?.lifetimeWrites || 0) + deltaWrites,
+              utcDate: utcToday,
+              reads: effectiveReads,
+              writes: effectiveWrites,
+              realtimeReads: effectiveRealtimeReads,
+              lifetimeReads: (Number(existing?.lifetimeReads) || 0) + effectiveReads,
+              lifetimeWrites: (Number(existing?.lifetimeWrites) || 0) + effectiveWrites,
+              lifetimeRealtimeReads: (Number(existing?.lifetimeRealtimeReads) || 0) + effectiveRealtimeReads,
+              dailyHistory: mergedHistory,
               lastOperation: opLabel || 'operation',
               lastUpdatedAt: Date.now()
             },
             { merge: true }
           );
         } else {
+          // Existing date is >= today (never overwrite newer date backward)
           const updatePayload: Record<string, any> = {
-            date: today,
-            lastUpdatedAt: Date.now()
+            date: existingDate,
+            utcDate: utcToday,
+            dailyHistory: mergedHistory,
+            lastUpdatedAt: Date.now(),
+            lifetimeReads: increment(effectiveReads),
+            lifetimeWrites: increment(effectiveWrites)
           };
-          if (opLabel) updatePayload.lastOperation = opLabel;
-          if (deltaReads > 0) {
-            updatePayload.reads = increment(deltaReads);
-            updatePayload.lifetimeReads = increment(deltaReads);
+          if (effectiveRealtimeReads > 0) {
+            updatePayload.lifetimeRealtimeReads = increment(effectiveRealtimeReads);
           }
-          if (deltaWrites > 0) {
-            updatePayload.writes = increment(deltaWrites);
-            updatePayload.lifetimeWrites = increment(deltaWrites);
+          if (opLabel) updatePayload.lastOperation = opLabel;
+          if (existingDate === today) {
+            if (effectiveReads > 0) updatePayload.reads = increment(effectiveReads);
+            if (effectiveWrites > 0) updatePayload.writes = increment(effectiveWrites);
+            if (effectiveRealtimeReads > 0) updatePayload.realtimeReads = increment(effectiveRealtimeReads);
           }
           tx.set(consumptionRef, updatePayload, { merge: true });
         }
@@ -223,26 +517,53 @@ export async function flushConsumptionToFirestore(): Promise<void> {
       knownCentralDate = today;
       hasVerifiedCentralDateThisSession = true;
     } else {
-      // Fast atomic increment without any extra read operation!
+      // Fast atomic increment without extra read; update dot-path dailyHistory.${utcDay} atomically
       const updatePayload: Record<string, any> = {
         date: today,
+        utcDate: utcToday,
         lastUpdatedAt: Date.now()
       };
       if (opLabel) updatePayload.lastOperation = opLabel;
-      if (deltaReads > 0) {
-        updatePayload.reads = increment(deltaReads);
-        updatePayload.lifetimeReads = increment(deltaReads);
+      if (effectiveReads > 0) {
+        updatePayload.reads = increment(effectiveReads);
+        updatePayload.lifetimeReads = increment(effectiveReads);
       }
-      if (deltaWrites > 0) {
-        updatePayload.writes = increment(deltaWrites);
-        updatePayload.lifetimeWrites = increment(deltaWrites);
+      if (effectiveWrites > 0) {
+        updatePayload.writes = increment(effectiveWrites);
+        updatePayload.lifetimeWrites = increment(effectiveWrites);
+      }
+      if (effectiveRealtimeReads > 0) {
+        updatePayload.realtimeReads = increment(effectiveRealtimeReads);
+        updatePayload.lifetimeRealtimeReads = increment(effectiveRealtimeReads);
+      }
+      for (const [utcDay, b] of Object.entries(finalUtcBuckets)) {
+        if (b.reads > 0) updatePayload[`dailyHistory.${utcDay}.reads`] = increment(b.reads);
+        if (b.writes > 0) updatePayload[`dailyHistory.${utcDay}.writes`] = increment(b.writes);
+        if (b.realtimeReads > 0) updatePayload[`dailyHistory.${utcDay}.realtimeReads`] = increment(b.realtimeReads);
       }
       await setDoc(consumptionRef, updatePayload, { merge: true });
     }
+
+    // Reflect self flush overhead locally (without scheduling another flush)
+    const m = loadFirestoreMetrics();
+    m.reads += selfReadCost;
+    m.writes += selfWriteCost;
+    m.lifetimeReads = (m.lifetimeReads || 0) + effectiveReads;
+    m.lifetimeWrites = (m.lifetimeWrites || 0) + effectiveWrites;
+    m.lifetimeRealtimeReads = (m.lifetimeRealtimeReads || 0) + effectiveRealtimeReads;
+    m.dailyHistory = mergeBuckets(m.dailyHistory, finalUtcBuckets);
+    saveMetrics(m);
   } catch (err: any) {
-    // Restore unsent deltas if transient failure so nothing is lost
-    pendingReads += deltaReads;
-    pendingWrites += deltaWrites;
+    // Restore unsent deltas so nothing is ever lost on transient network errors
+    pendingState = {
+      quotaDate: today,
+      reads: pendingState.reads + deltaReads,
+      writes: pendingState.writes + deltaWrites,
+      realtimeReads: pendingState.realtimeReads + deltaRealtimeReads,
+      utcBuckets: mergeBuckets(pendingState.utcBuckets, deltaUtcBuckets),
+      lastOperation: opLabel || pendingState.lastOperation
+    };
+    persistPendingDeltas();
     if (isQuotaError(err)) {
       markFirestoreQuotaExceeded(err);
     } else {
@@ -254,50 +575,81 @@ export async function flushConsumptionToFirestore(): Promise<void> {
 }
 
 /**
- * Queues read/write deltas and batches them to `system_stats/consumption`.
- * Batches rapidly occurring SDK operations within a 2-second window (or flushes immediately at >= 10 ops)
- * to preserve write quota while keeping the central dashboard live.
+ * Queues read/write deltas durably in localStorage and batches them to `system_stats/consumption`.
  */
 export async function incrementFirestoreUsage(
   reads: number,
   writes: number,
-  operationLabel?: string
+  operationLabel?: string,
+  realtimeReads: number = 0
 ) {
-  if (reads <= 0 && writes <= 0) return;
+  if (reads <= 0 && writes <= 0 && realtimeReads <= 0) return;
 
-  pendingReads += Math.max(0, reads);
-  pendingWrites += Math.max(0, writes);
-  if (operationLabel) {
-    lastOperationLabel = operationLabel;
+  const today = getTodayDateString();
+  const utcToday = getUtcDateStr();
+
+  if (pendingState.quotaDate !== today) {
+    pendingState.quotaDate = today;
+    pendingState.reads = 0;
+    pendingState.writes = 0;
+    pendingState.realtimeReads = 0;
   }
+
+  const r = Math.max(0, reads);
+  const w = Math.max(0, writes);
+  const rt = Math.max(0, realtimeReads);
+
+  pendingState.reads += r;
+  pendingState.writes += w;
+  pendingState.realtimeReads += rt;
+  if (operationLabel) pendingState.lastOperation = operationLabel;
+
+  const ub = pendingState.utcBuckets[utcToday] || { reads: 0, writes: 0, realtimeReads: 0 };
+  ub.reads += r;
+  ub.writes += w;
+  ub.realtimeReads += rt;
+  pendingState.utcBuckets[utcToday] = ub;
+
+  persistPendingDeltas();
 
   if (isFirestoreQuotaExceeded()) {
     return;
   }
 
-  if (pendingReads + pendingWrites >= 10) {
-    // Flush batch immediately for bulk operations
+  if (pendingState.reads + pendingState.writes >= 10) {
     flushConsumptionToFirestore().catch(() => {});
     return;
   }
 
+  const delayMs = pendingState.writes > 0 ? 1000 : 2000;
   if (!flushTimer) {
     flushTimer = setTimeout(() => {
       flushTimer = null;
       flushConsumptionToFirestore().catch(() => {});
-    }, 2000);
+    }, delayMs);
   }
 }
 
 // Log an actual Firestore server Read operation
-export function trackFirestoreRead(count: number = 1, operationLabel?: string) {
+export function trackFirestoreRead(
+  count: number = 1,
+  operationLabel?: string,
+  options?: { isRealtime?: boolean; silent?: boolean }
+) {
   if (count <= 0) return;
+  if (options?.silent) {
+    recordSilentSelfRead(count, !!options?.isRealtime, operationLabel);
+    return;
+  }
   const metrics = loadFirestoreMetrics();
   metrics.reads += count;
+  if (options?.isRealtime) {
+    metrics.realtimeReads = (metrics.realtimeReads || 0) + count;
+  }
   if (operationLabel) metrics.lastOperation = operationLabel;
   metrics.lastUpdatedAt = Date.now();
   saveMetrics(metrics);
-  incrementFirestoreUsage(count, 0, operationLabel);
+  incrementFirestoreUsage(count, 0, operationLabel, options?.isRealtime ? count : 0);
 }
 
 // Log an actual Firestore server Write operation
@@ -308,7 +660,7 @@ export function trackFirestoreWrite(count: number = 1, operationLabel?: string) 
   if (operationLabel) metrics.lastOperation = operationLabel;
   metrics.lastUpdatedAt = Date.now();
   saveMetrics(metrics);
-  incrementFirestoreUsage(0, count, operationLabel);
+  incrementFirestoreUsage(0, count, operationLabel, 0);
 }
 
 // Explicitly log activity operations
@@ -324,46 +676,83 @@ export function trackActivityOperation(
   }
 }
 
-// Background traffic simulation disabled to reflect exact actual operations only
 export function simulateBackgroundTraffic() {
-  // No-op
+  // Disabled intentionally so counters reflect real SDK operations only
+}
+
+function applyCentralSnapshotToMetrics(data: Record<string, any> | undefined, isRealtimeEvent: boolean, fromCache: boolean) {
+  const today = getTodayDateString();
+  const utcToday = getUtcDateStr();
+
+  if (!fromCache) {
+    recordSilentSelfRead(
+      1,
+      isRealtimeEvent,
+      isRealtimeEvent ? 'تحديث لحظي للعداد المركزي' : 'قراءة العداد المركزي'
+    );
+  }
+
+  const centralDate = data?.date || today;
+  knownCentralDate = centralDate;
+  hasVerifiedCentralDateThisSession = true;
+
+  const isToday = centralDate === today;
+  const reads = isToday ? Number(data?.reads || 0) : 0;
+  const writes = isToday ? Number(data?.writes || 0) : 0;
+  const realtimeReads = isToday ? Number(data?.realtimeReads || 0) : 0;
+
+  const metrics = loadFirestoreMetrics();
+  metrics.firestoreReads = reads;
+  metrics.firestoreWrites = writes;
+  metrics.firestoreRealtimeReads = realtimeReads;
+  metrics.lifetimeReads = Number(data?.lifetimeReads ?? metrics.lifetimeReads ?? 0);
+  metrics.lifetimeWrites = Number(data?.lifetimeWrites ?? metrics.lifetimeWrites ?? 0);
+  metrics.lifetimeRealtimeReads = Number(data?.lifetimeRealtimeReads ?? metrics.lifetimeRealtimeReads ?? 0);
+  metrics.dailyHistory = pruneOldUtcBuckets((data?.dailyHistory || metrics.dailyHistory || {}) as Record<string, DailyUsageBucket>, 14);
+  metrics.utcDate = utcToday;
+  if (data?.lastOperation) metrics.lastOperation = data.lastOperation;
+  metrics.lastUpdatedAt = data?.lastUpdatedAt || Date.now();
+  metrics.syncedFromCentral = true;
+  saveMetrics(metrics);
+  return metrics;
 }
 
 /**
- * Fetches the live centralized consumption counts directly from `system_stats/consumption` once on load.
+ * Fetches the live centralized consumption counts directly from `system_stats/consumption` once.
  */
 export async function fetchCentralizedConsumptionOnce(): Promise<{
   reads: number;
   writes: number;
+  realtimeReads: number;
   date: string;
 } | null> {
   if (!db || isFirestoreQuotaExceeded()) return null;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return null;
   try {
+    // First flush any pending deltas so fetched numbers include recent writes from this device
+    await flushConsumptionToFirestore().catch(() => {});
+
     const consumptionRef = doc(db, CONSUMPTION_COLLECTION, CONSUMPTION_DOC_ID);
     const snap = await Promise.race([
       getDoc(consumptionRef),
-      new Promise<null>((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000))
+      new Promise<null>((_, reject) => setTimeout(() => reject(new Error('timeout')), 3500))
     ]);
 
-    if (snap && snap.exists()) {
-      const data = snap.data();
-      const today = getTodayDateString();
-      const isToday = data?.date === today;
-      knownCentralDate = data?.date || null;
-      hasVerifiedCentralDateThisSession = true;
-
-      const reads = isToday ? Number(data?.reads || 0) : 0;
-      const writes = isToday ? Number(data?.writes || 0) : 0;
-
-      const metrics = loadFirestoreMetrics();
-      metrics.firestoreReads = reads;
-      metrics.firestoreWrites = writes;
-      metrics.lastOperation = data?.lastOperation || metrics.lastOperation;
-      metrics.lastUpdatedAt = data?.lastUpdatedAt || Date.now();
-      metrics.syncedFromCentral = true;
-      saveMetrics(metrics);
-
-      return { reads, writes, date: today };
+    if (snap) {
+      const fromCache = !!snap.metadata?.fromCache;
+      if (snap.exists()) {
+        const updated = applyCentralSnapshotToMetrics(snap.data(), false, fromCache);
+        return {
+          reads: updated.totalReads,
+          writes: updated.totalWrites,
+          realtimeReads: updated.totalRealtimeReads || 0,
+          date: updated.date
+        };
+      } else if (!fromCache) {
+        recordSilentSelfRead(1, false, 'تهيئة العداد المركزي');
+        knownCentralDate = getTodayDateString();
+        hasVerifiedCentralDateThisSession = true;
+      }
     }
   } catch (err: any) {
     if (isQuotaError(err)) {
@@ -375,34 +764,33 @@ export async function fetchCentralizedConsumptionOnce(): Promise<{
 
 /**
  * Subscribes the Admin Dashboard in real-time to `system_stats/consumption`.
- * Updates immediately whenever any teacher, parent, or admin device logs reads/writes.
- * NOTE: Does NOT increment `trackFirestoreRead` on its own snapshots to avoid loops.
+ * Safe against loops: counts incoming server snapshot silently without triggering a write flush.
  */
 export function subscribeToFirebaseSystemUsage(
-  callback: (usage: { reads: number; writes: number; lastOperation?: string }) => void
+  callback: (usage: { reads: number; writes: number; realtimeReads: number; lastOperation?: string }) => void
 ) {
   checkDailyRollover();
   const initialMetrics = loadFirestoreMetrics();
   callback({
     reads: initialMetrics.totalReads,
     writes: initialMetrics.totalWrites,
+    realtimeReads: initialMetrics.totalRealtimeReads || 0,
     lastOperation: initialMetrics.lastOperation
   });
 
-  // 1. Listen to local storage updates (instant local responsiveness)
   const localHandler = (e: Event) => {
     const customEvent = e as CustomEvent<FirestoreMetrics>;
     if (customEvent.detail) {
       callback({
         reads: customEvent.detail.totalReads,
         writes: customEvent.detail.totalWrites,
+        realtimeReads: customEvent.detail.totalRealtimeReads || 0,
         lastOperation: customEvent.detail.lastOperation
       });
     }
   };
   window.addEventListener(METRICS_EVENT, localHandler);
 
-  // 2. Attach real-time Firestore listener on `system_stats/consumption`
   let unsubFirestore: (() => void) | null = null;
   if (db && !isFirestoreQuotaExceeded()) {
     try {
@@ -410,31 +798,18 @@ export function subscribeToFirebaseSystemUsage(
       const rawUnsub = onSnapshot(
         consumptionRef,
         (snapshot) => {
-          const today = getTodayDateString();
+          const fromCache = !!snapshot.metadata?.fromCache;
           if (snapshot.exists()) {
-            const data = snapshot.data();
-            knownCentralDate = data?.date || null;
-            hasVerifiedCentralDateThisSession = true;
-
-            const isToday = data?.date === today;
-            const centralReads = isToday ? Number(data?.reads || 0) : 0;
-            const centralWrites = isToday ? Number(data?.writes || 0) : 0;
-
-            const metrics = loadFirestoreMetrics();
-            metrics.firestoreReads = centralReads;
-            metrics.firestoreWrites = centralWrites;
-            metrics.lastOperation = data?.lastOperation || metrics.lastOperation;
-            metrics.lastUpdatedAt = data?.lastUpdatedAt || Date.now();
-            metrics.syncedFromCentral = true;
-            saveMetrics(metrics);
-
+            const updated = applyCentralSnapshotToMetrics(snapshot.data(), true, fromCache);
             callback({
-              reads: metrics.totalReads,
-              writes: metrics.totalWrites,
-              lastOperation: metrics.lastOperation
+              reads: updated.totalReads,
+              writes: updated.totalWrites,
+              realtimeReads: updated.totalRealtimeReads || 0,
+              lastOperation: updated.lastOperation
             });
           } else {
-            knownCentralDate = today;
+            if (!fromCache) recordSilentSelfRead(1, true, 'تحديث لحظي للعداد المركزي');
+            knownCentralDate = getTodayDateString();
             hasVerifiedCentralDateThisSession = true;
           }
         },
@@ -467,28 +842,164 @@ export function subscribeToFirebaseSystemUsage(
 }
 
 /**
- * Resets BOTH the centralized `system_stats/consumption` document and local counters.
+ * Calibrates central & local counters to match observed Firebase Console metrics for this database
+ * (helpful when starting mid-day or reconciling prior pre-tracker history).
  */
-export async function resetCentralizedFirestoreConsumption(): Promise<void> {
+export async function calibrateCentralConsumptionBaseline(params: {
+  todayReads: number;
+  todayWrites: number;
+  todayRealtimeReads: number;
+  weekReads?: number;
+  weekWrites?: number;
+  weekRealtimeReads?: number;
+}): Promise<boolean> {
   const today = getTodayDateString();
-  pendingReads = 0;
-  pendingWrites = 0;
+  const utcToday = getUtcDateStr();
+
+  const tReads = Math.max(0, Math.round(params.todayReads || 0));
+  const tWrites = Math.max(0, Math.round(params.todayWrites || 0));
+  const tRt = Math.max(0, Math.round(params.todayRealtimeReads || 0));
+
+  pendingState = {
+    quotaDate: today,
+    reads: 0,
+    writes: 0,
+    realtimeReads: 0,
+    utcBuckets: {},
+    lastOperation: 'معايرة مع أرقام وحدة تحكم Firebase'
+  };
+  persistPendingDeltas();
+
+  const existing = loadFirestoreMetrics();
+  const nextHistory: Record<string, DailyUsageBucket> = {
+    ...(existing.dailyHistory || {}),
+    [utcToday]: { reads: tReads, writes: tWrites, realtimeReads: tRt }
+  };
+
+  // If 7-day totals are provided from Firebase Console and exceed today's values,
+  // place the prior-days remainder into yesterday's UTC bucket so 7-day sum matches Console cleanly.
+  if (
+    typeof params.weekReads === 'number' ||
+    typeof params.weekWrites === 'number' ||
+    typeof params.weekRealtimeReads === 'number'
+  ) {
+    const recent = getRecentUtcDates(7);
+    const yesterdayUtc = recent[recent.length - 2] || utcToday;
+    const remR = Math.max(0, Math.round((params.weekReads || 0) - tReads));
+    const remW = Math.max(0, Math.round((params.weekWrites || 0) - tWrites));
+    const remRt = Math.max(0, Math.round((params.weekRealtimeReads || 0) - tRt));
+    if (yesterdayUtc !== utcToday) {
+      nextHistory[yesterdayUtc] = { reads: remR, writes: remW, realtimeReads: remRt };
+    } else {
+      nextHistory[utcToday] = {
+        reads: tReads + remR,
+        writes: tWrites + remW,
+        realtimeReads: tRt + remRt
+      };
+    }
+  }
+
+  const pruned = pruneOldUtcBuckets(nextHistory, 14);
+  const sums7d = compute7dSums(pruned);
+
+  const calibrated: FirestoreMetrics = {
+    ...existing,
+    date: today,
+    utcDate: utcToday,
+    reads: tReads,
+    writes: tWrites,
+    realtimeReads: tRt,
+    firestoreReads: tReads,
+    firestoreWrites: tWrites,
+    firestoreRealtimeReads: tRt,
+    totalReads: tReads,
+    totalWrites: tWrites,
+    totalRealtimeReads: tRt,
+    dailyHistory: pruned,
+    reads7d: sums7d.reads,
+    writes7d: sums7d.writes,
+    realtimeReads7d: sums7d.realtimeReads,
+    lifetimeReads: Math.max(existing.lifetimeReads || 0, sums7d.reads),
+    lifetimeWrites: Math.max(existing.lifetimeWrites || 0, sums7d.writes),
+    lifetimeRealtimeReads: Math.max(existing.lifetimeRealtimeReads || 0, sums7d.realtimeReads),
+    lastOperation: 'معايرة متطابقة مع وحدة تحكم Firebase',
+    lastUpdatedAt: Date.now(),
+    syncedFromCentral: true
+  };
+  saveMetrics(calibrated);
+
+  if (db && !isFirestoreQuotaExceeded() && navigator.onLine !== false) {
+    try {
+      const consumptionRef = doc(db, CONSUMPTION_COLLECTION, CONSUMPTION_DOC_ID);
+      await setDoc(
+        consumptionRef,
+        {
+          date: today,
+          utcDate: utcToday,
+          reads: tReads,
+          writes: tWrites + 1, // +1 for this calibration write itself
+          realtimeReads: tRt,
+          dailyHistory: pruned,
+          lifetimeReads: calibrated.lifetimeReads,
+          lifetimeWrites: (calibrated.lifetimeWrites || 0) + 1,
+          lifetimeRealtimeReads: calibrated.lifetimeRealtimeReads,
+          lastOperation: 'معايرة متطابقة مع وحدة تحكم Firebase',
+          lastUpdatedAt: Date.now()
+        },
+        { merge: true }
+      );
+      knownCentralDate = today;
+      hasVerifiedCentralDateThisSession = true;
+      return true;
+    } catch (err: any) {
+      if (isQuotaError(err)) markFirestoreQuotaExceeded(err);
+    }
+  }
+  return false;
+}
+
+/**
+ * Resets today's centralized & local counters (optionally preserves 7-day history unless clearHistory = true).
+ */
+export async function resetCentralizedFirestoreConsumption(clearHistory: boolean = false): Promise<void> {
+  const today = getTodayDateString();
+  const utcToday = getUtcDateStr();
+  pendingState = {
+    quotaDate: today,
+    reads: 0,
+    writes: 0,
+    realtimeReads: 0,
+    utcBuckets: {},
+    lastOperation: 'تصفير عداد اليوم'
+  };
+  persistPendingDeltas();
   if (flushTimer) {
     clearTimeout(flushTimer);
     flushTimer = null;
   }
 
+  const prev = loadFirestoreMetrics();
+  const nextHistory = clearHistory ? {} : pruneOldUtcBuckets(prev.dailyHistory || {}, 14);
+
   const freshMetrics: FirestoreMetrics = {
     date: today,
+    utcDate: utcToday,
     reads: 0,
     writes: 0,
+    realtimeReads: 0,
     simulatedReads: 0,
     simulatedWrites: 0,
     totalReads: 0,
     totalWrites: 0,
+    totalRealtimeReads: 0,
     firestoreReads: 0,
     firestoreWrites: 0,
-    lastOperation: 'تصفير العداد المركزي',
+    firestoreRealtimeReads: 0,
+    lifetimeReads: clearHistory ? 0 : prev.lifetimeReads || 0,
+    lifetimeWrites: clearHistory ? 0 : prev.lifetimeWrites || 0,
+    lifetimeRealtimeReads: clearHistory ? 0 : prev.lifetimeRealtimeReads || 0,
+    dailyHistory: nextHistory,
+    lastOperation: 'تصفير عداد اليوم',
     lastUpdatedAt: Date.now(),
     syncedFromCentral: true
   };
@@ -497,17 +1008,22 @@ export async function resetCentralizedFirestoreConsumption(): Promise<void> {
   if (db && !isFirestoreQuotaExceeded()) {
     try {
       const consumptionRef = doc(db, CONSUMPTION_COLLECTION, CONSUMPTION_DOC_ID);
-      await setDoc(
-        consumptionRef,
-        {
-          date: today,
-          reads: 0,
-          writes: 0,
-          lastOperation: 'تصفير العداد المركزي',
-          lastUpdatedAt: Date.now()
-        },
-        { merge: true }
-      );
+      const payload: Record<string, any> = {
+        date: today,
+        utcDate: utcToday,
+        reads: 0,
+        writes: 0,
+        realtimeReads: 0,
+        lastOperation: 'تصفير عداد اليوم',
+        lastUpdatedAt: Date.now()
+      };
+      if (clearHistory) {
+        payload.dailyHistory = {};
+        payload.lifetimeReads = 0;
+        payload.lifetimeWrites = 0;
+        payload.lifetimeRealtimeReads = 0;
+      }
+      await setDoc(consumptionRef, payload, { merge: true });
       knownCentralDate = today;
       hasVerifiedCentralDateThisSession = true;
     } catch (err: any) {
@@ -518,13 +1034,16 @@ export async function resetCentralizedFirestoreConsumption(): Promise<void> {
   }
 }
 
-// Auto-start background monitoring and flush pending deltas on page hide
+// Auto-start background monitoring and flush pending deltas on page hide / online
 if (typeof window !== 'undefined') {
   loadFirestoreMetrics();
   checkDailyRollover();
 
   setInterval(checkDailyRollover, 15000);
 
+  window.addEventListener('online', () => {
+    flushConsumptionToFirestore().catch(() => {});
+  });
   window.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
       checkDailyRollover();
@@ -540,10 +1059,10 @@ if (typeof window !== 'undefined') {
   });
 }
 
-// Subscribe helper for React components (includes live centralized sync when `syncCentral` is true)
+// Subscribe helper for React components
 export function subscribeToFirestoreMetrics(
   callback: (metrics: FirestoreMetrics) => void,
-  options?: { syncCentral?: boolean }
+  options?: { syncCentral?: boolean; realtimeCentral?: boolean }
 ) {
   checkDailyRollover();
   const handler = (e: Event) => {
@@ -559,9 +1078,11 @@ export function subscribeToFirestoreMetrics(
   let unsubCentral: (() => void) | null = null;
   if (options?.syncCentral) {
     fetchCentralizedConsumptionOnce().catch(() => {});
-    unsubCentral = subscribeToFirebaseSystemUsage(() => {
-      // state updates are broadcast via METRICS_EVENT -> handler above
-    });
+    if (options?.realtimeCentral !== false) {
+      unsubCentral = subscribeToFirebaseSystemUsage(() => {
+        // State updates are broadcast via METRICS_EVENT -> handler above
+      });
+    }
   }
 
   return () => {

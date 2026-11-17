@@ -12,12 +12,37 @@ let quotaExceeded = false;
 const activeListeners = new Set<() => void>();
 let warnedOnce = false;
 
-function getTodayDateStr(): string {
-  const d = new Date();
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
+/**
+ * Official Firebase Spark Plan daily quota reset timezone (`America/Los_Angeles` PT).
+ */
+export function getFirebaseQuotaDateStr(date: Date = new Date()): string {
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Los_Angeles',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).format(date);
+  } catch {
+    const year = date.getUTCFullYear();
+    const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(date.getUTCDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+}
+
+/**
+ * UTC calendar date YYYY-MM-DD (matches Firebase Console Overview 7-day chart daily buckets).
+ */
+export function getUtcDateStr(date: Date = new Date()): string {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(date.getUTCDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
+}
+
+function getTodayDateStr(): string {
+  return getFirebaseQuotaDateStr();
 }
 
 // Check if quota was previously exceeded in this session (valid only for today and max 15 minutes)

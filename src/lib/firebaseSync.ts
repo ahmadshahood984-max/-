@@ -101,11 +101,22 @@ export interface OfflineSyncStatus {
 let isFlushingNow = false;
 let lastSyncedTimestamp: number | null = null;
 const memoryFallbackStore = new Map<string, string>();
+const inFlightDirectWrites = new Map<string, string>();
 
 // Keep reference to original methods
 const originalGetItem = localStorage.getItem.bind(localStorage);
 const originalSetItem = localStorage.setItem.bind(localStorage);
 const originalRemoveItem = localStorage.removeItem.bind(localStorage);
+
+/**
+ * Saves initial seed data strictly locally without triggering an immediate Firestore write
+ * so brand-new browsers do not overwrite cloud data or waste writes on startup.
+ */
+export function saveLocalSeedWithoutCloudWrite(key: string, value: string): void {
+  isRemoteSyncing = true;
+  safeSetLocalItem(key, value);
+  isRemoteSyncing = false;
+}
 
 function safeGetLocalItem(key: string): string | null {
   try {
@@ -446,9 +457,13 @@ export async function persistDirectToFirestore(key: string, data: any): Promise<
 
     const docRef = doc(db, 'school_live_data', key);
     const cloudPayload = prepareFirestorePayload(key, data);
+    inFlightDirectWrites.set(key, valueString);
 
     const writePromise = setDoc(docRef, { data: cloudPayload, updatedAt: now }, { merge: true })
       .then(() => {
+        if (inFlightDirectWrites.get(key) === valueString) {
+          inFlightDirectWrites.delete(key);
+        }
         // Only clear pendingSync if no newer local write occurred after `now`
         const latestMeta = getKeySyncMeta(key);
         if (latestMeta.updatedAt <= now) {
@@ -464,6 +479,9 @@ export async function persistDirectToFirestore(key: string, data: any): Promise<
         return true;
       })
       .catch((writeErr: any) => {
+        if (inFlightDirectWrites.get(key) === valueString) {
+          inFlightDirectWrites.delete(key);
+        }
         if (isQuotaError(writeErr)) {
           markFirestoreQuotaExceeded(writeErr);
         } else {
@@ -589,8 +607,10 @@ export async function fetchStudentsOnlyDirectly(forceServer: boolean = false): P
       forceServer: effectiveForceServer,
       timeoutMs: 1500
     });
+    if (snap && !fromCache) {
+      trackFirestoreRead(1, 'جلب قائمة الطلاب');
+    }
     if (snap && snap.exists()) {
-      if (!fromCache) trackFirestoreRead(1, 'جلب قائمة الطلاب');
       const docData = snap.data();
       if (docData && Array.isArray(docData.data)) {
         const remoteUpdatedAt = Number(docData.updatedAt) || 0;
@@ -908,8 +928,8 @@ export function setupFirebaseSync() {
         return;
       }
 
-      // If identical string AND there's no pending failed write, skip redundant network write
-      if (prevValue === value && !prevMeta.pendingSync) {
+      // If identical string AND there's no pending failed write (or identical write is already in-flight), skip duplicate network write
+      if (prevValue === value && (!prevMeta.pendingSync || inFlightDirectWrites.get(key) === value)) {
         return;
       }
 
@@ -934,7 +954,11 @@ export function setupFirebaseSync() {
         if (db && !isFirestoreQuotaExceeded()) {
           const docRef = doc(db, 'school_live_data', key);
           const cloudPayload = prepareFirestorePayload(key, parsedData);
+          inFlightDirectWrites.set(key, value);
           setDoc(docRef, { data: cloudPayload, updatedAt: now }, { merge: true }).then(() => {
+            if (inFlightDirectWrites.get(key) === value) {
+              inFlightDirectWrites.delete(key);
+            }
             const latestMeta = getKeySyncMeta(key);
             if (latestMeta.updatedAt <= now) {
               setKeySyncMeta(key, now, false);
@@ -943,6 +967,9 @@ export function setupFirebaseSync() {
             trackFirestoreWrite(1, `تحديث تلقائي (${key})`);
             initialLoadCompletedKeys.add(key);
           }).catch(err => {
+            if (inFlightDirectWrites.get(key) === value) {
+              inFlightDirectWrites.delete(key);
+            }
             if (isQuotaError(err)) {
               markFirestoreQuotaExceeded(err);
             } else {
@@ -985,7 +1012,7 @@ export function setupFirebaseSync() {
       const unsub = onSnapshot(docRef, (snapshot) => {
         const fromCache = !!snapshot.metadata?.fromCache;
         if (!fromCache) {
-          trackFirestoreRead(1, `استماع فوري (${key})`);
+          trackFirestoreRead(1, `استماع فوري (${key})`, { isRealtime: true });
         }
         if (snapshot.exists()) {
           const docData = snapshot.data();

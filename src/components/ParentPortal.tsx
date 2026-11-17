@@ -1337,8 +1337,13 @@ ${url}
       const currentPerm = Notification.permission;
       setPushPermissionStatus(currentPerm);
 
-      // If already granted, auto-register/update device token silently in background
-      if (currentPerm === 'granted' && selectedParentId && !isFirestoreQuotaExceeded()) {
+      // If already granted, register/update device token ONCE per session per parentId to avoid wasted writes on re-renders
+      const sessionSyncKey = `fcm_token_synced_${selectedParentId}`;
+      const alreadySynced = typeof sessionStorage !== 'undefined' && sessionStorage.getItem(sessionSyncKey) === '1';
+      if (currentPerm === 'granted' && selectedParentId && !alreadySynced && !isFirestoreQuotaExceeded()) {
+        if (typeof sessionStorage !== 'undefined') {
+          try { sessionStorage.setItem(sessionSyncKey, '1'); } catch {}
+        }
         (async () => {
           try {
             const { doc, setDoc } = await import('firebase/firestore');
@@ -1356,6 +1361,9 @@ ${url}
               trackFirestoreWrite(1, 'تحديث توكن الإشعارات');
             }
           } catch (e: any) {
+            if (typeof sessionStorage !== 'undefined') {
+              try { sessionStorage.removeItem(sessionSyncKey); } catch {}
+            }
             if (isQuotaError(e)) {
               markFirestoreQuotaExceeded(e);
             }
@@ -1363,7 +1371,7 @@ ${url}
         })();
       }
     }
-  }, [selectedParentId, activeParent]);
+  }, [selectedParentId]);
 
   // Subscribe to real-time notifications from Firestore
   React.useEffect(() => {
@@ -2265,7 +2273,6 @@ ${url}
       date: excuseDate,
       reason: excuseReason
     });
-    trackActivityOperation('write', 1);
 
     setExcuseReason('');
     alert('تم إرسال عذر الغياب بنجاح! سيظهر فوراً في شاشة المدير العام للاعتماد والموافقة.');

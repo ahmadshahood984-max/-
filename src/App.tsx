@@ -48,6 +48,7 @@ import {
   getOfflineSyncStatus,
   flushPendingLocalSyncKeys,
   hydrateFromOfflineVault,
+  saveLocalSeedWithoutCloudWrite,
   type OfflineSyncStatus
 } from './lib/firebaseSync';
 import { syncSingleGradeToFirestore } from './lib/studentGradesQuery';
@@ -720,10 +721,15 @@ export default function App() {
   }, []);
 
   // Save to localStorage whenever state changes with anti-wipe protection
+  // If `saved === null` on a fresh browser, seed locally WITHOUT triggering a cloud write before real remote data arrives.
   useEffect(() => {
     const saved = localStorage.getItem('school_teachers');
     const currentStr = JSON.stringify(teachers);
     if (teachers.length === 0 && saved && saved !== '[]') return;
+    if (saved === null) {
+      saveLocalSeedWithoutCloudWrite('school_teachers', currentStr);
+      return;
+    }
     if (saved !== currentStr) {
       localStorage.setItem('school_teachers', currentStr);
     }
@@ -733,6 +739,10 @@ export default function App() {
     const saved = localStorage.getItem('school_classes');
     const currentStr = JSON.stringify(classes);
     if (classes.length === 0 && saved && saved !== '[]') return;
+    if (saved === null) {
+      saveLocalSeedWithoutCloudWrite('school_classes', currentStr);
+      return;
+    }
     if (saved !== currentStr) {
       localStorage.setItem('school_classes', currentStr);
     }
@@ -742,6 +752,10 @@ export default function App() {
     const saved = localStorage.getItem('school_parents');
     const currentStr = JSON.stringify(parents);
     if (parents.length === 0 && saved && saved !== '[]') return;
+    if (saved === null) {
+      saveLocalSeedWithoutCloudWrite('school_parents', currentStr);
+      return;
+    }
     if (saved !== currentStr) {
       localStorage.setItem('school_parents', currentStr);
     }
@@ -751,6 +765,10 @@ export default function App() {
     const saved = localStorage.getItem('school_students');
     const currentStr = JSON.stringify(students);
     if (students.length === 0 && saved && saved !== '[]') return;
+    if (saved === null) {
+      saveLocalSeedWithoutCloudWrite('school_students', currentStr);
+      return;
+    }
     if (saved !== currentStr) {
       localStorage.setItem('school_students', currentStr);
     }
@@ -760,6 +778,10 @@ export default function App() {
     const saved = localStorage.getItem('school_attendance');
     const currentStr = JSON.stringify(attendance);
     if (attendance.length === 0 && saved && saved !== '[]') return;
+    if (saved === null) {
+      saveLocalSeedWithoutCloudWrite('school_attendance', currentStr);
+      return;
+    }
     if (saved !== currentStr) {
       localStorage.setItem('school_attendance', currentStr);
     }
@@ -769,6 +791,10 @@ export default function App() {
     const saved = localStorage.getItem('school_grades');
     const currentStr = JSON.stringify(grades);
     if (grades.length === 0 && saved && saved !== '[]') return;
+    if (saved === null) {
+      saveLocalSeedWithoutCloudWrite('school_grades', currentStr);
+      return;
+    }
     if (saved !== currentStr) {
       localStorage.setItem('school_grades', currentStr);
     }
@@ -778,6 +804,10 @@ export default function App() {
     const saved = localStorage.getItem('school_announcements');
     const currentStr = JSON.stringify(announcements);
     if (announcements.length === 0 && saved && saved !== '[]') return;
+    if (saved === null) {
+      saveLocalSeedWithoutCloudWrite('school_announcements', currentStr);
+      return;
+    }
     if (saved !== currentStr) {
       localStorage.setItem('school_announcements', currentStr);
     }
@@ -787,6 +817,10 @@ export default function App() {
     const saved = localStorage.getItem('school_messages');
     const currentStr = JSON.stringify(messages);
     if (messages.length === 0 && saved && saved !== '[]') return;
+    if (saved === null) {
+      saveLocalSeedWithoutCloudWrite('school_messages', currentStr);
+      return;
+    }
     if (saved !== currentStr) {
       localStorage.setItem('school_messages', currentStr);
     }
@@ -796,6 +830,10 @@ export default function App() {
     const saved = localStorage.getItem('school_excuses');
     const currentStr = JSON.stringify(excuses);
     if (excuses.length === 0 && saved && saved !== '[]') return;
+    if (saved === null) {
+      saveLocalSeedWithoutCloudWrite('school_excuses', currentStr);
+      return;
+    }
     if (saved !== currentStr) {
       localStorage.setItem('school_excuses', currentStr);
     }
@@ -803,10 +841,16 @@ export default function App() {
 
   useEffect(() => {
     const saved = localStorage.getItem('school_director_password');
-    if (saved && saved !== directorPassword && directorPassword === '123') {
+    if (saved === null) {
+      saveLocalSeedWithoutCloudWrite('school_director_password', directorPassword);
       return;
     }
-    localStorage.setItem('school_director_password', directorPassword);
+    if (saved !== directorPassword && directorPassword === '123') {
+      return;
+    }
+    if (saved !== directorPassword) {
+      localStorage.setItem('school_director_password', directorPassword);
+    }
   }, [directorPassword]);
 
   // --- Web Audio sound player for WhatsApp feel ---
@@ -1311,7 +1355,6 @@ export default function App() {
 
     setGrades(prev => {
       const updated = [newGrade, ...prev];
-      localStorage.setItem('school_grades', JSON.stringify(updated));
       persistDirectToFirestore('school_grades', updated);
       syncSingleGradeToFirestore(newGrade).catch(() => {});
       return updated;
@@ -1341,7 +1384,6 @@ export default function App() {
       };
       setMessages(prev => {
         const updated = [newMsg, ...prev];
-        localStorage.setItem('school_messages', JSON.stringify(updated));
         persistDirectToFirestore('school_messages', updated);
         return updated;
       });
@@ -1366,7 +1408,6 @@ export default function App() {
 
     setMessages(prev => {
       const updated = [...prev, newMsg];
-      localStorage.setItem('school_messages', JSON.stringify(updated));
       persistDirectToFirestore('school_messages', updated);
       return updated;
     });
@@ -1428,7 +1469,6 @@ export default function App() {
 
     setExcuses(prev => {
       const updated = [...prev, newExc];
-      localStorage.setItem('school_excuses', JSON.stringify(updated));
       persistDirectToFirestore('school_excuses', updated);
       return updated;
     });
@@ -1443,7 +1483,6 @@ export default function App() {
 
     setMessages(prev => {
       const updated = [...prev, newMsg];
-      localStorage.setItem('school_messages', JSON.stringify(updated));
       persistDirectToFirestore('school_messages', updated);
       return updated;
     });
