@@ -8,7 +8,7 @@
 importScripts('https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js');
 importScripts('https://www.gstatic.com/firebasejs/9.23.0/firebase-messaging-compat.js');
 
-const CACHE_NAME = 'school-pwa-v4';
+const CACHE_NAME = 'school-pwa-v5';
 const APP_SHELL_URLS = ['/', '/index.html', '/manifest.json', '/icon.png'];
 
 // 1. Initialize Firebase App in the Service Worker
@@ -186,7 +186,7 @@ self.addEventListener('fetch', (e) => {
   // Handle offline page reloads & portal URLs seamlessly
   if (e.request.mode === 'navigate') {
     e.respondWith(
-      fetch(e.request)
+      fetch(e.request, { cache: 'no-store' })
         .then((networkResponse) => {
           if (networkResponse && networkResponse.status === 200 && e.request.url.startsWith(self.location.origin)) {
             const copy = networkResponse.clone();

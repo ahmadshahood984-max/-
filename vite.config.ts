@@ -6,19 +6,25 @@ import {defineConfig, Plugin} from 'vite';
 function wordDownloadPlugin(): Plugin {
   const paperStore = new Map<string, { html: string; filename: string; timestamp: number }>();
 
-  // Periodically clean up entries older than 30 minutes
-  setInterval(() => {
-    const now = Date.now();
-    for (const [key, val] of paperStore.entries()) {
-      if (now - val.timestamp > 30 * 60 * 1000) {
-        paperStore.delete(key);
-      }
-    }
-  }, 15 * 60 * 1000);
-
   return {
     name: 'word-download-server',
     configureServer(server) {
+      // Periodically clean up entries older than 30 minutes (dev server only)
+      const cleanupTimer = setInterval(() => {
+        const now = Date.now();
+        for (const [key, val] of paperStore.entries()) {
+          if (now - val.timestamp > 30 * 60 * 1000) {
+            paperStore.delete(key);
+          }
+        }
+      }, 15 * 60 * 1000);
+      if (typeof cleanupTimer.unref === 'function') {
+        cleanupTimer.unref();
+      }
+      server.httpServer?.once('close', () => {
+        clearInterval(cleanupTimer);
+      });
+
       server.middlewares.use('/api/store-paper-for-download', (req, res) => {
         if (req.method === 'POST') {
           let body = '';
