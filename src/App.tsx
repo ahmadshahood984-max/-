@@ -44,13 +44,9 @@ import {
   persistDirectToFirestore, 
   forceRefreshDataFromFirestore, 
   safeDispatchStorageUpdate,
-  OFFLINE_SYNC_STATUS_EVENT,
-  getOfflineSyncStatus,
-  flushPendingLocalSyncKeys,
   hydrateFromOfflineVault,
   saveLocalSeedWithoutCloudWrite,
-  ensureAllRealtimeListeners,
-  type OfflineSyncStatus
+  ensureAllRealtimeListeners
 } from './lib/firebaseSync';
 import { syncSingleGradeToFirestore } from './lib/studentGradesQuery';
 import { 
@@ -73,10 +69,7 @@ import {
   Laptop,
   Monitor,
   Download,
-  CheckCircle2,
-  WifiOff,
-  RefreshCw,
-  HardDrive
+  CheckCircle2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -490,22 +483,6 @@ export default function App() {
 
   // Help modal for configuring and testing notifications
   const [showNotificationHelper, setShowNotificationHelper] = useState<boolean>(false);
-
-  // Live Offline / Pending Cloud Sync status
-  const [syncStatus, setSyncStatus] = useState<OfflineSyncStatus>(() => getOfflineSyncStatus());
-
-  useEffect(() => {
-    const updateStatus = () => setSyncStatus(getOfflineSyncStatus());
-    window.addEventListener(OFFLINE_SYNC_STATUS_EVENT, updateStatus);
-    window.addEventListener('online', updateStatus);
-    window.addEventListener('offline', updateStatus);
-    updateStatus();
-    return () => {
-      window.removeEventListener(OFFLINE_SYNC_STATUS_EVENT, updateStatus);
-      window.removeEventListener('online', updateStatus);
-      window.removeEventListener('offline', updateStatus);
-    };
-  }, []);
 
   useEffect(() => {
     if (activePortal === 'director' || activePortal === 'teacher') {
@@ -1621,32 +1598,6 @@ export default function App() {
                 <span>🔔</span>
                 <span>{notificationPermission === 'granted' ? 'إشعارات الهاتف مفعّلة' : 'تفعيل إشعارات الهاتف'}</span>
               </button>
-              
-              {!syncStatus.isOnline ? (
-                <div className="flex items-center gap-2 px-3 py-1.5 bg-amber-50 text-amber-800 rounded-full border border-amber-300 shadow-sm shrink-0">
-                  <WifiOff className="w-3.5 h-3.5 text-amber-600" />
-                  <span className="text-[11px] font-bold">
-                    وضع عدم الاتصال • حفظ محلي آمن{syncStatus.pendingCount > 0 ? ` (${syncStatus.pendingCount})` : ''}
-                  </span>
-                </div>
-              ) : syncStatus.pendingCount > 0 ? (
-                <button
-                  type="button"
-                  onClick={() => flushPendingLocalSyncKeys()}
-                  className="flex items-center gap-2 px-3 py-1.5 bg-sky-50 hover:bg-sky-100 text-sky-800 rounded-full border border-sky-300 shadow-sm shrink-0 cursor-pointer transition"
-                  title="اضغط لرفع التعديلات المحفوظة محلياً إلى السحابة الآن"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 text-sky-600 ${syncStatus.isFlushing ? 'animate-spin' : ''}`} />
-                  <span className="text-[11px] font-bold">
-                    {syncStatus.isFlushing ? `جاري مزامنة (${syncStatus.pendingCount})...` : `بانتظار الرفع (${syncStatus.pendingCount}) • مزامنة`}
-                  </span>
-                </button>
-              ) : (
-                <div className="flex items-center gap-2 px-3 py-1.5 bg-green-50 text-green-700 rounded-full border border-green-200 shadow-sm shrink-0">
-                  <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
-                  <span className="text-[11px] font-semibold">متزامن أونلاين Cloud</span>
-                </div>
-              )}
             </div>
           )}
 
@@ -1749,28 +1700,7 @@ export default function App() {
             {activePortal === 'director' && (
               <div className="border-t border-slate-200 pt-3 space-y-2.5">
                 <div className="flex flex-col gap-2">
-                  <div className="flex justify-between items-center gap-2">
-                    {!syncStatus.isOnline ? (
-                      <div className="flex items-center gap-1.5 px-2.5 py-1.5 bg-amber-50 text-amber-800 rounded-full border border-amber-300 shadow-sm shrink-0">
-                        <WifiOff className="w-3 h-3 text-amber-600" />
-                        <span className="text-[10px] font-bold">حفظ محلي بدون نت{syncStatus.pendingCount > 0 ? ` (${syncStatus.pendingCount})` : ''}</span>
-                      </div>
-                    ) : syncStatus.pendingCount > 0 ? (
-                      <button
-                        type="button"
-                        onClick={() => flushPendingLocalSyncKeys()}
-                        className="flex items-center gap-1.5 px-2.5 py-1.5 bg-sky-50 text-sky-800 rounded-full border border-sky-300 shadow-sm shrink-0 cursor-pointer"
-                      >
-                        <RefreshCw className={`w-3 h-3 text-sky-600 ${syncStatus.isFlushing ? 'animate-spin' : ''}`} />
-                        <span className="text-[10px] font-bold">مزامنة ({syncStatus.pendingCount})</span>
-                      </button>
-                    ) : (
-                      <div className="flex items-center gap-1 px-2.5 py-1.5 bg-green-50 text-green-700 rounded-full border border-green-200 shadow-sm shrink-0">
-                        <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
-                        <span className="text-[10px] font-semibold">متزامن Cloud</span>
-                      </div>
-                    )}
-
+                  <div className="flex justify-end items-center gap-2">
                     <button
                       onClick={() => {
                         requestNotificationPermission();
@@ -1805,49 +1735,6 @@ export default function App() {
           </div>
         )}
       </header>
-
-      {/* Offline Protection & Auto-Sync Status Banner across all portals */}
-      {(!syncStatus.isOnline || syncStatus.pendingCount > 0) && (
-        <div className={`w-full px-4 py-2.5 border-b text-xs font-bold flex flex-wrap items-center justify-between gap-2 transition-colors ${
-          !syncStatus.isOnline
-            ? 'bg-amber-50 border-amber-200 text-amber-900'
-            : 'bg-sky-50 border-sky-200 text-sky-900'
-        }`}>
-          <div className="flex items-center gap-2">
-            {!syncStatus.isOnline ? (
-              <HardDrive className="w-4 h-4 text-amber-600 shrink-0" />
-            ) : (
-              <RefreshCw className={`w-4 h-4 text-sky-600 shrink-0 ${syncStatus.isFlushing ? 'animate-spin' : ''}`} />
-            )}
-            <span>
-              {!syncStatus.isOnline
-                ? 'انقطع الاتصال بالإنترنت — جميع البيانات والدرجات والطلاب تُحفظ تلقائياً على جهازك ولن تضيع، وستُرفع للسحابة فور عودة الإنترنت.'
-                : syncStatus.isFlushing
-                  ? `جاري مزامنة (${syncStatus.pendingCount}) تعديلات محفوظة محلياً تلقائياً مع السحابة...`
-                  : `يوجد (${syncStatus.pendingCount}) تعديلات محفوظة محلياً بانتظار إتمام المزامنة التلقائية.`}
-            </span>
-          </div>
-          <div className="flex items-center gap-2">
-            {syncStatus.pendingCount > 0 && (
-              <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-extrabold ${
-                !syncStatus.isOnline ? 'bg-amber-200/80 text-amber-900' : 'bg-sky-200/80 text-sky-900'
-              }`}>
-                تعديلات بانتظار المزامنة: {syncStatus.pendingCount}
-              </span>
-            )}
-            {syncStatus.isOnline && syncStatus.pendingCount > 0 && (
-              <button
-                type="button"
-                onClick={() => flushPendingLocalSyncKeys()}
-                disabled={syncStatus.isFlushing}
-                className="px-3 py-1 bg-sky-600 hover:bg-sky-700 text-white rounded-lg text-[11px] font-bold transition cursor-pointer disabled:opacity-60"
-              >
-                {syncStatus.isFlushing ? 'جاري المزامنة...' : 'مزامنة الآن'}
-              </button>
-            )}
-          </div>
-        </div>
-      )}
 
       {/* Main App Simulator Frame - Full Width Desktop View */}
       <main className="flex-1 w-full p-2 sm:p-4 md:p-6 lg:p-8">

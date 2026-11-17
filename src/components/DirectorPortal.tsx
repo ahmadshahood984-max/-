@@ -83,8 +83,8 @@ import { db } from '../lib/firebase';
 import { collection, addDoc, setDoc, deleteDoc, doc, serverTimestamp, writeBatch, getDocs } from 'firebase/firestore';
 import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead, checkDailyRollover, fetchCentralizedConsumptionOnce, resetCentralizedFirestoreConsumption, calibrateCentralConsumptionBaseline, getRecentUtcDates, getTimeUntilFirebaseQuotaReset, SPARK_DAILY_READ_LIMIT, SPARK_DAILY_WRITE_LIMIT, FIREBASE_PROJECT_ID, FIREBASE_DATABASE_ID } from '../lib/firestoreTracker';
 import { calculateStorageUsageReport, measureLiveCloudStorageAudit, StorageUsageReport } from '../lib/storageUsage';
-import { forceRefreshDataFromFirestore, persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate, recordDeletedStudentIds, queueOfflineNotification, flushPendingLocalSyncKeys } from '../lib/firebaseSync';
-import { isFirestoreQuotaExceeded, markFirestoreQuotaExceeded, isQuotaError, resetFirestoreQuotaBreaker } from '../lib/quotaManager';
+import { persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate, recordDeletedStudentIds, queueOfflineNotification } from '../lib/firebaseSync';
+import { isFirestoreQuotaExceeded, markFirestoreQuotaExceeded, isQuotaError } from '../lib/quotaManager';
 import { getStoredWelcomeMessages, saveWelcomeMessages, DEFAULT_WELCOME_MESSAGES, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { Bell, Activity, Info, Smartphone } from 'lucide-react';
 import { sendParentPushNotification, sendBroadcastPushNotification, getRegisteredPushDevicesCount } from '../lib/pushDispatcher';
@@ -281,9 +281,6 @@ export default function DirectorPortal({
     }
   };
 
-  const [isSyncingData, setIsSyncingData] = useState(false);
-  const [syncSuccessMsg, setSyncSuccessMsg] = useState<string | null>(null);
-
   const [schoolAppIcon, setSchoolAppIcon] = useState<string>(() => {
     return localStorage.getItem('school_app_icon') || '';
   });
@@ -316,82 +313,6 @@ export default function DirectorPortal({
       detail: { key: 'school_app_icon', value: iconValue }
     }));
     window.dispatchEvent(new Event('storage'));
-  };
-
-  const handleManualSync = async () => {
-    setIsSyncingData(true);
-    try {
-      // 0. Reset client quota circuit-breaker to test live connection
-      resetFirestoreQuotaBreaker();
-
-      // 1. Flush any offline-saved local changes first, then pull latest from Firestore if online
-      if (typeof navigator !== 'undefined' && navigator.onLine !== false) {
-        await flushPendingLocalSyncKeys();
-        await forceRefreshDataFromFirestore({ forceServer: true });
-      } else {
-        await forceRefreshDataFromFirestore({ forceServer: false });
-      }
-
-      // 2. Dispatch custom storage events so App.tsx and other portals sync immediately
-      window.dispatchEvent(new CustomEvent('school_storage_update'));
-      window.dispatchEvent(new Event('storage'));
-
-      // 3. Reload local state hooks in Director Portal directly from updated localStorage
-      const savedTeachers = localStorage.getItem('school_teachers');
-      if (savedTeachers) {
-        try { setTeachers(JSON.parse(savedTeachers)); } catch (e) {}
-      }
-      const savedStudents = localStorage.getItem('school_students');
-      if (savedStudents) {
-        try { setStudents(sanitizeAndDeduplicateStudents(JSON.parse(savedStudents))); } catch (e) {}
-      }
-      const savedParents = localStorage.getItem('school_parents');
-      if (savedParents) {
-        try { setParents(JSON.parse(savedParents)); } catch (e) {}
-      }
-      const savedClasses = localStorage.getItem('school_classes');
-      if (savedClasses) {
-        try { setClasses(JSON.parse(savedClasses)); } catch (e) {}
-      }
-      const savedAttendance = localStorage.getItem('school_attendance');
-      if (savedAttendance) {
-        try { setAttendance(JSON.parse(savedAttendance)); } catch (e) {}
-      }
-      const savedGrades = localStorage.getItem('school_grades');
-      if (savedGrades) {
-        try { setGrades(JSON.parse(savedGrades)); } catch (e) {}
-      }
-      const savedAnnounce = localStorage.getItem('school_announcements');
-      if (savedAnnounce) {
-        try { setAnnouncements(JSON.parse(savedAnnounce)); } catch (e) {}
-      }
-      const savedExcuses = localStorage.getItem('school_excuses');
-      if (savedExcuses) {
-        try { setExcuses(JSON.parse(savedExcuses)); } catch (e) {}
-      }
-      const savedTuitions = localStorage.getItem('school_tuitions');
-      if (savedTuitions) {
-        try { setTuitions(JSON.parse(savedTuitions)); } catch (e) {}
-      }
-      const savedEval = localStorage.getItem('school_monthly_evaluations');
-      if (savedEval) {
-        try { setMonthlyEvaluations(JSON.parse(savedEval)); } catch (e) {}
-      }
-      const savedCustom = localStorage.getItem('school_custom_subjects');
-      if (savedCustom) {
-        try { setCustomSubjects(JSON.parse(savedCustom)); } catch (e) {}
-      }
-    } catch (err) {
-      console.error('Error during manual data sync:', err);
-    }
-
-    setTimeout(() => {
-      setIsSyncingData(false);
-      setSyncSuccessMsg('🎉 تم تحديث ومزامنة كافة البيانات فقط في اللحظة دون إعادة تحميل الصفحة!');
-      setTimeout(() => {
-        setSyncSuccessMsg(null);
-      }, 4000);
-    }, 400);
   };
 
   React.useEffect(() => {
@@ -6363,27 +6284,6 @@ ${directivesFormatted}
             aria-label="القائمة"
           >
             {isMobileMenuOpen ? <X className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
-          </button>
-        </div>
-
-        {/* Quick Cloud Sync Button between PC and Phone */}
-        <div className="px-1 pt-1 pb-1">
-          <button
-            type="button"
-            onClick={handleManualSync}
-            disabled={isSyncingData}
-            className={`w-full py-1.5 px-2.5 rounded-xl text-[10px] font-extrabold flex items-center justify-between transition cursor-pointer border shadow-2xs ${
-              isSyncingData 
-                ? 'bg-amber-500/20 text-amber-300 border-amber-400/40 animate-pulse'
-                : 'bg-emerald-950/80 hover:bg-emerald-900 text-emerald-300 border-emerald-700/60 hover:text-white'
-            }`}
-            title="مزامنة فورية سحابية سريعة بين الكمبيوتر والهاتف وأولياء الأمور"
-          >
-            <div className="flex items-center gap-1.5">
-              <RefreshCw className={`w-3.5 h-3.5 ${isSyncingData ? 'animate-spin text-amber-400' : 'text-emerald-400'}`} />
-              <span>{isSyncingData ? 'جاري المزامنة السريعة...' : '⚡ مزامنة سريعة'}</span>
-            </div>
-            <span className="text-[9px] px-1.5 py-0.5 rounded-md bg-emerald-800/80 text-emerald-100 font-mono">كمبيوتر ⇄ هاتف</span>
           </button>
         </div>
 

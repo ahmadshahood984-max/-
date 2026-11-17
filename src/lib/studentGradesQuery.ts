@@ -451,8 +451,22 @@ export async function batchSaveStudentsGradesConsolidated(
 ): Promise<boolean> {
   if (!records || records.length === 0) return true;
 
+  const changedRecords = records.filter((rec) => {
+    const cleanId = normalizeId(rec.studentId);
+    if (!cleanId) return false;
+    const sig = computeRecordSignature(rec);
+    if (lastSyncedConsolidatedSignatures.get(cleanId) === sig) {
+      return false;
+    }
+    lastSyncedConsolidatedSignatures.set(cleanId, sig);
+    lastSyncedConsolidatedSignatures.set(`subjects_${cleanId}`, computeSubjectsSignature(rec.subjects));
+    return true;
+  });
+
+  if (changedRecords.length === 0) return true;
+
   const batchId = `gb_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-  await enqueuePendingGradeBatch(batchId, records);
+  await enqueuePendingGradeBatch(batchId, changedRecords);
 
   if (!db || isFirestoreQuotaExceeded()) return true;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
@@ -460,7 +474,7 @@ export async function batchSaveStudentsGradesConsolidated(
   }
 
   try {
-    const commitPromise = commitConsolidatedBatchToFirestore(records)
+    const commitPromise = commitConsolidatedBatchToFirestore(changedRecords)
       .then(async (ok) => {
         if (ok) await removePendingGradeBatch(batchId);
         return ok;
@@ -559,11 +573,32 @@ export async function saveSingleStudentGradesConsolidated(
 
 const lastSyncedConsolidatedSignatures = new Map<string, string>();
 
+function computeSubjectsSignature(subjects: any): string {
+  try {
+    const normalized: Record<string, { score: number | null; maxScore: number; examName: string }> = {};
+    if (subjects && typeof subjects === 'object') {
+      Object.keys(subjects).sort().forEach((k) => {
+        const entry = subjects[k];
+        if (entry && typeof entry === 'object') {
+          normalized[k] = {
+            score: entry.score !== null && entry.score !== undefined ? Number(entry.score) : null,
+            maxScore: Number(entry.maxScore) || 100,
+            examName: String(entry.examName || '')
+          };
+        }
+      });
+    }
+    return JSON.stringify(normalized);
+  } catch {
+    return String(Date.now());
+  }
+}
+
 function computeRecordSignature(rec: { subjects: any; teacherNotes?: string; directorNotes?: string; month?: string }): string {
   try {
     return JSON.stringify({
       m: rec.month || '',
-      s: rec.subjects || {},
+      s: computeSubjectsSignature(rec.subjects),
       tn: rec.teacherNotes || '',
       dn: rec.directorNotes || ''
     });
@@ -605,9 +640,9 @@ export async function seedGradesToStudentCollection(grades: Grade[]): Promise<vo
   }> = [];
 
   studentMap.forEach((r) => {
-    const sig = computeRecordSignature({ subjects: r.subjects });
-    if (lastSyncedConsolidatedSignatures.get(`seed_${r.studentId}`) !== sig) {
-      lastSyncedConsolidatedSignatures.set(`seed_${r.studentId}`, sig);
+    const sig = computeSubjectsSignature(r.subjects);
+    if (lastSyncedConsolidatedSignatures.get(`subjects_${r.studentId}`) !== sig) {
+      lastSyncedConsolidatedSignatures.set(`subjects_${r.studentId}`, sig);
       changedRecords.push({
         studentId: r.studentId,
         subjects: r.subjects
@@ -616,7 +651,15 @@ export async function seedGradesToStudentCollection(grades: Grade[]): Promise<vo
   });
 
   if (changedRecords.length > 0) {
-    await batchSaveStudentsGradesConsolidated(changedRecords);
+    const batchId = `gsd_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    await enqueuePendingGradeBatch(batchId, changedRecords);
+    if (db && !isFirestoreQuotaExceeded() && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
+      commitConsolidatedBatchToFirestore(changedRecords)
+        .then(async (ok) => {
+          if (ok) await removePendingGradeBatch(batchId);
+        })
+        .catch(() => {});
+    }
   }
 }
 
@@ -669,8 +712,7 @@ export async function syncSentGradeSheetsToConsolidatedCollection(sheets: SentGr
       };
 
       const sig = computeRecordSignature(rec);
-      if (lastSyncedConsolidatedSignatures.get(`sheet_${cleanId}`) !== sig) {
-        lastSyncedConsolidatedSignatures.set(`sheet_${cleanId}`, sig);
+      if (lastSyncedConsolidatedSignatures.get(cleanId) !== sig) {
         records.push(rec);
       }
     });

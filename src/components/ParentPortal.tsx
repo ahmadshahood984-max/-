@@ -59,7 +59,7 @@ import { sendParentPushNotification } from '../lib/pushDispatcher';
 import { getStoredWelcomeMessages, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { motion, AnimatePresence } from 'motion/react';
 import { trackActivityOperation } from '../lib/firestoreTracker';
-import { forceRefreshDataFromFirestore, fetchStudentsOnlyDirectly } from '../lib/firebaseSync';
+import { fetchStudentsOnlyDirectly } from '../lib/firebaseSync';
 import { supabase, fetchStudentGradesByParent, fetchCertifiedGradeSheetsByParent } from '../lib/supabase';
 import { fetchStudentGradesOnDemand, unpackConsolidatedGrades, type ConsolidatedStudentGradeRecord } from '../lib/studentGradesQuery';
 import { 
@@ -642,21 +642,6 @@ export default function ParentPortal({
       }
     };
   }, [activeChild?.id, loggedInStudentId]);
-
-  // Manual Refresh handler for parents to intentionally sync latest grades and sheets from server
-  const [isParentRefreshing, setIsParentRefreshing] = useState(false);
-  const [parentRefreshSuccess, setParentRefreshSuccess] = useState(false);
-
-  const handleParentManualRefresh = async () => {
-    setIsParentRefreshing(true);
-    try {
-      await fetchAllParentDataFromFirestore(true);
-      setParentRefreshSuccess(true);
-      setTimeout(() => setParentRefreshSuccess(false), 3000);
-    } finally {
-      setIsParentRefreshing(false);
-    }
-  };
 
   // Track read state for various categories per parent
   const [readGradeIds, setReadGradeIds] = useState<string[]>(() => {
@@ -3564,18 +3549,6 @@ ${url}
                 </button>
               )}
 
-              {/* زر تحديث البيانات اليدوي */}
-              <button
-                type="button"
-                onClick={handleParentManualRefresh}
-                disabled={isParentRefreshing}
-                className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 px-3 py-2 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs shrink-0"
-                title="تحديث البيانات والكشوفات والدرجات المستلمة فوراً"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 text-indigo-600 ${isParentRefreshing ? 'animate-spin' : ''}`} />
-                <span>{isParentRefreshing ? 'تحديث...' : parentRefreshSuccess ? 'تم التحديث ✓' : 'تحديث'}</span>
-              </button>
-
               <button
                 type="button"
                 onClick={handleLogout}
@@ -3614,17 +3587,6 @@ ${url}
                       </h3>
                       <p className="text-slate-500 text-xs mt-0.5">كشوف التقارير والتقييمات الشهريّة المعتمدة والموقعة إلكترونياً من إدارة المدرسة.</p>
                     </div>
-
-                    <button
-                      type="button"
-                      onClick={handleParentManualRefresh}
-                      disabled={isParentRefreshing}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-bold transition cursor-pointer self-start md:self-auto shrink-0 shadow-2xs"
-                      title="جلب وتحديث درجات الطالب عند الطلب دون إبقاء اتصال مستمر"
-                    >
-                      <RefreshCw className={`w-3.5 h-3.5 ${isParentRefreshing ? 'animate-spin' : ''}`} />
-                      <span>{isParentRefreshing ? 'جاري جلب الدرجات...' : parentRefreshSuccess ? 'تم التحديث ✓' : '🔄 تحديث كشف درجات الطالب'}</span>
-                    </button>
                   </div>
 
 

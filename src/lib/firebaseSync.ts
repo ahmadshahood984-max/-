@@ -128,6 +128,7 @@ export interface OfflineSyncStatus {
 }
 
 let isFlushingNow = false;
+let setupInitialized = false;
 let lastSyncedTimestamp: number | null = null;
 const memoryFallbackStore = new Map<string, string>();
 const inFlightDirectWrites = new Map<string, string>();
@@ -587,8 +588,14 @@ export async function flushPendingLocalSyncKeys(): Promise<boolean> {
           return;
         }
 
-        // If the exact same value is already in-flight via direct write, wait briefly or skip duplicate
+        // If the exact same value is already in-flight or was already synced cleanly, clear pending without resending
         if (inFlightDirectWrites.get(key) === raw) {
+          return;
+        }
+        if (lastSyncedValues.get(key) === raw) {
+          const syncedAt = Math.max(Date.now(), Number(meta.updatedAt) || 0);
+          setKeySyncMeta(key, syncedAt, false);
+          await markVaultKeySynced(key, syncedAt);
           return;
         }
 
@@ -1068,6 +1075,8 @@ export function ensureAllRealtimeListeners() {
 }
 
 export function setupFirebaseSync() {
+  if (setupInitialized) return;
+  setupInitialized = true;
   console.log('Initializing Firebase real-time database synchronization with durable offline vault protection...');
 
   // Request persistent storage & hydrate any offline IndexedDB records
@@ -1094,16 +1103,6 @@ export function setupFirebaseSync() {
         }
       }
     });
-
-    // Background auto-retry every 20s ONLY when online & pending offline changes exist (0 server reads)
-    setInterval(() => {
-      if (navigator.onLine !== false && !isFirestoreQuotaExceeded() && !isFlushingNow) {
-        const status = getOfflineSyncStatus();
-        if (status.pendingCount > 0) {
-          flushPendingLocalSyncKeys().catch(() => {});
-        }
-      }
-    }, 20000);
   }
 
   // Fallback to in-memory vault copy if localStorage ever hits 5MB browser limit
