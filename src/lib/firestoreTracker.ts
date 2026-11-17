@@ -14,6 +14,7 @@ import {
   doc,
   setDoc,
   getDoc,
+  getDocFromServer,
   increment,
   onSnapshot,
   runTransaction
@@ -32,6 +33,10 @@ export const FIREBASE_PROJECT_ID = firebaseConfigJson.projectId || 'aesthetic-ni
 export const FIREBASE_DATABASE_ID =
   firebaseConfigJson.firestoreDatabaseId || 'ai-studio-c3b19e71-cc85-420b-8314-cb9b70b9467c';
 
+export const SPARK_DAILY_READ_LIMIT = 50000;
+export const SPARK_DAILY_WRITE_LIMIT = 20000;
+export const SPARK_DAILY_DELETE_LIMIT = 20000;
+
 export interface DailyUsageBucket {
   reads: number;
   writes: number;
@@ -49,6 +54,10 @@ export interface FirestoreMetrics {
   totalReads: number;              // Global total reads today across ALL devices (PT)
   totalWrites: number;             // Global total writes today across ALL devices (PT)
   totalRealtimeReads?: number;     // Global realtime reads today across ALL devices (PT)
+  remainingReads?: number;         // Remaining free daily reads out of 50,000
+  remainingWrites?: number;        // Remaining free daily writes out of 20,000
+  remainingReadsPercent?: number;  // Remaining free reads %
+  remainingWritesPercent?: number; // Remaining free writes %
   firestoreReads: number;          // Central counter reads today from `system_stats/consumption`
   firestoreWrites: number;         // Central counter writes today from `system_stats/consumption`
   firestoreRealtimeReads?: number; // Central counter realtime reads today from `system_stats/consumption`
@@ -91,6 +100,29 @@ export function getRecentUtcDates(days: number = 7): string[] {
     result.push(getUtcDateStr(d));
   }
   return result;
+}
+
+/**
+ * Returns hours and minutes remaining until Firebase Spark daily quota resets (Midnight America/Los_Angeles PT).
+ */
+export function getTimeUntilFirebaseQuotaReset(now: Date = new Date()): { hours: number; minutes: number } {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Los_Angeles',
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit'
+    }).formatToParts(now);
+    const h = Number(parts.find(p => p.type === 'hour')?.value || 0) % 24;
+    const m = Number(parts.find(p => p.type === 'minute')?.value || 0);
+    const totalRemainingMinutes = Math.max(0, 24 * 60 - (h * 60 + m));
+    return {
+      hours: Math.floor(totalRemainingMinutes / 60),
+      minutes: totalRemainingMinutes % 60
+    };
+  } catch {
+    return { hours: 0, minutes: 0 };
+  }
 }
 
 interface PendingDeltasState {
@@ -285,6 +317,10 @@ export function loadFirestoreMetrics(): FirestoreMetrics {
         parsed.realtimeReads7d = sums7d.realtimeReads;
         parsed.pendingLocalReads = pendingState.quotaDate === today ? pendingState.reads : 0;
         parsed.pendingLocalWrites = pendingState.quotaDate === today ? pendingState.writes : 0;
+        parsed.remainingReads = Math.max(0, SPARK_DAILY_READ_LIMIT - (parsed.totalReads || 0));
+        parsed.remainingWrites = Math.max(0, SPARK_DAILY_WRITE_LIMIT - (parsed.totalWrites || 0));
+        parsed.remainingReadsPercent = Math.max(0, Math.min(100, (parsed.remainingReads / SPARK_DAILY_READ_LIMIT) * 100));
+        parsed.remainingWritesPercent = Math.max(0, Math.min(100, (parsed.remainingWrites / SPARK_DAILY_WRITE_LIMIT) * 100));
         return parsed;
       }
     }
@@ -349,6 +385,10 @@ export function saveMetrics(metrics: FirestoreMetrics) {
   metrics.totalReads = Math.max(centralR, metrics.reads);
   metrics.totalWrites = Math.max(centralW, metrics.writes);
   metrics.totalRealtimeReads = Math.max(centralRt, metrics.realtimeReads || 0);
+  metrics.remainingReads = Math.max(0, SPARK_DAILY_READ_LIMIT - metrics.totalReads);
+  metrics.remainingWrites = Math.max(0, SPARK_DAILY_WRITE_LIMIT - metrics.totalWrites);
+  metrics.remainingReadsPercent = Math.max(0, Math.min(100, (metrics.remainingReads / SPARK_DAILY_READ_LIMIT) * 100));
+  metrics.remainingWritesPercent = Math.max(0, Math.min(100, (metrics.remainingWrites / SPARK_DAILY_WRITE_LIMIT) * 100));
 
   const combinedHistory = mergeBuckets(metrics.dailyHistory, pendingState.utcBuckets);
   const sums7d = compute7dSums(combinedHistory);
@@ -734,7 +774,7 @@ export async function fetchCentralizedConsumptionOnce(): Promise<{
 
     const consumptionRef = doc(db, CONSUMPTION_COLLECTION, CONSUMPTION_DOC_ID);
     const snap = await Promise.race([
-      getDoc(consumptionRef),
+      getDocFromServer(consumptionRef).catch(() => getDoc(consumptionRef)),
       new Promise<null>((_, reject) => setTimeout(() => reject(new Error('timeout')), 3500))
     ]);
 

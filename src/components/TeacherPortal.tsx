@@ -121,7 +121,9 @@ export default function TeacherPortal({
     return saved ? JSON.parse(saved) : [];
   });
   const [currentEvaluationMonth, setCurrentEvaluationMonth] = useState<string>(() => {
-    return localStorage.getItem('school_evaluation_current_month') || 'شهر شباط';
+    const raw = localStorage.getItem('school_evaluation_current_month');
+    if (!raw) return 'شهر شباط';
+    try { return raw.startsWith('"') ? JSON.parse(raw) : raw; } catch { return raw; }
   });
   const [savedEvaluationMonths, setSavedEvaluationMonths] = useState<string[]>(() => {
     const saved = localStorage.getItem('school_evaluation_saved_months');
@@ -132,7 +134,9 @@ export default function TeacherPortal({
     return saved ? JSON.parse(saved) : ['الرياضيات', 'العلوم', 'اللغة العربية', 'التربية الإسلامية', 'اللغة الإنجليزية', 'الاجتماعيات'];
   });
   const [directorMaxGradeSetting, setDirectorMaxGradeSetting] = useState<string>(() => {
-    return localStorage.getItem('school_max_grade_setting') || '100';
+    const raw = localStorage.getItem('school_max_grade_setting');
+    if (!raw) return '100';
+    try { return raw.startsWith('"') ? JSON.parse(raw) : raw; } catch { return raw; }
   });
   const [isSentSheetsModalOpen, setIsSentSheetsModalOpen] = useState(false);
   const [selectedSentSheetToView, setSelectedSentSheetToView] = useState<SentGradeSheet | null>(null);
@@ -155,13 +159,21 @@ export default function TeacherPortal({
       } else if (key === 'school_sent_grade_sheets' && value) {
         try { setSentGradeSheets(JSON.parse(value)); } catch (err) {}
       } else if (key === 'school_evaluation_current_month' && value) {
-        setCurrentEvaluationMonth(value);
+        try {
+          setCurrentEvaluationMonth(value.startsWith('"') ? JSON.parse(value) : value);
+        } catch {
+          setCurrentEvaluationMonth(value);
+        }
       } else if (key === 'school_evaluation_saved_months' && value) {
         try { setSavedEvaluationMonths(JSON.parse(value)); } catch (err) {}
       } else if (key === 'school_custom_subjects' && value) {
         try { setCustomSubjects(JSON.parse(value)); } catch (err) {}
       } else if (key === 'school_max_grade_setting' && value) {
-        setDirectorMaxGradeSetting(value);
+        try {
+          setDirectorMaxGradeSetting(value.startsWith('"') ? JSON.parse(value) : value);
+        } catch {
+          setDirectorMaxGradeSetting(value);
+        }
       }
     };
     window.addEventListener('school_storage_update', handleStorageUpdate);

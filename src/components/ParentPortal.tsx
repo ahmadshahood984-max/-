@@ -61,7 +61,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { trackActivityOperation } from '../lib/firestoreTracker';
 import { forceRefreshDataFromFirestore, fetchStudentsOnlyDirectly } from '../lib/firebaseSync';
 import { supabase, fetchStudentGradesByParent, fetchCertifiedGradeSheetsByParent } from '../lib/supabase';
-import { fetchStudentGradesOnDemand } from '../lib/studentGradesQuery';
+import { fetchStudentGradesOnDemand, unpackConsolidatedGrades, type ConsolidatedStudentGradeRecord } from '../lib/studentGradesQuery';
 import { 
   isFirestoreQuotaExceeded, 
   markFirestoreQuotaExceeded, 
@@ -584,6 +584,64 @@ export default function ParentPortal({
 
     return () => window.removeEventListener('school_storage_update', handleStorageUpdate);
   }, []);
+
+  // Automatic real-time listener for logged-in student's consolidated grades (`students_grades/{studentId}`)
+  React.useEffect(() => {
+    const targetStudentId = activeChild?.id || loggedInStudentId;
+    if (!targetStudentId || isFirestoreQuotaExceeded()) return;
+
+    let cancelled = false;
+    let unsubDoc: (() => void) | null = null;
+
+    (async () => {
+      try {
+        const { doc, onSnapshot } = await import('firebase/firestore');
+        const { db } = await import('../lib/firebase');
+        const { trackFirestoreRead } = await import('../lib/firestoreTracker');
+        if (!db || cancelled) return;
+
+        const docRef = doc(db, 'students_grades', String(targetStudentId).trim());
+        const rawUnsub = onSnapshot(
+          docRef,
+          (snap) => {
+            if (!snap.metadata?.fromCache) {
+              trackFirestoreRead(1, 'مزامنة فورية لدرجات الطالب', { isRealtime: true });
+            }
+            if (snap.exists()) {
+              const data = snap.data() as ConsolidatedStudentGradeRecord;
+              if (data && data.subjects) {
+                const unpacked = unpackConsolidatedGrades(data);
+                if (unpacked.length > 0) {
+                  setDirectGrades(prev => {
+                    const map = new Map<string, Grade>();
+                    prev.forEach(g => map.set(g.id || `${g.studentId}_${g.subject}_${g.examName}`, g));
+                    unpacked.forEach(g => map.set(g.id || `${g.studentId}_${g.subject}_${g.examName}`, g));
+                    return Array.from(map.values());
+                  });
+                }
+              }
+            }
+          },
+          (err: any) => {
+            if (isQuotaError(err)) {
+              markFirestoreQuotaExceeded(err);
+            }
+          }
+        );
+        unsubDoc = registerActiveFirestoreListener(rawUnsub);
+        if (cancelled && unsubDoc) {
+          unsubDoc();
+        }
+      } catch {}
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unsubDoc) {
+        try { unsubDoc(); } catch {}
+      }
+    };
+  }, [activeChild?.id, loggedInStudentId]);
 
   // Manual Refresh handler for parents to intentionally sync latest grades and sheets from server
   const [isParentRefreshing, setIsParentRefreshing] = useState(false);

@@ -81,7 +81,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
 import { db } from '../lib/firebase';
 import { collection, addDoc, setDoc, deleteDoc, doc, serverTimestamp, writeBatch, getDocs } from 'firebase/firestore';
-import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead, checkDailyRollover, fetchCentralizedConsumptionOnce, resetCentralizedFirestoreConsumption, calibrateCentralConsumptionBaseline, getRecentUtcDates, FIREBASE_PROJECT_ID, FIREBASE_DATABASE_ID } from '../lib/firestoreTracker';
+import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead, checkDailyRollover, fetchCentralizedConsumptionOnce, resetCentralizedFirestoreConsumption, calibrateCentralConsumptionBaseline, getRecentUtcDates, getTimeUntilFirebaseQuotaReset, SPARK_DAILY_READ_LIMIT, SPARK_DAILY_WRITE_LIMIT, FIREBASE_PROJECT_ID, FIREBASE_DATABASE_ID } from '../lib/firestoreTracker';
 import { calculateStorageUsageReport, measureLiveCloudStorageAudit, StorageUsageReport } from '../lib/storageUsage';
 import { forceRefreshDataFromFirestore, persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate, recordDeletedStudentIds, queueOfflineNotification, flushPendingLocalSyncKeys } from '../lib/firebaseSync';
 import { isFirestoreQuotaExceeded, markFirestoreQuotaExceeded, isQuotaError, resetFirestoreQuotaBreaker } from '../lib/quotaManager';
@@ -14080,22 +14080,66 @@ ${sampleEval}
                         </span>
                       )}
                     </div>
-                    <div className="bg-white/80 border border-emerald-200/70 rounded-lg px-2.5 py-1.5 text-[10px] text-slate-600 leading-relaxed">
-                      <span className="font-bold text-slate-800">نطاق الرصد:</span> المشروع <strong className="font-mono text-indigo-700">{FIREBASE_PROJECT_ID}</strong> / قاعدة البيانات <strong className="font-mono text-indigo-700">{FIREBASE_DATABASE_ID}</strong>.
-                      <span className="block text-[9.5px] text-slate-500 mt-0.5">
-                        ملاحظة: صفحة &laquo;نظرة عامة&raquo; في Firebase Console قد تجمع عدة قواعد بيانات مشتركة بالحصة وتعرض مجموع 7 أيام؛ للمطابقة 1:1 حدد نفس اسم قاعدة البيانات أعلاه داخل وحدة تحكم Firebase.
+                    <div className="bg-white/80 border border-emerald-200/70 rounded-lg px-2.5 py-2 text-[10px] text-slate-600 leading-relaxed space-y-1">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span>
+                          <span className="font-bold text-slate-800">قاعدة بيانات Firebase:</span>{' '}
+                          <strong className="font-mono text-indigo-700">{FIREBASE_DATABASE_ID}</strong>
+                        </span>
+                        <span className="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-md font-bold">
+                          {(() => {
+                            const resetIn = getTimeUntilFirebaseQuotaReset();
+                            return `يتجدد المجاني بعد ${resetIn.hours} س و ${resetIn.minutes} د`;
+                          })()}
+                        </span>
+                      </div>
+                      <span className="block text-[9.5px] text-slate-500">
+                        ملاحظة: صفحة &laquo;نظرة عامة&raquo; في Firebase Console قد تجمع 4 قواعد بيانات مشتركة بالحصة تحت مشروع <span className="font-mono">{FIREBASE_PROJECT_ID}</span>؛ للمطابقة 1:1 حدد قاعدة البيانات أعلاه داخل وحدة تحكم Firebase.
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Quick Summary: Remaining Free Daily & Storage Quota */}
+                  <div className="grid grid-cols-3 gap-2.5">
+                    <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-3 text-center">
+                      <span className="text-[10px] font-bold text-emerald-800 block mb-0.5">باقي القراءات المجانية اليوم</span>
+                      <strong className="text-sm sm:text-base font-mono font-black text-emerald-700 block">
+                        {(firestoreMetrics.remainingReads ?? Math.max(0, SPARK_DAILY_READ_LIMIT - firestoreMetrics.totalReads)).toLocaleString()}
+                      </strong>
+                      <span className="text-[9.5px] font-mono text-emerald-600">
+                        من {SPARK_DAILY_READ_LIMIT.toLocaleString()} ({((firestoreMetrics.remainingReadsPercent ?? Math.max(0, ((SPARK_DAILY_READ_LIMIT - firestoreMetrics.totalReads) / SPARK_DAILY_READ_LIMIT) * 100))).toFixed(1)}%)
+                      </span>
+                    </div>
+                    <div className="bg-sky-50 border border-sky-200 rounded-2xl p-3 text-center">
+                      <span className="text-[10px] font-bold text-sky-800 block mb-0.5">باقي الكتابات المجانية اليوم</span>
+                      <strong className="text-sm sm:text-base font-mono font-black text-sky-700 block">
+                        {(firestoreMetrics.remainingWrites ?? Math.max(0, SPARK_DAILY_WRITE_LIMIT - firestoreMetrics.totalWrites)).toLocaleString()}
+                      </strong>
+                      <span className="text-[9.5px] font-mono text-sky-600">
+                        من {SPARK_DAILY_WRITE_LIMIT.toLocaleString()} ({((firestoreMetrics.remainingWritesPercent ?? Math.max(0, ((SPARK_DAILY_WRITE_LIMIT - firestoreMetrics.totalWrites) / SPARK_DAILY_WRITE_LIMIT) * 100))).toFixed(1)}%)
+                      </span>
+                    </div>
+                    <div className="bg-indigo-50 border border-indigo-200 rounded-2xl p-3 text-center">
+                      <span className="text-[10px] font-bold text-indigo-800 block mb-0.5">باقي المساحة المجانية</span>
+                      <strong className="text-sm sm:text-base font-mono font-black text-indigo-700 block">
+                        {storageReport.remainingFreeFormatted}
+                      </strong>
+                      <span className="text-[9.5px] font-mono text-indigo-600">
+                        من 1,024 MB ({(100 - storageReport.percentUsed).toFixed(2)}%)
                       </span>
                     </div>
                   </div>
 
                   {/* Today's Quota: Reads + Realtime Reads Breakdown */}
                   <div className="space-y-2">
-                    <div className="flex justify-between items-center text-xs">
-                      <span className="font-bold text-slate-700">إجمالي القراءات اليومية لجميع الأجهزة (Reads)</span>
-                      <span className="font-mono text-slate-500 font-bold">
-                        {firestoreMetrics.totalReads.toLocaleString()} / 50,000 (
-                        {Math.min(100, Math.round((firestoreMetrics.totalReads / 50000) * 100))}%
-                        )
+                    <div className="flex flex-wrap justify-between items-center gap-1 text-xs">
+                      <span className="font-bold text-slate-700">القراءات اليومية (Reads — حد Spark: 50,000)</span>
+                      <span className="font-mono font-bold text-xs">
+                        <span className="text-slate-600">المستخدم: {firestoreMetrics.totalReads.toLocaleString()}</span>
+                        <span className="mx-1.5 text-slate-300">|</span>
+                        <span className="text-emerald-700">
+                          المتبقي مجاناً: {(firestoreMetrics.remainingReads ?? Math.max(0, SPARK_DAILY_READ_LIMIT - firestoreMetrics.totalReads)).toLocaleString()} ({(firestoreMetrics.remainingReadsPercent ?? Math.max(0, ((SPARK_DAILY_READ_LIMIT - firestoreMetrics.totalReads) / SPARK_DAILY_READ_LIMIT) * 100)).toFixed(1)}%)
+                        </span>
                       </span>
                     </div>
                     <div className="w-full h-3 bg-slate-100 rounded-full overflow-hidden">
@@ -14107,7 +14151,7 @@ ${sampleEval}
                             ? 'bg-amber-500'
                             : 'bg-emerald-500'
                         }`}
-                        style={{ width: `${Math.min(100, (firestoreMetrics.totalReads / 50000) * 100)}%` }}
+                        style={{ width: `${Math.min(100, (firestoreMetrics.totalReads / SPARK_DAILY_READ_LIMIT) * 100)}%` }}
                       />
                     </div>
                     <div className="grid grid-cols-3 gap-2 bg-slate-50 p-2.5 rounded-xl text-[11px] text-slate-500">
@@ -14120,7 +14164,7 @@ ${sampleEval}
                         <strong className="font-mono text-pink-600">{(firestoreMetrics.totalRealtimeReads || 0).toLocaleString()}</strong>
                       </div>
                       <div>
-                        <span className="block text-[10px]">العداد المركزي السحابي</span>
+                        <span className="block text-[10px]">المسجّل في قاعدة البيانات</span>
                         <strong className="font-mono text-indigo-700">{(firestoreMetrics.firestoreReads || 0).toLocaleString()}</strong>
                       </div>
                     </div>
@@ -14128,12 +14172,14 @@ ${sampleEval}
 
                   {/* Today's Quota: Writes */}
                   <div className="space-y-2">
-                    <div className="flex justify-between items-center text-xs">
-                      <span className="font-bold text-slate-700">إجمالي الكتابات اليومية لجميع الأجهزة (Writes)</span>
-                      <span className="font-mono text-slate-500 font-bold">
-                        {firestoreMetrics.totalWrites.toLocaleString()} / 20,000 (
-                        {Math.min(100, Math.round((firestoreMetrics.totalWrites / 20000) * 100))}%
-                        )
+                    <div className="flex flex-wrap justify-between items-center gap-1 text-xs">
+                      <span className="font-bold text-slate-700">الكتابات اليومية (Writes — حد Spark: 20,000)</span>
+                      <span className="font-mono font-bold text-xs">
+                        <span className="text-slate-600">المستخدم: {firestoreMetrics.totalWrites.toLocaleString()}</span>
+                        <span className="mx-1.5 text-slate-300">|</span>
+                        <span className="text-sky-700">
+                          المتبقي مجاناً: {(firestoreMetrics.remainingWrites ?? Math.max(0, SPARK_DAILY_WRITE_LIMIT - firestoreMetrics.totalWrites)).toLocaleString()} ({(firestoreMetrics.remainingWritesPercent ?? Math.max(0, ((SPARK_DAILY_WRITE_LIMIT - firestoreMetrics.totalWrites) / SPARK_DAILY_WRITE_LIMIT) * 100)).toFixed(1)}%)
+                        </span>
                       </span>
                     </div>
                     <div className="w-full h-3 bg-slate-100 rounded-full overflow-hidden">
@@ -14143,9 +14189,9 @@ ${sampleEval}
                             ? 'bg-rose-500'
                             : firestoreMetrics.totalWrites >= 15000
                             ? 'bg-amber-500'
-                            : 'bg-emerald-500'
+                            : 'bg-sky-500'
                         }`}
-                        style={{ width: `${Math.min(100, (firestoreMetrics.totalWrites / 20000) * 100)}%` }}
+                        style={{ width: `${Math.min(100, (firestoreMetrics.totalWrites / SPARK_DAILY_WRITE_LIMIT) * 100)}%` }}
                       />
                     </div>
                     <div className="grid grid-cols-3 gap-2 bg-slate-50 p-2.5 rounded-xl text-[11px] text-slate-500">
@@ -14158,7 +14204,7 @@ ${sampleEval}
                         <strong className="font-mono text-amber-600">{(firestoreMetrics.pendingLocalWrites || 0).toLocaleString()}</strong>
                       </div>
                       <div>
-                        <span className="block text-[10px]">العداد المركزي السحابي</span>
+                        <span className="block text-[10px]">المسجّل في قاعدة البيانات</span>
                         <strong className="font-mono text-indigo-700">{(firestoreMetrics.firestoreWrites || 0).toLocaleString()}</strong>
                       </div>
                     </div>

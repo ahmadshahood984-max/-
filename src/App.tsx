@@ -49,6 +49,7 @@ import {
   flushPendingLocalSyncKeys,
   hydrateFromOfflineVault,
   saveLocalSeedWithoutCloudWrite,
+  ensureAllRealtimeListeners,
   type OfflineSyncStatus
 } from './lib/firebaseSync';
 import { syncSingleGradeToFirestore } from './lib/studentGradesQuery';
@@ -505,6 +506,12 @@ export default function App() {
       window.removeEventListener('offline', updateStatus);
     };
   }, []);
+
+  useEffect(() => {
+    if (activePortal === 'director' || activePortal === 'teacher') {
+      ensureAllRealtimeListeners();
+    }
+  }, [activePortal]);
 
   // Listen to remote changes via Firebase Sync and update React states in real-time
   useEffect(() => {
@@ -1052,32 +1059,36 @@ export default function App() {
     studentName?: string;
   } | null>(null);
 
-  const [lastMessageCount, setLastMessageCount] = useState<number>(messages.length);
+  const seenMessageIdsRef = React.useRef<Set<string>>(new Set(messages.map(m => m.id)));
 
   useEffect(() => {
-    if (messages.length > lastMessageCount) {
-      const latest = messages[messages.length - 1];
-      
-      // Notify only if the active portal is the intended receiver of the message
-      // AND receiver is not parent (as requested to cancel simulated alerts for parent)
-      // AND is the actual logged-in recipient (not another teacher/parent)
-      const isActualRecipient = 
-        (activePortal === 'director' && latest.receiverId === 'director') ||
-        (activePortal === 'teacher' && latest.receiverId === activeTeacherId) ||
-        (activePortal === 'parent' && latest.receiverId === activeParentId);
+    const seen = seenMessageIdsRef.current;
+    const newlyArrived = messages.filter(m => m && m.id && !seen.has(m.id));
+    messages.forEach(m => {
+      if (m && m.id) seen.add(m.id);
+    });
 
-      if (latest && latest.receiverRole === activePortal && latest.receiverRole !== 'parent' && isActualRecipient) {
-        // Generate a clear message number (based on ID number or messages array index)
+    if (newlyArrived.length > 0) {
+      // Find the newest unread message intended for the active portal recipient
+      const sortedIncoming = [...newlyArrived].sort(
+        (a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime()
+      );
+      const latest = sortedIncoming.find(m => {
+        if (m.read || m.receiverRole === 'parent') return false;
+        if (activePortal === 'director') return m.receiverRole === 'director' || m.receiverId === 'director';
+        if (activePortal === 'teacher') return m.receiverRole === 'teacher' && (!activeTeacherId || m.receiverId === activeTeacherId);
+        return false;
+      });
+
+      if (latest) {
         const numericId = parseInt(latest.id.replace(/\D/g, ''), 10) || (messages.length + 100);
         const msgNumStr = `${numericId}`;
-        
+
         const student = students.find(s => s.id === latest.studentId);
         const studentName = student ? student.name : undefined;
 
-        // Play the ring/alert sound
         playPingSound();
 
-        // Trigger floating top toast
         setActiveToast({
           id: latest.id,
           senderName: latest.senderName,
@@ -1086,22 +1097,19 @@ export default function App() {
           studentName
         });
 
-        // Trigger HTML5 Web Notification outside application safely
-        // Strip internal code category markup for the body
         const cleanBody = latest.content.replace(/^📢 \[تصنيف الإشعار:[^\]]+\]\n/, '');
         const matchCategory = latest.content.match(/^📢 \[تصنيف الإشعار:\s*([^\]]+)\]/);
         const prefix = matchCategory ? `[${matchCategory[1]}] ` : '';
 
         safeShowNotification(`💬 رسالة جديدة رقم #${msgNumStr}`, {
-          body: `من المعلم: ${latest.senderName}\nالموضوع: ${prefix}${cleanBody}`,
+          body: `من: ${latest.senderName}\nالموضوع: ${prefix}${cleanBody}`,
           icon: 'https://cdn-icons-png.flaticon.com/512/124/124034.png',
           tag: 'msg-' + latest.id,
           dir: 'rtl'
         });
       }
     }
-    setLastMessageCount(messages.length);
-  }, [messages, lastMessageCount, students]);
+  }, [messages, students, activePortal, activeTeacherId]);
 
   // --- Boot Saved System Patches on Startup ---
   useEffect(() => {
@@ -1814,7 +1822,9 @@ export default function App() {
             <span>
               {!syncStatus.isOnline
                 ? 'انقطع الاتصال بالإنترنت — جميع البيانات والدرجات والطلاب تُحفظ تلقائياً على جهازك ولن تضيع، وستُرفع للسحابة فور عودة الإنترنت.'
-                : `عاد الاتصال بالإنترنت — يوجد (${syncStatus.pendingCount}) تعديلات محفوظة محلياً بانتظار المزامنة السحابية.`}
+                : syncStatus.isFlushing
+                  ? `جاري مزامنة (${syncStatus.pendingCount}) تعديلات محفوظة محلياً تلقائياً مع السحابة...`
+                  : `يوجد (${syncStatus.pendingCount}) تعديلات محفوظة محلياً بانتظار إتمام المزامنة التلقائية.`}
             </span>
           </div>
           <div className="flex items-center gap-2">
@@ -1822,7 +1832,7 @@ export default function App() {
               <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-extrabold ${
                 !syncStatus.isOnline ? 'bg-amber-200/80 text-amber-900' : 'bg-sky-200/80 text-sky-900'
               }`}>
-                تعديلات محفوظة بانتظار الرفع: {syncStatus.pendingCount}
+                تعديلات بانتظار المزامنة: {syncStatus.pendingCount}
               </span>
             )}
             {syncStatus.isOnline && syncStatus.pendingCount > 0 && (
@@ -1832,7 +1842,7 @@ export default function App() {
                 disabled={syncStatus.isFlushing}
                 className="px-3 py-1 bg-sky-600 hover:bg-sky-700 text-white rounded-lg text-[11px] font-bold transition cursor-pointer disabled:opacity-60"
               >
-                {syncStatus.isFlushing ? 'جاري الرفع...' : 'مزامنة الآن'}
+                {syncStatus.isFlushing ? 'جاري المزامنة...' : 'مزامنة الآن'}
               </button>
             )}
           </div>
