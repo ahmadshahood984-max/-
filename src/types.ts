@@ -50,6 +50,7 @@ export interface Student {
   guardianNationalId?: string;
   avatar?: string;
   photo?: string;
+  createdAt?: number;
 }
 
 export interface Parent {

@@ -40,7 +40,16 @@ import {
 } from './lib/studentDeduplicator';
 import { safeShowNotification } from './lib/notificationHelper';
 import { sendParentPushNotification, sendBroadcastPushNotification } from './lib/pushDispatcher';
-import { persistDirectToFirestore, forceRefreshDataFromFirestore, safeDispatchStorageUpdate } from './lib/firebaseSync';
+import { 
+  persistDirectToFirestore, 
+  forceRefreshDataFromFirestore, 
+  safeDispatchStorageUpdate,
+  OFFLINE_SYNC_STATUS_EVENT,
+  getOfflineSyncStatus,
+  flushPendingLocalSyncKeys,
+  hydrateFromOfflineVault,
+  type OfflineSyncStatus
+} from './lib/firebaseSync';
 import { syncSingleGradeToFirestore } from './lib/studentGradesQuery';
 import { 
   Building, 
@@ -62,7 +71,10 @@ import {
   Laptop,
   Monitor,
   Download,
-  CheckCircle2
+  CheckCircle2,
+  WifiOff,
+  RefreshCw,
+  HardDrive
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -79,25 +91,19 @@ export default function App() {
   const [teachers, setTeachers] = useState<Teacher[]>(() => {
     const saved = localStorage.getItem('school_teachers');
     const parsed = saved ? JSON.parse(saved) : [];
-    const list = mergeTeachersWithSeed(parsed, INITIAL_TEACHERS);
-    try { localStorage.setItem('school_teachers', JSON.stringify(list)); } catch {}
-    return list;
+    return mergeTeachersWithSeed(parsed, INITIAL_TEACHERS);
   });
 
   const [classes, setClasses] = useState<Class[]>(() => {
     const saved = localStorage.getItem('school_classes');
     const parsed = saved ? JSON.parse(saved) : [];
-    const list = mergeClassesWithSeed(parsed, INITIAL_CLASSES);
-    try { localStorage.setItem('school_classes', JSON.stringify(list)); } catch {}
-    return list;
+    return mergeClassesWithSeed(parsed, INITIAL_CLASSES);
   });
 
   const [parents, setParents] = useState<Parent[]>(() => {
     const saved = localStorage.getItem('school_parents');
     const parsed = saved ? JSON.parse(saved) : [];
-    const list = mergeParentsWithSeed(parsed, INITIAL_PARENTS);
-    try { localStorage.setItem('school_parents', JSON.stringify(list)); } catch {}
-    return list;
+    return mergeParentsWithSeed(parsed, INITIAL_PARENTS);
   });
 
   const [students, setStudents] = useState<Student[]>(() => {
@@ -105,24 +111,28 @@ export default function App() {
     const parsed: Student[] = saved ? JSON.parse(saved) : [];
     const merged = mergeStudentsWithSeed(parsed, INITIAL_STUDENTS);
     const cleaned = sanitizeAndDeduplicateStudents(merged);
-    try { localStorage.setItem('school_students', JSON.stringify(cleaned)); } catch {}
     return cleaned.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
   });
 
+  const studentsRef = React.useRef<Student[]>(students);
+  studentsRef.current = students;
+  const parentsRef = React.useRef<Parent[]>(parents);
+  parentsRef.current = parents;
+
   // Safe wrapper that enforces deduplication and unique keys across all portals
   const safeSetStudents: React.Dispatch<React.SetStateAction<Student[]>> = (action) => {
-    setStudents(prev => {
-      const nextRaw = typeof action === 'function' ? action(prev) : action;
-      const merged = mergeStudentsWithSeed(Array.isArray(nextRaw) ? nextRaw : [], INITIAL_STUDENTS);
-      const cleanList = sanitizeAndDeduplicateStudents(merged);
-      const sorted = cleanList.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
-      try {
-        localStorage.setItem('school_students', JSON.stringify(sorted));
-      } catch (err) {
-        console.warn('Failed to persist students to localStorage', err);
-      }
-      return sorted;
-    });
+    const prev = studentsRef.current;
+    const nextRaw = typeof action === 'function' ? action(prev) : action;
+    const merged = mergeStudentsWithSeed(Array.isArray(nextRaw) ? nextRaw : [], INITIAL_STUDENTS);
+    const cleanList = sanitizeAndDeduplicateStudents(merged);
+    const sorted = cleanList.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
+    studentsRef.current = sorted;
+    setStudents(sorted);
+    try {
+      localStorage.setItem('school_students', JSON.stringify(sorted));
+    } catch (err) {
+      console.warn('Failed to persist students to localStorage', err);
+    }
   };
 
   const [attendance, setAttendance] = useState<Attendance[]>(() => {
@@ -479,6 +489,22 @@ export default function App() {
   // Help modal for configuring and testing notifications
   const [showNotificationHelper, setShowNotificationHelper] = useState<boolean>(false);
 
+  // Live Offline / Pending Cloud Sync status
+  const [syncStatus, setSyncStatus] = useState<OfflineSyncStatus>(() => getOfflineSyncStatus());
+
+  useEffect(() => {
+    const updateStatus = () => setSyncStatus(getOfflineSyncStatus());
+    window.addEventListener(OFFLINE_SYNC_STATUS_EVENT, updateStatus);
+    window.addEventListener('online', updateStatus);
+    window.addEventListener('offline', updateStatus);
+    updateStatus();
+    return () => {
+      window.removeEventListener(OFFLINE_SYNC_STATUS_EVENT, updateStatus);
+      window.removeEventListener('online', updateStatus);
+      window.removeEventListener('offline', updateStatus);
+    };
+  }, []);
+
   // Listen to remote changes via Firebase Sync and update React states in real-time
   useEffect(() => {
     const handleStorageUpdate = (e: Event) => {
@@ -675,6 +701,11 @@ export default function App() {
     };
 
     reloadFromLocalStorage();
+
+    // Hydrate from durable IndexedDB offline vault in case localStorage was evicted or hit 5MB limit
+    hydrateFromOfflineVault().then((restored) => {
+      if (restored) reloadFromLocalStorage();
+    }).catch(() => {});
 
     // Cache-first startup sync: displays IndexedDB persistentLocalCache immediately (0 server reads for cached docs)
     forceRefreshDataFromFirestore({ forceServer: false }).then(() => {
@@ -1087,38 +1118,38 @@ export default function App() {
 
   const changeDirectorPassword = (newPass: string) => {
     setDirectorPassword(newPass);
+    persistDirectToFirestore('school_director_password', newPass);
     logEvent(`تم تعديل كلمة مرور المدير العام بنجاح`, 'success');
   };
 
   // 2. Director registers a Student and links/creates a Parent
   const addStudent = (studentData: Omit<Student, 'id'>, parentData: Omit<Parent, 'id' | 'childrenIds'>) => {
-    // Generate guaranteed unique student ID that never collides with any existing ID
-    let candidateNum = students.length + 1;
-    let studentId = 's' + candidateNum;
-    while (students.some(s => s.id === studentId)) {
-      candidateNum++;
-      studentId = 's' + candidateNum;
+    const currentStudents = studentsRef.current;
+    const currentParents = parentsRef.current;
+    const now = Date.now();
+
+    // Generate guaranteed collision-free student ID across tabs/devices
+    let studentId = `s_${now.toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
+    while (currentStudents.some(s => s.id === studentId)) {
+      studentId = `s_${now.toString(36)}_${Math.random().toString(36).substring(2, 7)}`;
     }
 
-    const candidateUnified = studentData.unifiedNo || studentData.rollNo || String(candidateNum).padStart(3, '0');
+    const candidateUnified = studentData.unifiedNo || studentData.rollNo || String(currentStudents.length + 1).padStart(3, '0');
     
     // Check if parent already exists (by phone)
     let parentId = '';
-    const existingParent = parents.find(p => p.phone === parentData.phone);
+    const existingParent = currentParents.find(p => p.phone === parentData.phone);
     let updatedParentsList: Parent[];
     
     if (existingParent) {
       parentId = existingParent.id;
-      // update parent's children
-      updatedParentsList = parents.map(p => 
+      updatedParentsList = currentParents.map(p => 
         p.id === parentId ? { ...p, childrenIds: [...p.childrenIds.filter(id => id !== studentId), studentId] } : p
       );
     } else {
-      let pNum = parents.length + 1;
-      let pId = 'p' + pNum;
-      while (parents.some(p => p.id === pId)) {
-        pNum++;
-        pId = 'p' + pNum;
+      let pId = `p_${now.toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
+      while (currentParents.some(p => p.id === pId)) {
+        pId = `p_${now.toString(36)}_${Math.random().toString(36).substring(2, 7)}`;
       }
       parentId = pId;
       const newParent: Parent = {
@@ -1128,8 +1159,10 @@ export default function App() {
         phone: parentData.phone,
         childrenIds: [studentId]
       };
-      updatedParentsList = [...parents, newParent];
+      updatedParentsList = [...currentParents, newParent];
     }
+
+    parentsRef.current = updatedParentsList;
     setParents(updatedParentsList);
     persistDirectToFirestore('school_parents', updatedParentsList);
 
@@ -1138,15 +1171,15 @@ export default function App() {
       id: studentId,
       parentId,
       unifiedNo: candidateUnified,
-      rollNo: studentData.rollNo || candidateUnified
+      rollNo: studentData.rollNo || candidateUnified,
+      createdAt: now
     };
 
-    setStudents(prev => {
-      const sanitized = sanitizeAndDeduplicateStudents([...prev, newStudent]);
-      const sorted = sanitized.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
-      persistDirectToFirestore('school_students', sorted);
-      return sorted;
-    });
+    const sanitized = sanitizeAndDeduplicateStudents([...currentStudents, newStudent]);
+    const sorted = sanitized.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
+    studentsRef.current = sorted;
+    setStudents(sorted);
+    persistDirectToFirestore('school_students', sorted);
     logEvent(`تم تسجيل الطالب: ${newStudent.name} (الرقم الموحد: ${candidateUnified}) وربطه بولي الأمر: ${parentData.name}`, 'success');
   };
 
@@ -1165,7 +1198,11 @@ export default function App() {
       shift: announceData.shift || 'morning'
     };
 
-    setAnnouncements(prev => [newAnn, ...prev]);
+    setAnnouncements(prev => {
+      const updated = [newAnn, ...prev];
+      persistDirectToFirestore('school_announcements', updated);
+      return updated;
+    });
     logEvent(`${newAnn.authorName} نشر تعميماً جديداً: "${newAnn.title}" المستهدف: ${
       newAnn.target === 'all' ? 'الجميع' : newAnn.target === 'teachers' ? 'المعلمون' : 'أولياء الأمور'
     }`, 'primary');
@@ -1183,55 +1220,60 @@ export default function App() {
 
   // 4. Director approves/rejects Absence Excuse (INTERCONNECTED LOGIC)
   const updateExcuseStatus = (id: string, status: 'approved' | 'rejected', notes?: string) => {
-    setExcuses(prev => prev.map(exc => {
-      if (exc.id === id) {
-        const updated = { ...exc, status, notes };
-        
-        // If approved, dynamically update attendance records to 'excused'
-        if (status === 'approved') {
-          setAttendance(prevAtt => {
-            const date = exc.date;
-            const studentId = exc.studentId;
-            const existingRecord = prevAtt.find(a => a.studentId === studentId && a.date === date);
+    setExcuses(prev => {
+      const updatedExcuses = prev.map(exc => {
+        if (exc.id === id) {
+          const updated = { ...exc, status, notes };
 
-            if (existingRecord) {
-              // Update state
-              return prevAtt.map(a => 
-                (a.studentId === studentId && a.date === date) 
-                  ? { ...a, status: 'excused', notes: `عذر مقبول معتمد: ${exc.reason}` } 
-                  : a
-              );
-            } else {
-              // Create new record
-              return [...prevAtt, {
-                id: 'att' + (prevAtt.length + 1),
-                studentId,
-                date,
-                status: 'excused',
-                notes: `عذر مقبول معتمد: ${exc.reason}`
-              }];
-            }
-          });
-          logEvent(`تم اعتماد عذر غياب الطالب: ${exc.studentName} للتاريخ ${exc.date} وتعديل الغياب لعذر مقبول تلقائياً.`, 'success');
-        } else {
-          logEvent(`تم رفض عذر غياب الطالب: ${exc.studentName} للتاريخ ${exc.date}`, 'warning');
+          // If approved, dynamically update attendance records to 'excused'
+          if (status === 'approved') {
+            setAttendance(prevAtt => {
+              const date = exc.date;
+              const studentId = exc.studentId;
+              const existingRecord = prevAtt.find(a => a.studentId === studentId && a.date === date);
+
+              let updatedAtt: Attendance[];
+              if (existingRecord) {
+                updatedAtt = prevAtt.map(a => 
+                  (a.studentId === studentId && a.date === date) 
+                    ? { ...a, status: 'excused', notes: `عذر مقبول معتمد: ${exc.reason}` } 
+                    : a
+                );
+              } else {
+                updatedAtt = [...prevAtt, {
+                  id: 'att' + (prevAtt.length + 1),
+                  studentId,
+                  date,
+                  status: 'excused',
+                  notes: `عذر مقبول معتمد: ${exc.reason}`
+                }];
+              }
+              persistDirectToFirestore('school_attendance', updatedAtt);
+              return updatedAtt;
+            });
+            logEvent(`تم اعتماد عذر غياب الطالب: ${exc.studentName} للتاريخ ${exc.date} وتعديل الغياب لعذر مقبول تلقائياً.`, 'success');
+          } else {
+            logEvent(`تم رفض عذر غياب الطالب: ${exc.studentName} للتاريخ ${exc.date}`, 'warning');
+          }
+
+          // Send push notification to parent with decision
+          const parent = parents.find(p => p.id === exc.parentId);
+          if (parent) {
+            sendParentPushNotification(parent.id, {
+              title: status === 'approved' ? '✅ تم قبول عذر الغياب' : '❌ تم رفض عذر الغياب',
+              body: `عذر غياب الطالب (${exc.studentName}) لتاريخ ${exc.date}: ${status === 'approved' ? 'تم اعتماده وتوثيقه كعذر مقبول رسمياً' : 'تم رفضه من إدارة المدرسة'}${notes ? ` - ملاحظة: ${notes}` : ''}`,
+              studentId: exc.studentId,
+              category: 'attendance'
+            });
+          }
+
+          return updated;
         }
-
-        // Send push notification to parent with decision
-        const parent = parents.find(p => p.id === exc.parentId);
-        if (parent) {
-          sendParentPushNotification(parent.id, {
-            title: status === 'approved' ? '✅ تم قبول عذر الغياب' : '❌ تم رفض عذر الغياب',
-            body: `عذر غياب الطالب (${exc.studentName}) لتاريخ ${exc.date}: ${status === 'approved' ? 'تم اعتماده وتوثيقه كعذر مقبول رسمياً' : 'تم رفضه من إدارة المدرسة'}${notes ? ` - ملاحظة: ${notes}` : ''}`,
-            studentId: exc.studentId,
-            category: 'attendance'
-          });
-        }
-
-        return updated;
-      }
-      return exc;
-    }));
+        return exc;
+      });
+      persistDirectToFirestore('school_excuses', updatedExcuses);
+      return updatedExcuses;
+    });
   };
 
   // 5. Teacher saves Attendance sheet
@@ -1252,6 +1294,7 @@ export default function App() {
           });
         }
       });
+      persistDirectToFirestore('school_attendance', copy);
       return copy;
     });
 
@@ -1532,10 +1575,31 @@ export default function App() {
                 <span>{notificationPermission === 'granted' ? 'إشعارات الهاتف مفعّلة' : 'تفعيل إشعارات الهاتف'}</span>
               </button>
               
-              <div className="flex items-center gap-2 px-3 py-1.5 bg-green-50 text-green-700 rounded-full border border-green-200 shadow-sm shrink-0">
-                <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
-                <span className="text-[11px] font-semibold">متزامن أونلاين Cloud</span>
-              </div>
+              {!syncStatus.isOnline ? (
+                <div className="flex items-center gap-2 px-3 py-1.5 bg-amber-50 text-amber-800 rounded-full border border-amber-300 shadow-sm shrink-0">
+                  <WifiOff className="w-3.5 h-3.5 text-amber-600" />
+                  <span className="text-[11px] font-bold">
+                    وضع عدم الاتصال • حفظ محلي آمن{syncStatus.pendingCount > 0 ? ` (${syncStatus.pendingCount})` : ''}
+                  </span>
+                </div>
+              ) : syncStatus.pendingCount > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => flushPendingLocalSyncKeys()}
+                  className="flex items-center gap-2 px-3 py-1.5 bg-sky-50 hover:bg-sky-100 text-sky-800 rounded-full border border-sky-300 shadow-sm shrink-0 cursor-pointer transition"
+                  title="اضغط لرفع التعديلات المحفوظة محلياً إلى السحابة الآن"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 text-sky-600 ${syncStatus.isFlushing ? 'animate-spin' : ''}`} />
+                  <span className="text-[11px] font-bold">
+                    {syncStatus.isFlushing ? `جاري مزامنة (${syncStatus.pendingCount})...` : `بانتظار الرفع (${syncStatus.pendingCount}) • مزامنة`}
+                  </span>
+                </button>
+              ) : (
+                <div className="flex items-center gap-2 px-3 py-1.5 bg-green-50 text-green-700 rounded-full border border-green-200 shadow-sm shrink-0">
+                  <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+                  <span className="text-[11px] font-semibold">متزامن أونلاين Cloud</span>
+                </div>
+              )}
             </div>
           )}
 
@@ -1639,10 +1703,26 @@ export default function App() {
               <div className="border-t border-slate-200 pt-3 space-y-2.5">
                 <div className="flex flex-col gap-2">
                   <div className="flex justify-between items-center gap-2">
-                    <div className="flex items-center gap-1 px-2.5 py-1.5 bg-green-50 text-green-700 rounded-full border border-green-200 shadow-sm shrink-0">
-                      <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
-                      <span className="text-[10px] font-semibold">متزامن Cloud</span>
-                    </div>
+                    {!syncStatus.isOnline ? (
+                      <div className="flex items-center gap-1.5 px-2.5 py-1.5 bg-amber-50 text-amber-800 rounded-full border border-amber-300 shadow-sm shrink-0">
+                        <WifiOff className="w-3 h-3 text-amber-600" />
+                        <span className="text-[10px] font-bold">حفظ محلي بدون نت{syncStatus.pendingCount > 0 ? ` (${syncStatus.pendingCount})` : ''}</span>
+                      </div>
+                    ) : syncStatus.pendingCount > 0 ? (
+                      <button
+                        type="button"
+                        onClick={() => flushPendingLocalSyncKeys()}
+                        className="flex items-center gap-1.5 px-2.5 py-1.5 bg-sky-50 text-sky-800 rounded-full border border-sky-300 shadow-sm shrink-0 cursor-pointer"
+                      >
+                        <RefreshCw className={`w-3 h-3 text-sky-600 ${syncStatus.isFlushing ? 'animate-spin' : ''}`} />
+                        <span className="text-[10px] font-bold">مزامنة ({syncStatus.pendingCount})</span>
+                      </button>
+                    ) : (
+                      <div className="flex items-center gap-1 px-2.5 py-1.5 bg-green-50 text-green-700 rounded-full border border-green-200 shadow-sm shrink-0">
+                        <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+                        <span className="text-[10px] font-semibold">متزامن Cloud</span>
+                      </div>
+                    )}
 
                     <button
                       onClick={() => {
@@ -1678,6 +1758,47 @@ export default function App() {
           </div>
         )}
       </header>
+
+      {/* Offline Protection & Auto-Sync Status Banner across all portals */}
+      {(!syncStatus.isOnline || syncStatus.pendingCount > 0) && (
+        <div className={`w-full px-4 py-2.5 border-b text-xs font-bold flex flex-wrap items-center justify-between gap-2 transition-colors ${
+          !syncStatus.isOnline
+            ? 'bg-amber-50 border-amber-200 text-amber-900'
+            : 'bg-sky-50 border-sky-200 text-sky-900'
+        }`}>
+          <div className="flex items-center gap-2">
+            {!syncStatus.isOnline ? (
+              <HardDrive className="w-4 h-4 text-amber-600 shrink-0" />
+            ) : (
+              <RefreshCw className={`w-4 h-4 text-sky-600 shrink-0 ${syncStatus.isFlushing ? 'animate-spin' : ''}`} />
+            )}
+            <span>
+              {!syncStatus.isOnline
+                ? 'انقطع الاتصال بالإنترنت — جميع البيانات والدرجات والطلاب تُحفظ تلقائياً على جهازك ولن تضيع، وستُرفع للسحابة فور عودة الإنترنت.'
+                : `عاد الاتصال بالإنترنت — يوجد (${syncStatus.pendingCount}) تعديلات محفوظة محلياً بانتظار المزامنة السحابية.`}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            {syncStatus.pendingCount > 0 && (
+              <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-extrabold ${
+                !syncStatus.isOnline ? 'bg-amber-200/80 text-amber-900' : 'bg-sky-200/80 text-sky-900'
+              }`}>
+                تعديلات محفوظة بانتظار الرفع: {syncStatus.pendingCount}
+              </span>
+            )}
+            {syncStatus.isOnline && syncStatus.pendingCount > 0 && (
+              <button
+                type="button"
+                onClick={() => flushPendingLocalSyncKeys()}
+                disabled={syncStatus.isFlushing}
+                className="px-3 py-1 bg-sky-600 hover:bg-sky-700 text-white rounded-lg text-[11px] font-bold transition cursor-pointer disabled:opacity-60"
+              >
+                {syncStatus.isFlushing ? 'جاري الرفع...' : 'مزامنة الآن'}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Main App Simulator Frame - Full Width Desktop View */}
       <main className="flex-1 w-full p-2 sm:p-4 md:p-6 lg:p-8">

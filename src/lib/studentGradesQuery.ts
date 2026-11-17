@@ -12,6 +12,7 @@ import {
 import { Grade, SentGradeSheet } from '../types';
 import { trackFirestoreRead, trackFirestoreWrite } from './firestoreTracker';
 import { isFirestoreQuotaExceeded, markFirestoreQuotaExceeded, isQuotaError } from './quotaManager';
+import { enqueuePendingGradeBatch, getPendingGradeBatches, removePendingGradeBatch } from './offlineVault';
 
 /**
  * Interface for Consolidated Single-Document Student Grades
@@ -336,9 +337,95 @@ function mergeStudentGradesIntoLocalStorage(freshGrades: Grade[]) {
 }
 
 /**
+ * Helper to commit a consolidated batch directly to Firestore without queueing again.
+ */
+async function commitConsolidatedBatchToFirestore(
+  records: Array<{
+    studentId: string;
+    studentName?: string;
+    classId?: string;
+    className?: string;
+    unifiedNo?: string;
+    rollNo?: string;
+    month?: string;
+    subjects: { [subjectName: string]: { score: number | null; maxScore: number; examName?: string; notes?: string } };
+    teacherNotes?: string;
+    directorNotes?: string;
+  }>
+): Promise<boolean> {
+  if (!records || records.length === 0 || !db || isFirestoreQuotaExceeded()) return false;
+
+  for (let i = 0; i < records.length; i += 400) {
+    const chunk = records.slice(i, i + 400);
+    const batch = writeBatch(db);
+
+    chunk.forEach(rec => {
+      const cleanId = normalizeId(rec.studentId);
+      if (!cleanId) return;
+
+      const summary = calculateGradesSummary(rec.subjects);
+
+      const docRef = doc(db, 'students_grades', cleanId);
+      const payload: ConsolidatedStudentGradeRecord = {
+        studentId: cleanId,
+        studentName: rec.studentName || '',
+        classId: rec.classId || '',
+        className: rec.className || '',
+        unifiedNo: rec.unifiedNo || '',
+        rollNo: rec.rollNo || '',
+        evaluationMonth: rec.month || '',
+        subjects: rec.subjects || {},
+        ...summary,
+        teacherNotes: rec.teacherNotes || '',
+        directorNotes: rec.directorNotes || '',
+        updatedAt: Date.now()
+      };
+
+      batch.set(docRef, payload, { merge: true });
+    });
+
+    await batch.commit();
+    trackFirestoreWrite(chunk.length, `حفظ دفعة درجات (${chunk.length} طالب)`);
+  }
+  return true;
+}
+
+/**
+ * Flushes any consolidated student grade batches saved while offline.
+ */
+export async function flushPendingGradeBatches(): Promise<number> {
+  if (!db || isFirestoreQuotaExceeded()) return 0;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return 0;
+
+  let flushed = 0;
+  try {
+    const batches = await getPendingGradeBatches();
+    for (const item of batches) {
+      if (isFirestoreQuotaExceeded()) break;
+      try {
+        const ok = await Promise.race([
+          commitConsolidatedBatchToFirestore(item.records),
+          new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 6000))
+        ]);
+        if (ok) {
+          await removePendingGradeBatch(item.id);
+          flushed++;
+        }
+      } catch (err: any) {
+        if (isQuotaError(err)) {
+          markFirestoreQuotaExceeded(err);
+          break;
+        }
+      }
+    }
+  } catch {}
+  return flushed;
+}
+
+/**
  * BATCH OPERATIONS:
  * Saves consolidated student grades for multiple students in a single Firestore writeBatch.
- * Updates up to 450 student records atomically per commit.
+ * Safely queues in IndexedDB when offline so nothing blocks and all changes sync on reconnect.
  */
 export async function batchSaveStudentsGradesConsolidated(
   records: Array<{
@@ -355,62 +442,76 @@ export async function batchSaveStudentsGradesConsolidated(
   }>
 ): Promise<boolean> {
   if (!records || records.length === 0) return true;
-  if (!db || isFirestoreQuotaExceeded()) return false;
+
+  const batchId = `gb_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  await enqueuePendingGradeBatch(batchId, records);
+
+  if (!db || isFirestoreQuotaExceeded()) return true;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return true;
+  }
 
   try {
-    // Chunk into batches of up to 400 (Firestore maximum is 500 operations per batch)
-    for (let i = 0; i < records.length; i += 400) {
-      const chunk = records.slice(i, i + 400);
-      const batch = writeBatch(db);
-
-      chunk.forEach(rec => {
-        const cleanId = normalizeId(rec.studentId);
-        if (!cleanId) return;
-
-        const summary = calculateGradesSummary(rec.subjects);
-
-        const docRef = doc(db, 'students_grades', cleanId);
-        const payload: ConsolidatedStudentGradeRecord = {
-          studentId: cleanId,
-          studentName: rec.studentName || '',
-          classId: rec.classId || '',
-          className: rec.className || '',
-          unifiedNo: rec.unifiedNo || '',
-          rollNo: rec.rollNo || '',
-          evaluationMonth: rec.month || '',
-          subjects: rec.subjects || {},
-          ...summary,
-          teacherNotes: rec.teacherNotes || '',
-          directorNotes: rec.directorNotes || '',
-          updatedAt: Date.now()
-        };
-
-        batch.set(docRef, payload, { merge: true });
+    const commitPromise = commitConsolidatedBatchToFirestore(records)
+      .then(async (ok) => {
+        if (ok) await removePendingGradeBatch(batchId);
+        return ok;
+      })
+      .catch((err: any) => {
+        if (isQuotaError(err)) {
+          markFirestoreQuotaExceeded(err);
+        } else {
+          console.warn('[BatchGrades] Notice in batch save (queued offline):', err?.message || err);
+        }
+        return false;
       });
 
-      await batch.commit();
-      trackFirestoreWrite(chunk.length, `حفظ دفعة درجات (${chunk.length} طالب)`);
-    }
+    // Never hang caller UI if internet drops mid-flight
+    await Promise.race([
+      commitPromise,
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 2000))
+    ]);
     return true;
   } catch (err: any) {
     if (isQuotaError(err)) {
       markFirestoreQuotaExceeded(err);
     }
-    console.warn('[BatchGrades] Error in batch save:', err);
-    return false;
+    return true;
   }
 }
 
 /**
  * Persists a single student's consolidated grades record to Firestore:
  * `students_grades/{studentId}`
+ * Queues cleanly in IndexedDB if offline so edits never get lost or hang UI.
  */
 export async function saveSingleStudentGradesConsolidated(
   studentId: string,
   docData: Partial<ConsolidatedStudentGradeRecord>
 ): Promise<boolean> {
   const cleanId = normalizeId(studentId);
-  if (!cleanId || !db || isFirestoreQuotaExceeded()) return false;
+  if (!cleanId) return false;
+
+  const batchId = `gs_${cleanId}_${Date.now()}`;
+  if (docData.subjects) {
+    await enqueuePendingGradeBatch(batchId, [{
+      studentId: cleanId,
+      studentName: docData.studentName,
+      classId: docData.classId,
+      className: docData.className,
+      unifiedNo: docData.unifiedNo,
+      rollNo: docData.rollNo,
+      month: docData.evaluationMonth || docData.term,
+      subjects: docData.subjects,
+      teacherNotes: docData.teacherNotes,
+      directorNotes: docData.directorNotes
+    }]);
+  }
+
+  if (!db || isFirestoreQuotaExceeded()) return true;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return true;
+  }
 
   try {
     const summary = docData.subjects ? calculateGradesSummary(docData.subjects) : undefined;
@@ -422,14 +523,29 @@ export async function saveSingleStudentGradesConsolidated(
       updatedAt: Date.now()
     };
 
-    await setDoc(docRef, payload, { merge: true });
-    trackFirestoreWrite(1, `حفظ درجات طالب (${cleanId})`);
+    const writePromise = setDoc(docRef, payload, { merge: true })
+      .then(async () => {
+        trackFirestoreWrite(1, `حفظ درجات طالب (${cleanId})`);
+        await removePendingGradeBatch(batchId);
+        return true;
+      })
+      .catch((err: any) => {
+        if (isQuotaError(err)) {
+          markFirestoreQuotaExceeded(err);
+        }
+        return false;
+      });
+
+    await Promise.race([
+      writePromise,
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 2000))
+    ]);
     return true;
   } catch (err: any) {
     if (isQuotaError(err)) {
       markFirestoreQuotaExceeded(err);
     }
-    return false;
+    return true;
   }
 }
 

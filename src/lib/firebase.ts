@@ -75,7 +75,8 @@ export async function getDocCacheFirst<T = any>(
   docRef: DocumentReference<T>,
   options?: { forceServer?: boolean; timeoutMs?: number }
 ): Promise<{ snap: DocumentSnapshot<T> | null; fromCache: boolean }> {
-  const forceServer = options?.forceServer ?? false;
+  const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
+  const forceServer = isOffline ? false : (options?.forceServer ?? false);
   const timeoutMs = options?.timeoutMs ?? 2500;
 
   if (!forceServer) {
@@ -85,8 +86,12 @@ export async function getDocCacheFirst<T = any>(
         return { snap: cachedSnap, fromCache: true };
       }
     } catch {
-      // Cache miss (document not yet in local IndexedDB cache) -> fall through to server
+      // Cache miss (document not yet in local IndexedDB cache)
     }
+  }
+
+  if (isOffline) {
+    return { snap: null, fromCache: true };
   }
 
   try {
@@ -124,7 +129,8 @@ export async function getDocsCacheFirst<T = any>(
   q: Query<T>,
   options?: { forceServer?: boolean; timeoutMs?: number }
 ): Promise<{ snap: QuerySnapshot<T> | null; fromCache: boolean }> {
-  const forceServer = options?.forceServer ?? false;
+  const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
+  const forceServer = isOffline ? false : (options?.forceServer ?? false);
   const timeoutMs = options?.timeoutMs ?? 2500;
 
   if (!forceServer) {
@@ -134,8 +140,12 @@ export async function getDocsCacheFirst<T = any>(
         return { snap: cachedSnap, fromCache: true };
       }
     } catch {
-      // Cache miss -> fall through to server
+      // Cache miss
     }
+  }
+
+  if (isOffline) {
+    return { snap: null, fromCache: true };
   }
 
   try {

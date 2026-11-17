@@ -83,7 +83,7 @@ import { db } from '../lib/firebase';
 import { collection, addDoc, setDoc, deleteDoc, doc, serverTimestamp, writeBatch, getDocs } from 'firebase/firestore';
 import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead, checkDailyRollover, fetchCentralizedConsumptionOnce, resetCentralizedFirestoreConsumption } from '../lib/firestoreTracker';
 import { calculateStorageUsageReport, measureLiveCloudStorageAudit, StorageUsageReport } from '../lib/storageUsage';
-import { forceRefreshDataFromFirestore, persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate } from '../lib/firebaseSync';
+import { forceRefreshDataFromFirestore, persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate, recordDeletedStudentIds, queueOfflineNotification, flushPendingLocalSyncKeys } from '../lib/firebaseSync';
 import { isFirestoreQuotaExceeded, markFirestoreQuotaExceeded, isQuotaError, resetFirestoreQuotaBreaker } from '../lib/quotaManager';
 import { getStoredWelcomeMessages, saveWelcomeMessages, DEFAULT_WELCOME_MESSAGES, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { Bell, Activity, Info, Smartphone } from 'lucide-react';
@@ -316,8 +316,13 @@ export default function DirectorPortal({
       // 0. Reset client quota circuit-breaker to test live connection
       resetFirestoreQuotaBreaker();
 
-      // 1. Pull latest data from Firestore server when user clicks manual sync
-      await forceRefreshDataFromFirestore({ forceServer: true });
+      // 1. Flush any offline-saved local changes first, then pull latest from Firestore if online
+      if (typeof navigator !== 'undefined' && navigator.onLine !== false) {
+        await flushPendingLocalSyncKeys();
+        await forceRefreshDataFromFirestore({ forceServer: true });
+      } else {
+        await forceRefreshDataFromFirestore({ forceServer: false });
+      }
 
       // 2. Dispatch custom storage events so App.tsx and other portals sync immediately
       window.dispatchEvent(new CustomEvent('school_storage_update'));
@@ -479,32 +484,46 @@ export default function DirectorPortal({
 
     try {
       if (!navigator.onLine || isFirestoreQuotaExceeded()) {
+        await queueOfflineNotification(newMsg.id, {
+          ...newMsg,
+          status: 'unread',
+          createdAtMs: Date.now()
+        });
         setMessages(prev => {
           const updated = [...prev, newMsg];
-          localStorage.setItem('school_messages', JSON.stringify(updated));
+          persistDirectToFirestore('school_messages', updated);
           return updated;
         });
         return newMsg;
       }
 
       try {
-        await setDoc(doc(db, 'notifications', newMsg.id), {
-          ...newMsg,
-          timestamp: serverTimestamp(),
-          status: 'unread'
-        });
-        trackFirestoreWrite(1);
+        await Promise.race([
+          setDoc(doc(db, 'notifications', newMsg.id), {
+            ...newMsg,
+            timestamp: serverTimestamp(),
+            status: 'unread'
+          }).then(() => {
+            trackFirestoreWrite(1);
+          }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000))
+        ]);
       } catch (writeErr: any) {
         if (isQuotaError(writeErr)) {
           markFirestoreQuotaExceeded(writeErr);
         } else {
-          console.warn("Could not write notification to Firestore:", writeErr);
+          console.warn("Notification write queued for offline retry:", writeErr);
         }
+        await queueOfflineNotification(newMsg.id, {
+          ...newMsg,
+          status: 'unread',
+          createdAtMs: Date.now()
+        });
       }
 
       setMessages(prev => {
         const updated = [...prev, newMsg];
-        localStorage.setItem('school_messages', JSON.stringify(updated));
+        persistDirectToFirestore('school_messages', updated);
         return updated;
       });
 
@@ -741,8 +760,7 @@ export default function DirectorPortal({
     const cleanList = sanitizeAndDeduplicateStudents(updatedStudents).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
 
     setStudents(cleanList);
-    localStorage.setItem('school_students', JSON.stringify(cleanList));
-    window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_students', value: JSON.stringify(cleanList) } }));
+    persistDirectToFirestore('school_students', cleanList);
 
     setParents(updatedParents);
     localStorage.setItem('school_parents', JSON.stringify(updatedParents));
@@ -3428,7 +3446,8 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
           guardianRelation: row.guardianRelation,
           guardianNationalId: row.guardianNationalId,
           parentPhone: parentPhone,
-          parentBackupPhone: row.parentBackupPhone
+          parentBackupPhone: row.parentBackupPhone,
+          createdAt: Date.now()
         });
 
         importedCount++;
@@ -4021,7 +4040,8 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
         dob: '2018-01-01',
         parentName: parentName,
         shift: activeCohort === 'evening' ? 'evening' : 'morning',
-        parentPhone: parentPhone
+        parentPhone: parentPhone,
+        createdAt: Date.now()
       });
 
       importedCount++;
@@ -4165,7 +4185,8 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
             dob: dob,
             parentName: parentName,
             shift: activeCohort === 'evening' ? 'evening' : 'morning',
-            parentPhone: parentPhone
+            parentPhone: parentPhone,
+            createdAt: Date.now()
           });
           
           importedCount++;
@@ -5059,6 +5080,7 @@ ${directivesFormatted}
       `أنت على وشك حذف عدد (${targetStudents.length}) طالب/طالبة نهائياً من ${scopeLabel}.\nسيؤدي هذا الإجراء أيضاً إلى حذف كافة درجاتهم وسجلات حضورهم وأعذارهم وحسابات أولياء أمورهم غير المرتبطين بأبناء آخرين. لا يمكن التراجع عن هذه الخطوة!`,
       () => {
         const studentIdsToDelete = targetStudents.map(s => s.id);
+        recordDeletedStudentIds(studentIdsToDelete);
 
         // 4. Perform filtering (deleting) on states
         setStudents(prev => prev.filter(s => !studentIdsToDelete.includes(s.id)));
@@ -5094,6 +5116,7 @@ ${directivesFormatted}
         '⚠️ حذف الطالب نهائياً من النظام',
         `هل أنت متأكد من حذف الطالب (${student.name}) نهائياً من النظام؟ سيؤدي ذلك لحذف كافة درجاته، سجلات غيابه وحضوره، وأعذاره الطبية أيضاً. لا يمكن التراجع عن هذه الخطوة!`,
         () => {
+          recordDeletedStudentIds([itemId]);
           const updatedStudents = currentList.filter(s => s.id !== itemId);
           setStudents(updatedStudents);
           localStorage.setItem('school_students', JSON.stringify(updatedStudents));
@@ -5248,10 +5271,10 @@ ${directivesFormatted}
         if (category === 'students') {
           const remainingStudents = students.filter(s => !matchesCohort(s));
           const removedIds = students.filter(s => matchesCohort(s)).map(s => s.id);
+          recordDeletedStudentIds(removedIds);
           
           setStudents(remainingStudents);
-          localStorage.setItem('school_students', JSON.stringify(remainingStudents));
-          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_students', value: JSON.stringify(remainingStudents) } }));
+          persistDirectToFirestore('school_students', remainingStudents);
           
           const remainingGrades = grades.filter(g => !removedIds.includes(g.studentId));
           setGrades(remainingGrades);
@@ -5455,12 +5478,12 @@ ${directivesFormatted}
       `هل أنت متأكد تماماً وبشكل قاطع من رغبتك في تصفير وتفريغ (${cohortLabel}) بالكامل؟\n\nسيتم حذف كافة بياناته المخصصة:\n- جميع الطلاب (${cohortStudents.length} طالب)\n- جميع المعلمين (${cohortTeachers.length} معلم)\n- جميع الصفوف والشعب (${cohortClasses.length} صف)\n- كافة الدرجات، سجلات الغياب، الأعذار، الإعلانات والرسائل.\n\nلاحظ أن بيانات الفوج الآخر لن تتأثر مطلقاً!`,
       () => {
         const studentIds = cohortStudents.map(s => s.id);
+        recordDeletedStudentIds(studentIds);
 
         // 1. Remove students
         const updatedStudents = students.filter(s => !matchesTarget(s));
         setStudents(updatedStudents);
-        localStorage.setItem('school_students', JSON.stringify(updatedStudents));
-        window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_students', value: JSON.stringify(updatedStudents) } }));
+        persistDirectToFirestore('school_students', updatedStudents);
 
         // 2. Remove teachers
         const updatedTeachers = teachers.filter(t => !matchesTarget(t));
@@ -5538,6 +5561,7 @@ ${directivesFormatted}
       `هل تريد بالتأكيد حذف كافة طلاب الصف (${gradeName}) وعددهم (${targetStudents.length}) طالب وطالبة؟\nسيتم تصفير وحذف جميع سجلاتهم المرتبطة (درجات، غياب وحضور، أعذار).`,
       () => {
         const studentIds = targetStudents.map(s => s.id);
+        recordDeletedStudentIds(studentIds);
         setStudents(prev => prev.filter(s => !studentIds.includes(s.id)));
         setGrades(prev => prev.filter(g => !studentIds.includes(g.studentId)));
         setAttendance(prev => prev.filter(a => !studentIds.includes(a.studentId)));
@@ -5576,6 +5600,7 @@ ${directivesFormatted}
       `هل تريد بالتأكيد حذف جميع طلاب الشعبة (${cls?.name || ''}) وعددهم (${targetStudents.length}) طالب وطالبة؟\nسيتم حذف جميع علاماتهم وسجلات حضورهم وغيابهم وأعذارهم تلقائياً.`,
       () => {
         const studentIds = targetStudents.map(s => s.id);
+        recordDeletedStudentIds(studentIds);
         setStudents(prev => prev.filter(s => !studentIds.includes(s.id)));
         setGrades(prev => prev.filter(g => !studentIds.includes(g.studentId)));
         setAttendance(prev => prev.filter(a => !studentIds.includes(a.studentId)));
@@ -9953,7 +9978,9 @@ if __name__ == "__main__":
                                 alert('يرجى التأكد من اختيار صف وشعبة صحيحة متطابقة مع الصفوف المفعلة بالنظام.');
                                 return;
                               }
-                              setStudents(prev => prev.map(s => s.id === transferringStudent.id ? { ...s, classId: transferTargetClassId } : s));
+                              const updatedTransferred = students.map(s => s.id === transferringStudent.id ? { ...s, classId: transferTargetClassId } : s);
+                              setStudents(updatedTransferred);
+                              persistDirectToFirestore('school_students', updatedTransferred);
                               alert(`تم نقل الطالب ${transferringStudent.name} بنجاح إلى [${classes.find(c => c.id === transferTargetClassId)?.name}] (${transferCohort})!`);
                               setTransferringStudent(null);
                             }}
@@ -14435,12 +14462,10 @@ ${sampleEval}
                     const cleanList = sanitizeAndDeduplicateStudents(updatedStudents).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
 
                     setStudents(cleanList);
-                    localStorage.setItem('school_students', JSON.stringify(cleanList));
-                    window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_students', value: JSON.stringify(cleanList) } }));
+                    persistDirectToFirestore('school_students', cleanList);
 
                     setParents(updatedParents);
-                    localStorage.setItem('school_parents', JSON.stringify(updatedParents));
-                    window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_parents', value: JSON.stringify(updatedParents) } }));
+                    persistDirectToFirestore('school_parents', updatedParents);
 
                     alert(`✅ تم حفظ وتحديث بيانات الطالب (${studentToSave.name}) بنجاح.\n📲 تم تحديث رقم الواتساب لهذا الطالب المحدد فقط.`);
                     setEditingStudent(null);

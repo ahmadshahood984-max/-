@@ -8,7 +8,8 @@
 importScripts('https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js');
 importScripts('https://www.gstatic.com/firebasejs/9.23.0/firebase-messaging-compat.js');
 
-const CACHE_NAME = 'school-pwa-v3';
+const CACHE_NAME = 'school-pwa-v4';
+const APP_SHELL_URLS = ['/', '/index.html', '/manifest.json', '/icon.png'];
 
 // 1. Initialize Firebase App in the Service Worker
 try {
@@ -158,6 +159,13 @@ self.addEventListener('notificationclick', function(event) {
 // 4. PWA Cache Management & Offline Support
 self.addEventListener('install', (e) => {
   self.skipWaiting();
+  e.waitUntil(
+    caches.open(CACHE_NAME).then((cache) => {
+      return Promise.allSettled(
+        APP_SHELL_URLS.map((url) => cache.add(url).catch(() => {}))
+      );
+    })
+  );
 });
 
 self.addEventListener('activate', (e) => {
@@ -175,6 +183,31 @@ self.addEventListener('fetch', (e) => {
     return;
   }
 
+  // Handle offline page reloads & portal URLs seamlessly
+  if (e.request.mode === 'navigate') {
+    e.respondWith(
+      fetch(e.request)
+        .then((networkResponse) => {
+          if (networkResponse && networkResponse.status === 200 && e.request.url.startsWith(self.location.origin)) {
+            const copy = networkResponse.clone();
+            caches.open(CACHE_NAME).then((cache) => {
+              cache.put(e.request, copy.clone());
+              cache.put('/', copy);
+            });
+          }
+          return networkResponse;
+        })
+        .catch(async () => {
+          return (
+            (await caches.match(e.request)) ||
+            (await caches.match('/')) ||
+            (await caches.match('/index.html'))
+          );
+        })
+    );
+    return;
+  }
+
   e.respondWith(
     fetch(e.request)
       .then((networkResponse) => {
@@ -184,6 +217,10 @@ self.addEventListener('fetch', (e) => {
         }
         return networkResponse;
       })
-      .catch(() => caches.match(e.request))
+      .catch(async () => {
+        const cached = await caches.match(e.request);
+        if (cached) return cached;
+        return caches.match(e.request, { ignoreSearch: true });
+      })
   );
 });
