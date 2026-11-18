@@ -13,6 +13,16 @@ service cloud.firestore {
       allow read, write: if true;
     }
 
+    // Rules for direct teacher-submitted and director-approved grade reports
+    match /grade_reports/{reportId} {
+      allow read, write: if true;
+    }
+
+    // Startup connection check document
+    match /test/connection {
+      allow read: if true;
+    }
+
     // Rules for consolidated single-document student grades (on-demand direct getDoc by studentId)
     match /students_grades/{studentId} {
       allow read, write: if true;

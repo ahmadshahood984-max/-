@@ -88,6 +88,14 @@ import { collection, addDoc, setDoc, deleteDoc, doc, serverTimestamp, writeBatch
 import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead, checkDailyRollover, fetchCentralizedConsumptionOnce, resetCentralizedFirestoreConsumption, calibrateCentralConsumptionBaseline, getRecentUtcDates, getTimeUntilFirebaseQuotaReset, SPARK_DAILY_READ_LIMIT, SPARK_DAILY_WRITE_LIMIT, FIREBASE_PROJECT_ID, FIREBASE_DATABASE_ID } from '../lib/firestoreTracker';
 import { calculateStorageUsageReport, measureLiveCloudStorageAudit, StorageUsageReport } from '../lib/storageUsage';
 import { persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate, recordDeletedStudentIds, queueOfflineNotification, deduplicateGradeSheetsPreservingTeachers, syncLivePortalDataFromServer, FAST_LIVE_SYNC_KEYS } from '../lib/firebaseSync';
+import {
+  submitGradeReportToFirestore,
+  updateGradeReportInFirestore,
+  deleteGradeReportFromFirestore,
+  fetchGradeReportsFromFirestore,
+  subscribeGradeReportsRealtime,
+  extractFirestoreErrorMessage
+} from '../lib/gradeReportsFirestore';
 import { isFirestoreQuotaExceeded, markFirestoreQuotaExceeded, isQuotaError } from '../lib/quotaManager';
 import { getStoredWelcomeMessages, saveWelcomeMessages, DEFAULT_WELCOME_MESSAGES, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { Bell, Activity, Info, Smartphone } from 'lucide-react';
@@ -1199,6 +1207,14 @@ export default function DirectorPortal({
       setMessages(cleanedMessages);
     }
 
+    try {
+      await updateGradeReportInFirestore(updatedSheet);
+    } catch (error: any) {
+      const errDetail = extractFirestoreErrorMessage(error);
+      alert(`❌ تعذّر اعتماد كشف الدرجات في قاعدة البيانات السحابية (Firestore):\n${errDetail}`);
+      return;
+    }
+
     // Persist grade sheet & consolidated scores without generating notification/message clutter
     await persistGradeReportBatchDirect({
       grades,
@@ -2054,9 +2070,32 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       .then(() => reloadFromLocalStorage())
       .catch(() => {});
 
+    // Directly subscribe & fetch all grade reports (including pending 'submitted' reports) from Firestore `grade_reports`
+    const applyDirectGradeReports = (directReports: SentGradeSheet[]) => {
+      if (!Array.isArray(directReports) || directReports.length === 0) return;
+      setSentGradeSheets(prev => {
+        const merged = deduplicateGradeSheetsPreservingTeachers([...directReports, ...prev]);
+        try {
+          localStorage.setItem('school_sent_grade_sheets', JSON.stringify(merged));
+        } catch {}
+        return merged;
+      });
+    };
+
+    const unsubGradeReports = subscribeGradeReportsRealtime(
+      (reports) => applyDirectGradeReports(reports),
+      (err) => {
+        console.warn('Grade reports real-time listener error:', extractFirestoreErrorMessage(err));
+      }
+    );
+    fetchGradeReportsFromFirestore()
+      .then((reports) => applyDirectGradeReports(reports))
+      .catch(() => {});
+
     return () => {
       window.removeEventListener('school_storage_update', handleStorageUpdate);
       window.removeEventListener('school_live_sync_completed', reloadFromLocalStorage);
+      unsubGradeReports();
     };
   }, []);
 
@@ -4738,7 +4777,22 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     const updatedSentSheets = deduplicateGradeSheets([sheetRecord, ...updatedExistingSheets]);
     setSentGradeSheets(updatedSentSheets);
 
-    // 4. Persist with ultra-fast parallel cloud sync across PC, mobile, and parent devices
+    // 4. Directly save approved grade report (and any approved teacher sheets) to Firestore `grade_reports`
+    try {
+      const newlyApprovedTeacherSheets = updatedExistingSheets.filter(
+        s => s.month === currentEvaluationMonth && s.status === 'approved' && s.teacherId && (cohortMode || s.classId === targetClassId || s.className === scopeTitle)
+      );
+      await Promise.all([
+        submitGradeReportToFirestore(sheetRecord),
+        ...newlyApprovedTeacherSheets.map(s => updateGradeReportInFirestore(s))
+      ]);
+    } catch (error: any) {
+      const errDetail = extractFirestoreErrorMessage(error);
+      alert(`❌ تعذّر حفظ ورفع كشف الدرجات في قاعدة البيانات السحابية (Firestore):\n${errDetail}`);
+      return;
+    }
+
+    // 5. Persist consolidated keys across PC, mobile, and parent devices
     await persistGradeReportBatchDirect({
       grades,
       ...(hadAutoGradeMsgs ? { messages: cleanedMessages } : {}),
@@ -6494,6 +6548,40 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
                   </div>
                 </div>
               </div>
+
+              {/* Pending Teacher Grade Reports Alert on Dashboard Home */}
+              {sentGradeSheets.some(s => s.status === 'submitted') && (
+                <div className="bg-gradient-to-r from-amber-500 via-indigo-600 to-purple-600 text-white p-4 rounded-2xl shadow-md flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    <span className="w-10 h-10 rounded-2xl bg-white/20 flex items-center justify-center text-xl shrink-0">
+                      📬
+                    </span>
+                    <div>
+                      <h4 className="font-extrabold text-sm sm:text-base">
+                        كشوفات درجات مرسلة من المعلمين بانتظار الاعتماد ({sentGradeSheets.filter(s => s.status === 'submitted').length} كشف)
+                      </h4>
+                      <p className="text-[11px] text-amber-100 mt-0.5">
+                        {sentGradeSheets.filter(s => s.status === 'submitted').map(s => `${s.title} (${s.sentBy})`).join(' • ')}
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const firstSubmitted = sentGradeSheets.find(s => s.status === 'submitted');
+                      setActiveTab('grades');
+                      if (firstSubmitted) {
+                        setSelectedSentSheetToView(firstSubmitted);
+                        setIsSentSheetsModalOpen(true);
+                      }
+                    }}
+                    className="bg-white text-indigo-900 hover:bg-amber-50 font-black text-xs px-4 py-2.5 rounded-xl transition cursor-pointer shadow-md shrink-0 flex items-center gap-1.5 self-end sm:self-auto"
+                  >
+                    <Eye className="w-4 h-4 text-indigo-700" />
+                    <span>عرض واعتماد الكشف 👁️</span>
+                  </button>
+                </div>
+              )}
 
               {/* Subject Addition Button / Quick Actions Row */}
               <div className="grid grid-cols-1 gap-4">
@@ -10595,7 +10683,10 @@ ${sampleEval}
                           <div className="flex items-center gap-2 shrink-0">
                             <button
                               type="button"
-                              onClick={() => setSelectedSentSheetToView(submittedSheetForThisClass)}
+                              onClick={() => {
+                                setSelectedSentSheetToView(submittedSheetForThisClass);
+                                setIsSentSheetsModalOpen(true);
+                              }}
                               className="px-3.5 py-2 bg-white hover:bg-slate-100 text-slate-700 font-bold text-xs rounded-xl border border-slate-300 transition shadow-2xs cursor-pointer flex items-center gap-1.5"
                             >
                               <Eye className="w-3.5 h-3.5" />
@@ -10767,21 +10858,21 @@ ${sampleEval}
                                 const hasParts = hasSubGradeParts(subGrade);
                                 const totalVal = computeGradeTotal(subGrade);
                                 const handlePartChange = (part: 'oralScore' | 'homeworkScore' | 'quizScore' | 'total', score: number | null) => {
-                                  setGrades(prev => {
-                                    const next = applyGradePartUpdate(prev, {
-                                      studentId: student.id,
-                                      subject: sub,
-                                      month: currentEvaluationMonth,
-                                      part,
-                                      value: score,
-                                      maxScore: numericMaxGrade || 100,
-                                      teacherId: 'director',
-                                      idPrefix: 'g_dir_edt',
-                                      matchEmptyMonth: true
-                                    });
-                                    localStorage.setItem('school_grades', JSON.stringify(next));
-                                    return next;
+                                  const next = applyGradePartUpdate(grades, {
+                                    studentId: student.id,
+                                    subject: sub,
+                                    month: currentEvaluationMonth,
+                                    part,
+                                    value: score,
+                                    maxScore: numericMaxGrade || 100,
+                                    teacherId: 'director',
+                                    idPrefix: 'g_dir_edt',
+                                    matchEmptyMonth: true
                                   });
+                                  setGrades(next);
+                                  const serialized = JSON.stringify(next);
+                                  localStorage.setItem('school_grades', serialized);
+                                  safeDispatchStorageUpdate('school_grades', serialized);
                                 };
                                 const cellInputCls = "w-11 text-center border border-slate-200 hover:border-indigo-400 focus:border-indigo-600 focus:ring-1 focus:ring-indigo-100 rounded-lg p-1 text-xs font-bold font-mono focus:outline-none bg-white";
                                 return (
@@ -17113,6 +17204,9 @@ ${sampleEval}
                                 onClick={async () => {
                                   const next = sentGradeSheets.filter(s => s.id !== sheet.id);
                                   setSentGradeSheets(next);
+                                  try {
+                                    await deleteGradeReportFromFirestore(sheet.id);
+                                  } catch {}
                                   await persistDirectToFirestore('school_sent_grade_sheets', next);
                                 }}
                                 className="w-8 h-8 rounded-xl bg-slate-100 hover:bg-rose-50 text-slate-400 hover:text-rose-600 flex items-center justify-center transition cursor-pointer border border-slate-200"

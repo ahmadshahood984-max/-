@@ -314,6 +314,7 @@ export function deduplicateGradeSheetsPreservingTeachers<T extends {
   teacherId?: string;
   status?: string;
   dateSent?: string;
+  updatedAt?: number;
 }>(sheets: T[]): T[] {
   if (!Array.isArray(sheets)) return [];
   const map = new Map<string, T>();
@@ -326,14 +327,14 @@ export function deduplicateGradeSheetsPreservingTeachers<T extends {
       map.set(key, s);
       continue;
     }
-    const existingApproved = existing.status === 'approved';
-    const candidateApproved = s.status === 'approved';
-    if (candidateApproved && !existingApproved) {
+    const tNew = Math.max(new Date(s.dateSent || 0).getTime() || 0, Number(s.updatedAt) || 0);
+    const tOld = Math.max(new Date(existing.dateSent || 0).getTime() || 0, Number(existing.updatedAt) || 0);
+    if (tNew > tOld) {
       map.set(key, s);
-    } else if (candidateApproved === existingApproved) {
-      const tNew = new Date(s.dateSent || 0).getTime() || 0;
-      const tOld = new Date(existing.dateSent || 0).getTime() || 0;
-      if (tNew >= tOld) {
+    } else if (tNew === tOld) {
+      const existingApproved = existing.status === 'approved';
+      const candidateApproved = s.status === 'approved';
+      if (candidateApproved || !existingApproved) {
         map.set(key, s);
       }
     }
@@ -343,52 +344,64 @@ export function deduplicateGradeSheetsPreservingTeachers<T extends {
   );
 }
 
+function stripUndefinedForFirestore(val: any): any {
+  if (val === undefined) return null;
+  if (val === null || typeof val !== 'object') return val;
+  if (Array.isArray(val)) {
+    return val.filter((x) => x !== undefined).map(stripUndefinedForFirestore);
+  }
+  const out: Record<string, any> = {};
+  for (const [k, v] of Object.entries(val)) {
+    if (v !== undefined) {
+      out[k] = stripUndefinedForFirestore(v);
+    }
+  }
+  return out;
+}
+
 /**
  * Safely prepares payload for Firestore's 1 MiB document size limit.
- * Strips oversized inline base64 photos/videos if payload approaches ~920 KB
+ * Strips undefined values and oversized inline base64 photos/videos if payload approaches ~920 KB
  * so records never silently fail to write to Firestore.
  */
 function prepareFirestorePayload(key: string, data: any): any {
   try {
-    if (key === 'school_students' && Array.isArray(data)) {
-      const jsonStr = JSON.stringify(data);
+    let result = data;
+    if (key === 'school_students' && Array.isArray(result)) {
+      const jsonStr = JSON.stringify(result);
       const byteLen = typeof TextEncoder !== 'undefined'
         ? new TextEncoder().encode(jsonStr).length
         : jsonStr.length * 2;
-      if (byteLen <= MAX_FIRESTORE_DOC_BYTES) return data;
-
-      console.warn(`[Firestore Sync] school_students payload (${Math.round(byteLen / 1024)} KB) nears 1MB limit. Stripping oversized inline photos for cloud sync.`);
-      return data.map((s: any) => {
-        if (s && typeof s.photo === 'string' && s.photo.startsWith('data:image') && s.photo.length > 10000) {
-          return { ...s, photo: '' };
-        }
-        return s;
-      });
-    }
-
-    if (key === 'school_messages' && Array.isArray(data)) {
-      const jsonStr = JSON.stringify(data);
+      if (byteLen > MAX_FIRESTORE_DOC_BYTES) {
+        console.warn(`[Firestore Sync] school_students payload (${Math.round(byteLen / 1024)} KB) nears 1MB limit. Stripping oversized inline photos for cloud sync.`);
+        result = result.map((s: any) => {
+          if (s && typeof s.photo === 'string' && s.photo.startsWith('data:image') && s.photo.length > 10000) {
+            return { ...s, photo: '' };
+          }
+          return s;
+        });
+      }
+    } else if (key === 'school_messages' && Array.isArray(result)) {
+      const jsonStr = JSON.stringify(result);
       const byteLen = typeof TextEncoder !== 'undefined'
         ? new TextEncoder().encode(jsonStr).length
         : jsonStr.length * 2;
-      if (byteLen <= MAX_FIRESTORE_DOC_BYTES) return data;
-
-      console.warn(`[Firestore Sync] school_messages payload (${Math.round(byteLen / 1024)} KB) nears 1MB limit. Compressing oversized inline media attachments for cloud sync.`);
-      return data.map((m: any) => {
-        if (!m || typeof m !== 'object') return m;
-        let nextContent = m.content;
-        if (typeof nextContent === 'string' && nextContent.length > 30000 && nextContent.includes('data:')) {
-          nextContent = nextContent.replace(/data:(image|video)\/[^;\s]+;base64,[A-Za-z0-9+/=]{10000,}/g, '[تم ضغط المرفق للمزامنة السحابية]');
-        }
-        return { ...m, content: nextContent };
-      });
+      if (byteLen > MAX_FIRESTORE_DOC_BYTES) {
+        console.warn(`[Firestore Sync] school_messages payload (${Math.round(byteLen / 1024)} KB) nears 1MB limit. Compressing oversized inline media attachments for cloud sync.`);
+        result = result.map((m: any) => {
+          if (!m || typeof m !== 'object') return m;
+          let nextContent = m.content;
+          if (typeof nextContent === 'string' && nextContent.length > 30000 && nextContent.includes('data:')) {
+            nextContent = nextContent.replace(/data:(image|video)\/[^;\s]+;base64,[A-Za-z0-9+/=]{10000,}/g, '[تم ضغط المرفق للمزامنة السحابية]');
+          }
+          return { ...m, content: nextContent };
+        });
+      }
+    } else if (key === 'school_sent_grade_sheets' && Array.isArray(result)) {
+      result = deduplicateGradeSheetsPreservingTeachers(result);
     }
 
-    if (key === 'school_sent_grade_sheets' && Array.isArray(data)) {
-      return deduplicateGradeSheetsPreservingTeachers(data);
-    }
-
-    return data;
+    return stripUndefinedForFirestore(result);
   } catch {
     return data;
   }

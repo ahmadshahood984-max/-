@@ -85,12 +85,36 @@
         "lastOperation": { "type": "string" },
         "lastUpdatedAt": { "type": "number" }
       }
+    },
+    "GradeReport": {
+      "title": "Submitted & Approved Grade Report",
+      "description": "Direct grade report document submitted by a teacher to the director and approved for parents",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "month": { "type": "string" },
+        "classId": { "type": "string" },
+        "className": { "type": "string" },
+        "cohort": { "type": "string" },
+        "dateSent": { "type": "string" },
+        "sentBy": { "type": "string" },
+        "teacherId": { "type": "string" },
+        "status": { "type": "string", "enum": ["draft", "submitted", "approved"] },
+        "studentCount": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["id", "title", "month", "classId", "status"]
     }
   },
   "firestore": {
     "/school_live_data/{key}": {
       "schema": "SchoolLiveData",
       "description": "Collection for school dataset key-value syncing"
+    },
+    "/grade_reports/{reportId}": {
+      "schema": "GradeReport",
+      "description": "Direct collection for teacher-submitted and director-approved grade reports"
     },
     "/students_grades/{studentId}": {
       "schema": "ConsolidatedStudentGrades",

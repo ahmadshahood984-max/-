@@ -59,6 +59,7 @@ import { getStoredWelcomeMessages, WelcomeMessagesConfig } from '../lib/welcomeM
 import { motion, AnimatePresence } from 'motion/react';
 import { trackActivityOperation } from '../lib/firestoreTracker';
 import { fetchStudentsOnlyDirectly, ensureParentRealtimeListeners, deduplicateGradeSheetsPreservingTeachers, syncLivePortalDataFromServer, PARENT_FAST_LIVE_KEYS } from '../lib/firebaseSync';
+import { fetchGradeReportsFromFirestore, subscribeGradeReportsRealtime } from '../lib/gradeReportsFirestore';
 import { fetchCertifiedGradeSheetsByParent } from '../lib/supabase';
 import { 
   isFirestoreQuotaExceeded, 
@@ -617,9 +618,26 @@ export default function ParentPortal({
       .then(() => handleStorageUpdate())
       .catch(() => {});
 
+    const applyApprovedDirectReports = (directReports: SentGradeSheet[]) => {
+      if (!Array.isArray(directReports) || directReports.length === 0) return;
+      const approvedOnly = directReports.filter(isApprovedSentSheet);
+      if (approvedOnly.length === 0) return;
+      setSentGradeSheets(prev => {
+        const merged = deduplicateGradeSheets([...approvedOnly, ...prev]);
+        try {
+          localStorage.setItem('school_sent_grade_sheets', JSON.stringify(merged));
+        } catch {}
+        return merged;
+      });
+    };
+
+    const unsubApprovedReports = subscribeGradeReportsRealtime(applyApprovedDirectReports);
+    fetchGradeReportsFromFirestore().then(applyApprovedDirectReports).catch(() => {});
+
     return () => {
       window.removeEventListener('school_storage_update', handleStorageUpdate);
       window.removeEventListener('school_live_sync_completed', handleStorageUpdate);
+      unsubApprovedReports();
     };
   }, []);
 

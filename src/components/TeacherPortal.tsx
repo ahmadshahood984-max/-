@@ -61,6 +61,12 @@ import {
   syncLivePortalDataFromServer,
   FAST_LIVE_SYNC_KEYS
 } from '../lib/firebaseSync';
+import {
+  submitGradeReportToFirestore,
+  fetchGradeReportsFromFirestore,
+  subscribeGradeReportsRealtime,
+  extractFirestoreErrorMessage
+} from '../lib/gradeReportsFirestore';
 import { printElementById } from '../lib/printUtils';
 import { GradeSheetSignatures } from './GradeSheetSignatures';
 import { GradeCellInput } from './GradeCellInput';
@@ -151,6 +157,7 @@ export default function TeacherPortal({
   const [isSentSheetsModalOpen, setIsSentSheetsModalOpen] = useState(false);
   const [selectedSentSheetToView, setSelectedSentSheetToView] = useState<SentGradeSheet | null>(null);
   const [sheetSuccessMessage, setSheetSuccessMessage] = useState<string | null>(null);
+  const [isSendingSheetToDirector, setIsSendingSheetToDirector] = useState(false);
   const [isAddingNewMonth, setIsAddingNewMonth] = useState(false);
   const [newMonthName, setNewMonthName] = useState('');
 
@@ -215,9 +222,28 @@ export default function TeacherPortal({
       .then(() => reloadTeacherSyncedData())
       .catch(() => {});
 
+    const mergeDirectReports = (directReports: SentGradeSheet[]) => {
+      if (!Array.isArray(directReports) || directReports.length === 0) return;
+      setSentGradeSheets(prev => {
+        const merged = deduplicateGradeSheetsPreservingTeachers([...directReports, ...prev]);
+        try {
+          localStorage.setItem('school_sent_grade_sheets', JSON.stringify(merged));
+        } catch {}
+        return merged;
+      });
+    };
+
+    const unsubGradeReports = subscribeGradeReportsRealtime((reports) => {
+      mergeDirectReports(reports);
+    });
+    fetchGradeReportsFromFirestore()
+      .then((reports) => mergeDirectReports(reports))
+      .catch(() => {});
+
     return () => {
       window.removeEventListener('school_storage_update', handleStorageUpdate);
       window.removeEventListener('school_live_sync_completed', reloadTeacherSyncedData);
+      unsubGradeReports();
     };
   }, []);
 
@@ -730,34 +756,50 @@ export default function TeacherPortal({
       studentsSummary
     };
 
-    // Merge with latest cloud grade sheets & grades so other teachers' sheets are never overwritten,
-    // and await real cloud delivery confirmation.
-    const [sheetResult, gradesResult, evalSynced] = await Promise.all([
-      mergeAndPersistSentGradeSheet(sheetRecord, sentGradeSheets),
-      mergeAndPersistGrades(latestGrades),
-      persistDirectToFirestore('school_monthly_evaluations', monthlyEvaluations, { timeoutMs: 8000 })
-    ]);
+    setIsSendingSheetToDirector(true);
+    try {
+      // STRICT FIRESTORE WRITE: Must directly succeed in Firestore `grade_reports/{id}`
+      const savedSheet = await submitGradeReportToFirestore(sheetRecord);
 
-    setSentGradeSheets(sheetResult.sheets);
-    if (setGrades && Array.isArray(gradesResult.grades)) {
-      setGrades(gradesResult.grades);
+      // Update local state & localStorage immediately after Firestore confirmation
+      const nextSheets = deduplicateGradeSheetsPreservingTeachers([savedSheet, ...sentGradeSheets]);
+      setSentGradeSheets(nextSheets);
+      try {
+        localStorage.setItem('school_sent_grade_sheets', JSON.stringify(nextSheets));
+      } catch {}
+      safeDispatchStorageUpdate('school_sent_grade_sheets', JSON.stringify(nextSheets));
+
+      // Also sync consolidated keys (`school_sent_grade_sheets`, `school_grades`, `school_monthly_evaluations`)
+      const [sheetResult, gradesResult] = await Promise.all([
+        mergeAndPersistSentGradeSheet(savedSheet, nextSheets),
+        mergeAndPersistGrades(latestGrades),
+        persistDirectToFirestore('school_monthly_evaluations', monthlyEvaluations, { timeoutMs: 8000 })
+      ]);
+
+      setSentGradeSheets(sheetResult.sheets);
+      if (setGrades && Array.isArray(gradesResult.grades)) {
+        setGrades(gradesResult.grades);
+      }
+
+      safeDispatchStorageUpdate('school_grades', JSON.stringify(gradesResult.grades));
+      safeDispatchStorageUpdate('school_monthly_evaluations', JSON.stringify(monthlyEvaluations));
+
+      setSheetSuccessMessage(
+        `🎉 تم بنجاح حفظ ورفع كشف درجات صف (${targetClass.name}) لشهر (${currentEvaluationMonth}) مباشرة إلى السحابة ولوحة المدير العام! 🚀`
+      );
+      setTimeout(() => setSheetSuccessMessage(null), 6000);
+      alert(
+        `🎉 تم بنجاح رفع وإرسال كشف الدرجات مباشرة إلى السحابة (Firestore) وإلى المدير العام!\n\n🏫 الصف: ${targetClass.name}\n📅 الشهر: ${currentEvaluationMonth}\n👨‍🎓 عدد الطلاب: ${classStudents.length} طالب\n\n✅ سيظهر الكشف فوراً في لوحة المدير العام بانتظار الاعتماد والإرسال لأولياء الأمور! 🚀`
+      );
+    } catch (error: any) {
+      const errDetail = extractFirestoreErrorMessage(error);
+      console.error('Failed to submit grade report to Firestore:', error);
+      alert(
+        `❌ تعذّر إرسال ورفع كشف الدرجات إلى قاعدة البيانات السحابية (Firestore)!\n\nتفاصيل الخطأ:\n${errDetail}\n\nيرجى التحقق من اتصال الإنترنت أو صلاحيات Firestore (Rules) والمحاولة مجدداً.`
+      );
+    } finally {
+      setIsSendingSheetToDirector(false);
     }
-
-    safeDispatchStorageUpdate('school_grades', JSON.stringify(gradesResult.grades));
-    safeDispatchStorageUpdate('school_monthly_evaluations', JSON.stringify(monthlyEvaluations));
-
-    const cloudConfirmed = sheetResult.syncedToCloud && gradesResult.syncedToCloud && evalSynced;
-    setSheetSuccessMessage(
-      cloudConfirmed
-        ? `🎉 تم بنجاح حفظ وإرسال كشف درجات صف (${targetClass.name}) لشهر (${currentEvaluationMonth}) إلى المدير العام ومزامنته سحابياً فوراً! 🚀`
-        : `💾 تم حفظ كشف درجات صف (${targetClass.name}) محلياً وسيتم إرساله تلقائياً للمدير العام فور استقرار الاتصال بالإنترنت! 🔄`
-    );
-    setTimeout(() => setSheetSuccessMessage(null), 6000);
-    alert(
-      cloudConfirmed
-        ? `🎉 تم بنجاح حفظ وإرسال كشف الدرجات للمدير العام ومزامنته سحابياً!\n\n🏫 الصف: ${targetClass.name}\n📅 الشهر: ${currentEvaluationMonth}\n👨‍🎓 عدد الطلاب: ${classStudents.length} طالب\n\n✅ وصل الكشف إلى سجل المدير العام فوراً بانتظار اعتماده وإرساله لأولياء الأمور! 🚀`
-        : `💾 تم حفظ كشف الدرجات (${targetClass.name}) في الجهاز بنجاح!\n\n⏳ الإنترنت بطيء أو منقطع حالياً، وستتم المزامنة التلقائية مع المدير العام فور توفر الشبكة دون فقدان أي درجة.`
-    );
   };
 
   const handleExportTeacherClassExcel = async () => {
@@ -1506,11 +1548,12 @@ export default function TeacherPortal({
                     <div className="flex items-center gap-2 shrink-0 w-full md:w-auto">
                       <button
                         type="button"
+                        disabled={isSendingSheetToDirector}
                         onClick={handleSaveAndSendGradeSheetToDirector}
-                        className="flex-1 md:flex-initial px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-black text-xs rounded-xl transition shadow-md flex items-center justify-center gap-2 cursor-pointer"
+                        className="flex-1 md:flex-initial px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 disabled:opacity-60 text-white font-black text-xs rounded-xl transition shadow-md flex items-center justify-center gap-2 cursor-pointer"
                       >
                         <Send className="w-4 h-4" />
-                        <span>💾 حفظ وإرسال للمدير العام 🚀</span>
+                        <span>{isSendingSheetToDirector ? '⏳ جاري الرفع للمدير العام...' : '💾 حفظ وإرسال للمدير العام 🚀'}</span>
                       </button>
                     </div>
                   </div>
@@ -1547,12 +1590,13 @@ export default function TeacherPortal({
                       <div className="flex flex-wrap items-center gap-2">
                         <button
                           type="button"
+                          disabled={isSendingSheetToDirector}
                           onClick={handleSaveAndSendGradeSheetToDirector}
-                          className="bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-xs px-4 py-2.5 rounded-xl transition cursor-pointer shadow-md shadow-indigo-200 flex items-center gap-1.5"
+                          className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white font-extrabold text-xs px-4 py-2.5 rounded-xl transition cursor-pointer shadow-md shadow-indigo-200 flex items-center gap-1.5"
                           title="حفظ وإرسال كشف الدرجات للمدير العام بانتظار الاعتماد الرسمي"
                         >
                           <Send className="w-4 h-4 text-indigo-200" />
-                          <span>💾 حفظ وإرسال كشف الدرجات للمدير العام 🚀</span>
+                          <span>{isSendingSheetToDirector ? '⏳ جاري الرفع للسحابة...' : '💾 حفظ وإرسال كشف الدرجات للمدير العام 🚀'}</span>
                         </button>
 
                         <button
@@ -1693,20 +1737,20 @@ export default function TeacherPortal({
                                     const totalVal = computeGradeTotal(subGrade);
                                     const handlePartChange = (part: 'oralScore' | 'homeworkScore' | 'quizScore' | 'total', score: number | null) => {
                                       if (!setGrades) return;
-                                      setGrades(prev => {
-                                        const next = applyGradePartUpdate(prev, {
-                                          studentId: student.id,
-                                          subject: sub,
-                                          month: currentEvaluationMonth,
-                                          part,
-                                          value: score,
-                                          maxScore: numericMaxGrade || 100,
-                                          teacherId: selectedTeacherId,
-                                          idPrefix: 'g_t_edt'
-                                        });
-                                        localStorage.setItem('school_grades', JSON.stringify(next));
-                                        return next;
+                                      const next = applyGradePartUpdate(grades, {
+                                        studentId: student.id,
+                                        subject: sub,
+                                        month: currentEvaluationMonth,
+                                        part,
+                                        value: score,
+                                        maxScore: numericMaxGrade || 100,
+                                        teacherId: selectedTeacherId,
+                                        idPrefix: 'g_t_edt'
                                       });
+                                      setGrades(next);
+                                      const serialized = JSON.stringify(next);
+                                      localStorage.setItem('school_grades', serialized);
+                                      safeDispatchStorageUpdate('school_grades', serialized);
                                     };
                                     const inputCls = `w-12 text-center border rounded-lg py-1 px-1 text-xs font-bold font-mono focus:outline-none transition ${
                                       isTeacherSub
