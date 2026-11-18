@@ -12,8 +12,10 @@ import {
   CACHE_SIZE_UNLIMITED,
   getDoc,
   getDocFromCache,
+  getDocFromServer,
   getDocs,
   getDocsFromCache,
+  getDocsFromServer,
   setLogLevel,
   type DocumentReference,
   type DocumentSnapshot,
@@ -95,8 +97,9 @@ export async function getDocCacheFirst<T = any>(
   }
 
   try {
+    const fetchPromise = forceServer ? getDocFromServer(docRef) : getDoc(docRef);
     const serverSnap = await Promise.race([
-      getDoc(docRef),
+      fetchPromise,
       new Promise<null>((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs))
     ]);
     if (serverSnap) {
@@ -149,8 +152,9 @@ export async function getDocsCacheFirst<T = any>(
   }
 
   try {
+    const fetchPromise = forceServer ? getDocsFromServer(q) : getDocs(q);
     const serverSnap = await Promise.race([
-      getDocs(q),
+      fetchPromise,
       new Promise<null>((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs))
     ]);
     if (serverSnap) {

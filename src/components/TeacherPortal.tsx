@@ -52,7 +52,15 @@ import { PortalDesignerBadge } from './PortalDesignerBadge';
 import { Teacher, Student, Class, Attendance, Grade, Parent, Message, Announcement, ExamQuestionPaper, SentGradeSheet, SentGradeSheetStudentSummary } from '../types';
 import { sanitizeAndDeduplicateStudents, getSafeStudentKey } from '../lib/studentDeduplicator';
 import { getStoredWelcomeMessages, WelcomeMessagesConfig } from '../lib/welcomeMessages';
-import { persistDirectToFirestore, safeDispatchStorageUpdate, deduplicateGradeSheetsPreservingTeachers } from '../lib/firebaseSync';
+import {
+  persistDirectToFirestore,
+  safeDispatchStorageUpdate,
+  deduplicateGradeSheetsPreservingTeachers,
+  mergeAndPersistSentGradeSheet,
+  mergeAndPersistGrades,
+  syncLivePortalDataFromServer,
+  FAST_LIVE_SYNC_KEYS
+} from '../lib/firebaseSync';
 import { printElementById } from '../lib/printUtils';
 import { GradeSheetSignatures } from './GradeSheetSignatures';
 import { GradeCellInput } from './GradeCellInput';
@@ -178,8 +186,39 @@ export default function TeacherPortal({
         }
       }
     };
+    const reloadTeacherSyncedData = () => {
+      try {
+        const savedSheets = localStorage.getItem('school_sent_grade_sheets');
+        if (savedSheets) setSentGradeSheets(deduplicateGradeSheetsPreservingTeachers(JSON.parse(savedSheets)));
+      } catch {}
+      try {
+        const savedEval = localStorage.getItem('school_monthly_evaluations');
+        if (savedEval) setMonthlyEvaluations(JSON.parse(savedEval));
+      } catch {}
+      try {
+        const savedMonth = localStorage.getItem('school_evaluation_current_month');
+        if (savedMonth) setCurrentEvaluationMonth(savedMonth.startsWith('"') ? JSON.parse(savedMonth) : savedMonth);
+      } catch {}
+      try {
+        const savedSubjects = localStorage.getItem('school_custom_subjects');
+        if (savedSubjects) setCustomSubjects(JSON.parse(savedSubjects));
+      } catch {}
+      try {
+        const savedMax = localStorage.getItem('school_max_grade_setting');
+        if (savedMax) setDirectorMaxGradeSetting(savedMax.startsWith('"') ? JSON.parse(savedMax) : savedMax);
+      } catch {}
+    };
+
     window.addEventListener('school_storage_update', handleStorageUpdate);
-    return () => window.removeEventListener('school_storage_update', handleStorageUpdate);
+    window.addEventListener('school_live_sync_completed', reloadTeacherSyncedData);
+    syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS, minIntervalMs: 3000 })
+      .then(() => reloadTeacherSyncedData())
+      .catch(() => {});
+
+    return () => {
+      window.removeEventListener('school_storage_update', handleStorageUpdate);
+      window.removeEventListener('school_live_sync_completed', reloadTeacherSyncedData);
+    };
   }, []);
 
   // Sync selectedTeacherId to localStorage so other portals/App.tsx can read the active teacher
@@ -691,34 +730,34 @@ export default function TeacherPortal({
       studentsSummary
     };
 
-    let latestStoredSheets: SentGradeSheet[] = [];
-    try {
-      const raw = localStorage.getItem('school_sent_grade_sheets');
-      if (raw) latestStoredSheets = JSON.parse(raw);
-    } catch {}
-    const mergedBaseSheets = deduplicateGradeSheetsPreservingTeachers([
-      ...(Array.isArray(latestStoredSheets) ? latestStoredSheets : []),
-      ...sentGradeSheets
-    ]);
-    const filteredSheets = mergedBaseSheets.filter(s =>
-      !(s.month === currentEvaluationMonth && s.classId === targetClass.id && s.teacherId === selectedTeacherId)
-    );
-    const updatedSentSheets = deduplicateGradeSheetsPreservingTeachers([sheetRecord, ...filteredSheets]);
-    setSentGradeSheets(updatedSentSheets);
-
-    // Cloud persist directly and await completion (only Director approval publishes to consolidated parent collection)
-    await Promise.all([
-      persistDirectToFirestore('school_sent_grade_sheets', updatedSentSheets),
-      persistDirectToFirestore('school_monthly_evaluations', monthlyEvaluations),
-      persistDirectToFirestore('school_grades', latestGrades)
+    // Merge with latest cloud grade sheets & grades so other teachers' sheets are never overwritten,
+    // and await real cloud delivery confirmation.
+    const [sheetResult, gradesResult, evalSynced] = await Promise.all([
+      mergeAndPersistSentGradeSheet(sheetRecord, sentGradeSheets),
+      mergeAndPersistGrades(latestGrades),
+      persistDirectToFirestore('school_monthly_evaluations', monthlyEvaluations, { timeoutMs: 8000 })
     ]);
 
-    safeDispatchStorageUpdate('school_grades', JSON.stringify(latestGrades));
+    setSentGradeSheets(sheetResult.sheets);
+    if (setGrades && Array.isArray(gradesResult.grades)) {
+      setGrades(gradesResult.grades);
+    }
+
+    safeDispatchStorageUpdate('school_grades', JSON.stringify(gradesResult.grades));
     safeDispatchStorageUpdate('school_monthly_evaluations', JSON.stringify(monthlyEvaluations));
 
-    setSheetSuccessMessage(`🎉 تم بنجاح حفظ وإرسال كشف درجات صف (${targetClass.name}) لشهر (${currentEvaluationMonth}) إلى المدير العام بانتظار الاعتماد الرسمي! 🚀`);
+    const cloudConfirmed = sheetResult.syncedToCloud && gradesResult.syncedToCloud && evalSynced;
+    setSheetSuccessMessage(
+      cloudConfirmed
+        ? `🎉 تم بنجاح حفظ وإرسال كشف درجات صف (${targetClass.name}) لشهر (${currentEvaluationMonth}) إلى المدير العام ومزامنته سحابياً فوراً! 🚀`
+        : `💾 تم حفظ كشف درجات صف (${targetClass.name}) محلياً وسيتم إرساله تلقائياً للمدير العام فور استقرار الاتصال بالإنترنت! 🔄`
+    );
     setTimeout(() => setSheetSuccessMessage(null), 6000);
-    alert(`🎉 تم بنجاح حفظ وإرسال كشف الدرجات للمدير العام!\n\n🏫 الصف: ${targetClass.name}\n📅 الشهر: ${currentEvaluationMonth}\n👨‍🎓 عدد الطلاب: ${classStudents.length} طالب\n\n✅ تم ربط الكشف بالكامل في سجل كشوفات المدير العام بانتظار اعتماده وإرساله لأولياء الأمور! 🚀`);
+    alert(
+      cloudConfirmed
+        ? `🎉 تم بنجاح حفظ وإرسال كشف الدرجات للمدير العام ومزامنته سحابياً!\n\n🏫 الصف: ${targetClass.name}\n📅 الشهر: ${currentEvaluationMonth}\n👨‍🎓 عدد الطلاب: ${classStudents.length} طالب\n\n✅ وصل الكشف إلى سجل المدير العام فوراً بانتظار اعتماده وإرساله لأولياء الأمور! 🚀`
+        : `💾 تم حفظ كشف الدرجات (${targetClass.name}) في الجهاز بنجاح!\n\n⏳ الإنترنت بطيء أو منقطع حالياً، وستتم المزامنة التلقائية مع المدير العام فور توفر الشبكة دون فقدان أي درجة.`
+    );
   };
 
   const handleExportTeacherClassExcel = async () => {

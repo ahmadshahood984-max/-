@@ -39,13 +39,15 @@ import { safeShowNotification } from './lib/notificationHelper';
 import { sendParentPushNotification, sendBroadcastPushNotification } from './lib/pushDispatcher';
 import { 
   persistDirectToFirestore, 
-  forceRefreshDataFromFirestore, 
   safeDispatchStorageUpdate,
   hydrateFromOfflineVault,
   saveLocalSeedWithoutCloudWrite,
   ensureAllRealtimeListeners,
   ensureParentRealtimeListeners,
-  deduplicateGradeSheetsPreservingTeachers
+  deduplicateGradeSheetsPreservingTeachers,
+  syncLivePortalDataFromServer,
+  FAST_LIVE_SYNC_KEYS,
+  PARENT_FAST_LIVE_KEYS
 } from './lib/firebaseSync';
 import { 
   Building, 
@@ -280,6 +282,7 @@ export default function App() {
   // Help modal for configuring and testing notifications
   const [showNotificationHelper, setShowNotificationHelper] = useState<boolean>(false);
 
+  const reloadFromLocalStorageRef = React.useRef<(() => void) | null>(null);
   const isFirstPortalEffectRef = React.useRef(true);
   useEffect(() => {
     saveLocalSeedWithoutCloudWrite('school_active_portal', activePortal);
@@ -289,8 +292,14 @@ export default function App() {
     }
     if (activePortal === 'director' || activePortal === 'teacher') {
       ensureAllRealtimeListeners();
+      syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS, minIntervalMs: 2500 })
+        .then(() => reloadFromLocalStorageRef.current?.())
+        .catch(() => {});
     } else if (activePortal === 'parent') {
       ensureParentRealtimeListeners();
+      syncLivePortalDataFromServer({ keys: PARENT_FAST_LIVE_KEYS, minIntervalMs: 2500 })
+        .then(() => reloadFromLocalStorageRef.current?.())
+        .catch(() => {});
     }
   }, [activePortal]);
 
@@ -496,7 +505,16 @@ export default function App() {
       }
     };
 
-    // Defer heavy IndexedDB hydration & Firestore cache sync until right after first paint
+    reloadFromLocalStorageRef.current = () => {
+      reloadFromLocalStorage().catch(() => {});
+    };
+
+    const handleLiveSyncCompleted = () => {
+      reloadFromLocalStorage().catch(() => {});
+    };
+    window.addEventListener('school_live_sync_completed', handleLiveSyncCompleted);
+
+    // Defer heavy IndexedDB hydration & automatic server sync until right after first paint
     const startupTimer = setTimeout(() => {
       hydrateFromOfflineVault()
         .then((restored) => {
@@ -504,18 +522,19 @@ export default function App() {
         })
         .catch(() => {});
 
-      forceRefreshDataFromFirestore({ forceServer: false })
+      syncLivePortalDataFromServer({ minIntervalMs: 0 })
         .then(() => {
           reloadFromLocalStorage();
         })
         .catch((err) => {
-          console.warn('Startup Firestore cache refresh notice:', err);
+          console.warn('Startup Firestore live sync notice:', err);
         });
     }, 50);
 
     return () => {
       clearTimeout(startupTimer);
       window.removeEventListener('school_storage_update', handleStorageUpdate);
+      window.removeEventListener('school_live_sync_completed', handleLiveSyncCompleted);
     };
   }, []);
 

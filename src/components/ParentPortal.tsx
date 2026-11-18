@@ -58,7 +58,7 @@ import { safeShowNotification, dismissNotification, dismissAllNotifications } fr
 import { getStoredWelcomeMessages, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { motion, AnimatePresence } from 'motion/react';
 import { trackActivityOperation } from '../lib/firestoreTracker';
-import { fetchStudentsOnlyDirectly, ensureParentRealtimeListeners, deduplicateGradeSheetsPreservingTeachers } from '../lib/firebaseSync';
+import { fetchStudentsOnlyDirectly, ensureParentRealtimeListeners, deduplicateGradeSheetsPreservingTeachers, syncLivePortalDataFromServer, PARENT_FAST_LIVE_KEYS } from '../lib/firebaseSync';
 import { fetchCertifiedGradeSheetsByParent } from '../lib/supabase';
 import { 
   isFirestoreQuotaExceeded, 
@@ -606,14 +606,21 @@ export default function ParentPortal({
       }
     };
     window.addEventListener('school_storage_update', handleStorageUpdate);
+    window.addEventListener('school_live_sync_completed', handleStorageUpdate);
 
     // Ensure real-time Firestore listeners are active for parent keys regardless of portal entry path
     ensureParentRealtimeListeners();
 
-    // Initial cache-first Firestore load on mount (serves IndexedDB cache first -> 0 server reads on reopen)
-    fetchAllParentDataFromFirestore(false);
+    // Non-blocking fresh server sync on mount so parents immediately see Director-approved grade sheets
+    fetchAllParentDataFromFirestore(true);
+    syncLivePortalDataFromServer({ keys: PARENT_FAST_LIVE_KEYS, minIntervalMs: 3000 })
+      .then(() => handleStorageUpdate())
+      .catch(() => {});
 
-    return () => window.removeEventListener('school_storage_update', handleStorageUpdate);
+    return () => {
+      window.removeEventListener('school_storage_update', handleStorageUpdate);
+      window.removeEventListener('school_live_sync_completed', handleStorageUpdate);
+    };
   }, []);
 
   // Track read state for various categories per parent

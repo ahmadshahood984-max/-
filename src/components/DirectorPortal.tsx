@@ -87,7 +87,7 @@ import { db } from '../lib/firebase';
 import { collection, addDoc, setDoc, deleteDoc, doc, serverTimestamp, writeBatch, getDocs } from 'firebase/firestore';
 import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead, checkDailyRollover, fetchCentralizedConsumptionOnce, resetCentralizedFirestoreConsumption, calibrateCentralConsumptionBaseline, getRecentUtcDates, getTimeUntilFirebaseQuotaReset, SPARK_DAILY_READ_LIMIT, SPARK_DAILY_WRITE_LIMIT, FIREBASE_PROJECT_ID, FIREBASE_DATABASE_ID } from '../lib/firestoreTracker';
 import { calculateStorageUsageReport, measureLiveCloudStorageAudit, StorageUsageReport } from '../lib/storageUsage';
-import { persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate, recordDeletedStudentIds, queueOfflineNotification, deduplicateGradeSheetsPreservingTeachers } from '../lib/firebaseSync';
+import { persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate, recordDeletedStudentIds, queueOfflineNotification, deduplicateGradeSheetsPreservingTeachers, syncLivePortalDataFromServer, FAST_LIVE_SYNC_KEYS } from '../lib/firebaseSync';
 import { isFirestoreQuotaExceeded, markFirestoreQuotaExceeded, isQuotaError } from '../lib/quotaManager';
 import { getStoredWelcomeMessages, saveWelcomeMessages, DEFAULT_WELCOME_MESSAGES, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { Bell, Activity, Info, Smartphone } from 'lucide-react';
@@ -1176,8 +1176,17 @@ export default function DirectorPortal({
       studentsSummary: updatedSummaryList
     };
 
+    let latestStoredSheets: SentGradeSheet[] = [];
+    try {
+      const raw = localStorage.getItem('school_sent_grade_sheets');
+      if (raw) latestStoredSheets = JSON.parse(raw);
+    } catch {}
+    const baseSheets = deduplicateGradeSheets([
+      ...(Array.isArray(latestStoredSheets) ? latestStoredSheets : []),
+      ...sentGradeSheets
+    ]);
     const updatedSentSheets = deduplicateGradeSheets(
-      sentGradeSheets.map(s => s.id === sheet.id ? updatedSheet : s)
+      baseSheets.map(s => s.id === sheet.id ? updatedSheet : s)
     );
     setSentGradeSheets(updatedSentSheets);
     setSelectedSentSheetToView(updatedSheet);
@@ -2040,9 +2049,14 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       }
     };
     reloadFromLocalStorage();
+    window.addEventListener('school_live_sync_completed', reloadFromLocalStorage);
+    syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS, minIntervalMs: 3000 })
+      .then(() => reloadFromLocalStorage())
+      .catch(() => {});
 
     return () => {
       window.removeEventListener('school_storage_update', handleStorageUpdate);
+      window.removeEventListener('school_live_sync_completed', reloadFromLocalStorage);
     };
   }, []);
 
@@ -4695,7 +4709,16 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       setMessages(cleanedMessages);
     }
 
-    const updatedExistingSheets = sentGradeSheets
+    let latestStoredSheets: SentGradeSheet[] = [];
+    try {
+      const raw = localStorage.getItem('school_sent_grade_sheets');
+      if (raw) latestStoredSheets = JSON.parse(raw);
+    } catch {}
+    const baseSheets = deduplicateGradeSheets([
+      ...(Array.isArray(latestStoredSheets) ? latestStoredSheets : []),
+      ...sentGradeSheets
+    ]);
+    const updatedExistingSheets = baseSheets
       .filter(s => !(s.month === currentEvaluationMonth && (s.classId === targetClassId || s.className === scopeTitle) && !s.teacherId))
       .map(s => {
         if (

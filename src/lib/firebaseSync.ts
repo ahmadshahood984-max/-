@@ -66,6 +66,51 @@ export const PARENT_REALTIME_KEYS = [
   'school_custom_pass_grade'
 ];
 
+export const PARENT_FAST_LIVE_KEYS = [
+  'school_sent_grade_sheets',
+  'school_monthly_evaluations',
+  'school_evaluation_current_month',
+  'school_messages',
+  'school_announcements',
+  'school_attendance',
+  'school_excuses',
+  'school_tuitions',
+  'school_students',
+  'school_classes',
+  'school_teachers',
+  'school_parents',
+  'school_custom_subjects',
+  'school_max_grade_setting',
+  'school_custom_max_grade',
+  'school_pass_grade_setting',
+  'school_custom_pass_grade',
+  'school_blocked_grades'
+];
+
+export const FAST_LIVE_SYNC_KEYS = [
+  'school_sent_grade_sheets',
+  'school_grades',
+  'school_monthly_evaluations',
+  'school_evaluation_current_month',
+  'school_evaluation_saved_months',
+  'school_saved_evaluation_months',
+  'school_students',
+  'school_classes',
+  'school_teachers',
+  'school_parents',
+  'school_attendance',
+  'school_announcements',
+  'school_messages',
+  'school_excuses',
+  'school_tuitions',
+  'school_custom_subjects',
+  'school_max_grade_setting',
+  'school_custom_max_grade',
+  'school_pass_grade_setting',
+  'school_custom_pass_grade',
+  'school_blocked_grades'
+];
+
 export const SYNC_KEYS = [
   'school_teachers',
   'school_classes',
@@ -613,41 +658,46 @@ async function flushPendingNotifications(): Promise<void> {
  * Directly writes and persists data to localStorage + IndexedDB Vault immediately,
  * and syncs to Firestore without ever hanging the UI when internet is disconnected.
  */
-export async function persistDirectToFirestore(key: string, data: any): Promise<boolean> {
+export async function persistDirectToFirestore(
+  key: string,
+  data: any,
+  options?: { timeoutMs?: number }
+): Promise<boolean> {
   try {
     const valueString = typeof data === 'object' ? JSON.stringify(data) : String(data);
     const now = Date.now();
     const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
     const prevMeta = getKeySyncMeta(key);
+    const waitTimeoutMs = options?.timeoutMs ?? 6000;
 
-    // 1. Save durably locally BEFORE attempting network (localStorage + memory + IndexedDB)
-    // Only mark pendingSync=true right away if we are offline or quota circuit-breaker is active.
-    // While online, keep previous pending state (or false) and only flag pendingSync if the write actually fails.
-    const immediatePending = isOffline || isFirestoreQuotaExceeded() ? true : !!prevMeta.pendingSync;
-    setKeySyncMeta(key, now, immediatePending);
+    // 1. Skip redundant cloud write ONLY if identical value was already cleanly confirmed synced
+    if (!isOffline && db && !isFirestoreQuotaExceeded() && !prevMeta.pendingSync && lastSyncedValues.get(key) === valueString) {
+      safeSetLocalItem(key, valueString);
+      safeDispatchStorageUpdate(key, valueString);
+      broadcastLocalUpdate(key, valueString);
+      return true;
+    }
+
+    // 2. Always mark pendingSync=true BEFORE network write so interrupted tabs/reloads NEVER lose updates,
+    // and clear pendingSync=false inside .then(...) only after Firestore confirms receipt.
+    setKeySyncMeta(key, now, true);
     safeSetLocalItem(key, valueString);
-    saveToOfflineVault(key, valueString, now, immediatePending).catch(() => {});
+    saveToOfflineVault(key, valueString, now, true).catch(() => {});
 
     safeDispatchStorageUpdate(key, valueString);
     broadcastLocalUpdate(key, valueString);
 
     if (isOffline || !db || isFirestoreQuotaExceeded()) {
-      return true;
+      return false;
     }
 
     // If identical payload write is already in-flight, await its actual completion (bounded by timeout)
     const existingInFlight = inFlightWritePromises.get(key);
     if (existingInFlight && existingInFlight.value === valueString) {
-      await Promise.race([
+      return await Promise.race([
         existingInFlight.promise,
-        new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 2500))
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), waitTimeoutMs))
       ]);
-      return true;
-    }
-
-    // Skip redundant cloud write if identical value was already cleanly synced
-    if (!prevMeta.pendingSync && lastSyncedValues.get(key) === valueString) {
-      return true;
     }
 
     const docRef = doc(db, 'school_live_data', key);
@@ -688,7 +738,6 @@ export async function persistDirectToFirestore(key: string, data: any): Promise<
         } else {
           console.warn(`Key ${key} direct write notice (will stay protected locally until synced):`, writeErr?.message || writeErr);
         }
-        // Preserve locally as pendingSync so auto-flush retries when network stabilizes
         setKeySyncMeta(key, now, true);
         saveToOfflineVault(key, valueString, now, true).catch(() => {});
         return false;
@@ -696,20 +745,106 @@ export async function persistDirectToFirestore(key: string, data: any): Promise<
 
     inFlightWritePromises.set(key, { value: valueString, promise: writePromise });
 
-    // Race with short timeout so slow/dropped networks NEVER freeze the UI
-    await Promise.race([
+    // Await confirmation up to waitTimeoutMs so critical operations confirm real cloud delivery
+    return await Promise.race([
       writePromise,
-      new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 2500))
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), waitTimeoutMs))
     ]);
-    return true;
   } catch (err: any) {
     if (isQuotaError(err)) {
       markFirestoreQuotaExceeded(err);
-      return true;
+      return false;
     }
     console.warn(`Notice persisting key ${key}:`, err?.message || err);
-    return true;
+    return false;
   }
+}
+
+/**
+ * Safely merges a newly submitted/updated SentGradeSheet with both latest remote Firestore data
+ * and local sheets so neither Teacher nor Director ever overwrites another teacher's sheets.
+ */
+export async function mergeAndPersistSentGradeSheet<T extends {
+  id?: string;
+  classId?: string;
+  className?: string;
+  month?: string;
+  teacherId?: string;
+  status?: string;
+  dateSent?: string;
+}>(newSheet: T, localFallbackSheets: T[] = []): Promise<{ syncedToCloud: boolean; sheets: T[] }> {
+  let localSheets: T[] = Array.isArray(localFallbackSheets) ? [...localFallbackSheets] : [];
+  try {
+    const raw = safeGetLocalItem('school_sent_grade_sheets');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        localSheets = deduplicateGradeSheetsPreservingTeachers([...parsed, ...localSheets]);
+      }
+    }
+  } catch {}
+
+  let remoteSheets: T[] = [];
+  const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
+  if (!isOffline && db && !isFirestoreQuotaExceeded()) {
+    try {
+      const { snap } = await getDocCacheFirst(doc(db, 'school_live_data', 'school_sent_grade_sheets'), {
+        forceServer: true,
+        timeoutMs: 3000
+      });
+      if (snap && snap.exists()) {
+        const docData = snap.data();
+        if (Array.isArray(docData?.data)) {
+          remoteSheets = docData.data as T[];
+        }
+        trackFirestoreRead(1, 'مزامنة كشوفات الدرجات قبل الإرسال');
+      }
+    } catch {}
+  }
+
+  // Filter out previous sheet for the exact same (month + class + teacher/director role) before inserting newSheet
+  const baseMerged = deduplicateGradeSheetsPreservingTeachers([...remoteSheets, ...localSheets]).filter(s => {
+    const sameMonth = (s.month || '') === (newSheet.month || '');
+    const sameClass = (s.classId || s.className || '') === (newSheet.classId || newSheet.className || '');
+    const sameRole = (s.teacherId || '') === (newSheet.teacherId || '');
+    return !(sameMonth && sameClass && sameRole);
+  });
+
+  const finalSheets = deduplicateGradeSheetsPreservingTeachers([newSheet, ...baseMerged]);
+  const syncedToCloud = await persistDirectToFirestore('school_sent_grade_sheets', finalSheets, { timeoutMs: 8000 });
+  return { syncedToCloud, sheets: finalSheets };
+}
+
+/**
+ * Safely merges local grades with latest server grades before persisting, preventing one teacher's
+ * save from overwriting another teacher's or class's grades already recorded on the server.
+ */
+export async function mergeAndPersistGrades<T extends {
+  studentId?: string;
+  subject?: string;
+  examName?: string;
+}>(localGrades: T[]): Promise<{ syncedToCloud: boolean; grades: T[] }> {
+  let remoteGrades: T[] = [];
+  const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
+  if (!isOffline && db && !isFirestoreQuotaExceeded()) {
+    try {
+      const { snap } = await getDocCacheFirst(doc(db, 'school_live_data', 'school_grades'), {
+        forceServer: true,
+        timeoutMs: 3000
+      });
+      if (snap && snap.exists()) {
+        const docData = snap.data();
+        if (Array.isArray(docData?.data)) {
+          remoteGrades = docData.data as T[];
+        }
+        trackFirestoreRead(1, 'مزامنة سجل الدرجات قبل الحفظ');
+      }
+    } catch {}
+  }
+
+  const merged = mergePendingLocalWithRemote('school_grades', remoteGrades, localGrades) as T[];
+  const syncedToCloud = await persistDirectToFirestore('school_grades', merged, { timeoutMs: 8000 });
+  return { syncedToCloud, grades: merged };
 }
 
 /**
@@ -909,14 +1044,15 @@ export async function fetchStudentsOnlyDirectly(forceServer: boolean = false): P
  * When `forceServer` is false (default on app open), reads from IndexedDB persistent cache FIRST
  * (0 server reads for already-cached documents) and protects newer/pending local data from stale overwrites.
  */
-export async function forceRefreshDataFromFirestore(options?: { forceServer?: boolean }): Promise<boolean> {
+export async function forceRefreshDataFromFirestore(options?: { forceServer?: boolean; keys?: string[] }): Promise<boolean> {
   const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
   const forceServer = isOffline ? false : (options?.forceServer ?? false);
+  const targetKeys = Array.isArray(options?.keys) && options!.keys.length > 0 ? options!.keys : SYNC_KEYS;
   if (!db) return false;
   if (forceServer && isFirestoreQuotaExceeded()) return false;
 
-  // CRITICAL QUOTA SAVER: Student/Parent portals never pull all 26 admin keys on startup.
-  if (!forceServer && isStudentOrParentPortal()) {
+  // CRITICAL QUOTA SAVER: Student/Parent portals never pull all 31 admin keys on startup unless scoped keys are given.
+  if (!forceServer && !options?.keys && isStudentOrParentPortal()) {
     return true;
   }
 
@@ -929,7 +1065,7 @@ export async function forceRefreshDataFromFirestore(options?: { forceServer?: bo
   const effectiveForceServer = (isOffline || isFirestoreQuotaExceeded()) ? false : forceServer;
 
   try {
-    const refreshTasks = SYNC_KEYS.map(async (key) => {
+    const refreshTasks = targetKeys.map(async (key) => {
       if (effectiveForceServer && isFirestoreQuotaExceeded()) return;
       try {
         const docRef = doc(db, 'school_live_data', key);
@@ -999,6 +1135,10 @@ export async function forceRefreshDataFromFirestore(options?: { forceServer?: bo
             }
 
             let payload = docData.data;
+
+            if (key === 'school_sent_grade_sheets' && Array.isArray(payload)) {
+              payload = deduplicateGradeSheetsPreservingTeachers(payload);
+            }
 
             if (key === 'school_students' && Array.isArray(payload)) {
               let localList: any[] = [];
@@ -1131,16 +1271,11 @@ export function isStudentOrParentPortal(): boolean {
     const params = new URLSearchParams(window.location.search);
     const portal = params.get('portal');
     if (portal === 'parent' || portal === 'student') return true;
+    if (portal === 'director' || portal === 'teacher') return false;
     if (params.get('unified') || params.get('roll') || params.get('student') || params.get('studentId') || params.get('no')) return true;
-    
+
     const activePortal = localStorage.getItem('school_active_portal');
     if (activePortal === 'parent' || activePortal === 'student') return true;
-    
-    const isTeacher = localStorage.getItem('school_teacher_is_logged_in') === 'true';
-    const isDirector = localStorage.getItem('school_director_is_logged_in') === 'true' || activePortal === 'director';
-    if (!isTeacher && !isDirector && (localStorage.getItem('parent_portal_student_id') || localStorage.getItem('parent_portal_unified_no'))) {
-      return true;
-    }
     return false;
   } catch {
     return false;
@@ -1301,6 +1436,54 @@ export function ensureParentRealtimeListeners() {
   attachRealtimeListenersForKeys(PARENT_REALTIME_KEYS);
 }
 
+let lastLiveServerSyncAt = 0;
+let activeLiveSyncPromise: Promise<boolean> | null = null;
+
+/**
+ * Fast, non-blocking bidirectional sync with Firestore server for the active portal:
+ * 1) Flushes any pending local changes up to Firestore first.
+ * 2) Pulls latest server documents for the live keys (never stale cache).
+ * 3) Dispatches update event so all mounted portals refresh automatically.
+ */
+export async function syncLivePortalDataFromServer(options?: {
+  keys?: string[];
+  minIntervalMs?: number;
+}): Promise<boolean> {
+  if (!db || isFirestoreQuotaExceeded()) return false;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return false;
+
+  const minInterval = options?.minIntervalMs ?? 5000;
+  const now = Date.now();
+  if (activeLiveSyncPromise) {
+    return activeLiveSyncPromise;
+  }
+  if (minInterval > 0 && now - lastLiveServerSyncAt < minInterval) {
+    return true;
+  }
+
+  const keysToSync = options?.keys && options.keys.length > 0
+    ? options.keys
+    : (isStudentOrParentPortal() ? PARENT_FAST_LIVE_KEYS : FAST_LIVE_SYNC_KEYS);
+
+  activeLiveSyncPromise = (async () => {
+    try {
+      const ok = await forceRefreshDataFromFirestore({
+        forceServer: true,
+        keys: keysToSync
+      });
+      lastLiveServerSyncAt = Date.now();
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('school_live_sync_completed', { detail: { ok, ts: lastLiveServerSyncAt } }));
+      }
+      return ok;
+    } finally {
+      activeLiveSyncPromise = null;
+    }
+  })();
+
+  return activeLiveSyncPromise;
+}
+
 let backgroundSyncStarted = false;
 
 export function startDeferredFirebaseSync() {
@@ -1339,17 +1522,14 @@ export function setupFirebaseSync(options?: { deferNetwork?: boolean }) {
   if (typeof window !== 'undefined') {
     window.addEventListener('online', () => {
       emitOfflineSyncStatus();
-      flushPendingLocalSyncKeys().catch(() => {});
+      syncLivePortalDataFromServer({ minIntervalMs: 1000 }).catch(() => {});
     });
     window.addEventListener('offline', () => {
       emitOfflineSyncStatus();
     });
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible' && navigator.onLine !== false) {
-        const status = getOfflineSyncStatus();
-        if (status.pendingCount > 0) {
-          flushPendingLocalSyncKeys().catch(() => {});
-        }
+        syncLivePortalDataFromServer({ minIntervalMs: 10000 }).catch(() => {});
       }
     });
   }
@@ -1384,10 +1564,10 @@ export function setupFirebaseSync(options?: { deferNetwork?: boolean }) {
         return;
       }
 
+      // Mark pending BEFORE setDoc and clear ONLY inside .then() after cloud confirmation
       const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
-      const immediatePending = isOffline || isFirestoreQuotaExceeded() ? true : !!prevMeta.pendingSync;
-      setKeySyncMeta(key, now, immediatePending);
-      saveToOfflineVault(key, value, now, immediatePending).catch(() => {});
+      setKeySyncMeta(key, now, true);
+      saveToOfflineVault(key, value, now, true).catch(() => {});
 
       if (isOffline || isFirestoreQuotaExceeded()) {
         broadcastLocalUpdate(key, value);
