@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Suspense } from 'react';
 import { 
   Teacher, 
   Student, 
@@ -17,19 +17,16 @@ import {
   ExamQuestionPaper
 } from './types';
 import { 
-  INITIAL_CLASSES, 
-  INITIAL_TEACHERS, 
-  INITIAL_PARENTS, 
-  INITIAL_STUDENTS, 
   INITIAL_ATTENDANCE, 
-  INITIAL_GRADES, 
   INITIAL_ANNOUNCEMENTS, 
   INITIAL_MESSAGES, 
-  INITIAL_EXCUSES 
+  INITIAL_EXCUSES,
+  loadInitialSeedBundle,
+  loadFirestoreBackupBundle
 } from './data';
-import DirectorPortal from './components/DirectorPortal';
-import TeacherPortal from './components/TeacherPortal';
-import ParentPortal from './components/ParentPortal';
+const DirectorPortal = React.lazy(() => import('./components/DirectorPortal'));
+const TeacherPortal = React.lazy(() => import('./components/TeacherPortal'));
+const ParentPortal = React.lazy(() => import('./components/ParentPortal'));
 import PortalDesignerBadge from './components/PortalDesignerBadge';
 import { 
   sanitizeAndDeduplicateStudents, 
@@ -81,33 +78,23 @@ interface SchoolEvent {
   type: 'success' | 'info' | 'warning' | 'primary';
 }
 
+function safeParseStorageArray<T>(key: string, fallback: T[] = []): T[] {
+  try {
+    const saved = localStorage.getItem(key);
+    if (!saved) return fallback;
+    const parsed = JSON.parse(saved);
+    return Array.isArray(parsed) ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export default function App() {
-  // --- Persistent State Hooks ---
-  const [teachers, setTeachers] = useState<Teacher[]>(() => {
-    const saved = localStorage.getItem('school_teachers');
-    const parsed = saved ? JSON.parse(saved) : [];
-    return mergeTeachersWithSeed(parsed, INITIAL_TEACHERS);
-  });
-
-  const [classes, setClasses] = useState<Class[]>(() => {
-    const saved = localStorage.getItem('school_classes');
-    const parsed = saved ? JSON.parse(saved) : [];
-    return mergeClassesWithSeed(parsed, INITIAL_CLASSES);
-  });
-
-  const [parents, setParents] = useState<Parent[]>(() => {
-    const saved = localStorage.getItem('school_parents');
-    const parsed = saved ? JSON.parse(saved) : [];
-    return mergeParentsWithSeed(parsed, INITIAL_PARENTS);
-  });
-
-  const [students, setStudents] = useState<Student[]>(() => {
-    const saved = localStorage.getItem('school_students');
-    const parsed: Student[] = saved ? JSON.parse(saved) : [];
-    const merged = mergeStudentsWithSeed(parsed, INITIAL_STUDENTS);
-    const cleaned = sanitizeAndDeduplicateStudents(merged);
-    return cleaned.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
-  });
+  // --- Persistent State Hooks (instant read from localStorage; seed/cloud merged asynchronously after first paint) ---
+  const [teachers, setTeachers] = useState<Teacher[]>(() => safeParseStorageArray<Teacher>('school_teachers'));
+  const [classes, setClasses] = useState<Class[]>(() => safeParseStorageArray<Class>('school_classes'));
+  const [parents, setParents] = useState<Parent[]>(() => safeParseStorageArray<Parent>('school_parents'));
+  const [students, setStudents] = useState<Student[]>(() => safeParseStorageArray<Student>('school_students'));
 
   const studentsRef = React.useRef<Student[]>(students);
   studentsRef.current = students;
@@ -118,8 +105,7 @@ export default function App() {
   const safeSetStudents: React.Dispatch<React.SetStateAction<Student[]>> = (action) => {
     const prev = studentsRef.current;
     const nextRaw = typeof action === 'function' ? action(prev) : action;
-    const merged = mergeStudentsWithSeed(Array.isArray(nextRaw) ? nextRaw : [], INITIAL_STUDENTS);
-    const cleanList = sanitizeAndDeduplicateStudents(merged);
+    const cleanList = sanitizeAndDeduplicateStudents(Array.isArray(nextRaw) ? nextRaw : []);
     const sorted = cleanList.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
     studentsRef.current = sorted;
     setStudents(sorted);
@@ -130,36 +116,11 @@ export default function App() {
     }
   };
 
-  const [attendance, setAttendance] = useState<Attendance[]>(() => {
-    const saved = localStorage.getItem('school_attendance');
-    return saved ? JSON.parse(saved) : INITIAL_ATTENDANCE;
-  });
-
-  const [grades, setGrades] = useState<Grade[]>(() => {
-    try {
-      const saved = localStorage.getItem('school_grades');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      }
-    } catch {}
-    return INITIAL_GRADES;
-  });
-
-  const [announcements, setAnnouncements] = useState<Announcement[]>(() => {
-    const saved = localStorage.getItem('school_announcements');
-    return saved ? JSON.parse(saved) : INITIAL_ANNOUNCEMENTS;
-  });
-
-  const [messages, setMessages] = useState<Message[]>(() => {
-    const saved = localStorage.getItem('school_messages');
-    return saved ? JSON.parse(saved) : INITIAL_MESSAGES;
-  });
-
-  const [excuses, setExcuses] = useState<AbsenceExcuse[]>(() => {
-    const saved = localStorage.getItem('school_excuses');
-    return saved ? JSON.parse(saved) : INITIAL_EXCUSES;
-  });
+  const [attendance, setAttendance] = useState<Attendance[]>(() => safeParseStorageArray<Attendance>('school_attendance', INITIAL_ATTENDANCE));
+  const [grades, setGrades] = useState<Grade[]>(() => safeParseStorageArray<Grade>('school_grades'));
+  const [announcements, setAnnouncements] = useState<Announcement[]>(() => safeParseStorageArray<Announcement>('school_announcements', INITIAL_ANNOUNCEMENTS));
+  const [messages, setMessages] = useState<Message[]>(() => safeParseStorageArray<Message>('school_messages', INITIAL_MESSAGES));
+  const [excuses, setExcuses] = useState<AbsenceExcuse[]>(() => safeParseStorageArray<AbsenceExcuse>('school_excuses', INITIAL_EXCUSES));
 
   const [directorPassword, setDirectorPassword] = useState<string>(() => {
     const saved = localStorage.getItem('school_director_password');
@@ -170,174 +131,9 @@ export default function App() {
     return localStorage.getItem('school_app_icon') || '';
   });
 
-  const [examQuestions, setExamQuestions] = useState<ExamQuestionPaper[]>(() => {
-    const saved = localStorage.getItem('school_exam_questions');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      } catch {
-        // ignore
-      }
-    }
-    return [
-      {
-        id: 'exam_sample_1',
-        title: 'أسئلة مذاكرة اللغة العربية - الفصل الأول',
-        teacherId: 't1',
-        teacherName: 'أحمد العلي',
-        subject: 'اللغة العربية',
-        classId: 'c1',
-        className: 'الصف الأول - الشعبة (أ)',
-        dateCreated: new Date(Date.now() - 86400000 * 2).toISOString(),
-        status: 'submitted',
-        headerConfig: {
-          ministryText: 'الجمهورية العربية السورية - وزارة التربية',
-          schoolName: 'المدرسة الدولية الخاصة',
-          examTitle: 'أسئلة مذاكرة مادة اللغة العربية',
-          academicYear: '2025 - 2026 م',
-          subject: 'اللغة العربية',
-          className: 'الصف الأول - الشعبة (أ)',
-          examDate: '2026-10-25',
-          duration: 'ساعة ونصف (90 دقيقة)',
-          totalMarks: '100 درجة',
-          teacherName: 'أحمد العلي',
-          instructions: 'أجب عن جميع الأسئلة الآتية بخط واضح ومرتب. اقرأ كل سؤال بعناية.',
-          customFields: [
-            { label: 'رقم النموذج', value: 'نموذج (أ)' },
-            { label: 'الفصل الدراسي', value: 'الفصل الأول' }
-          ]
-        },
-        contentHtml: `
-          <div class="question-block" style="margin-bottom: 24px;">
-            <p style="font-weight: bold; font-size: 17px; color: #0f172a; margin-bottom: 8px;">
-              <span>السؤال الأول: القراءة وفهم المقروء:</span>
-              <span style="float: left; color: #4338ca; font-size: 14px;">[ 25 علامة ]</span>
-            </p>
-            <p style="font-size: 15px; line-height: 1.8; margin-right: 12px; background-color: #f8fafc; padding: 10px; border-radius: 8px; border: 1px solid #e2e8f0;">
-              «الوطن هو الأرض التي نعيش عليها، ونستنشق هواءها، ونأكل من خيراتها. وواجبنا نحوه أن نحميه ونسعى لرفعته وتطوره بالعلم والعمل الصالح.»
-            </p>
-            <ol style="font-size: 14px; line-height: 2; margin-right: 14px;">
-              <li>ما هو واجبنا تجاه الوطن كما ورد في النص السابق؟ ....................................................................................</li>
-              <li>استخرج من النص السابق: اسماً مجروراً، وكلمة تبدأ بهمزة وصل: ............................................................</li>
-            </ol>
-          </div>
-
-          <div class="question-block" style="margin-bottom: 24px;">
-            <p style="font-weight: bold; font-size: 17px; color: #0f172a; margin-bottom: 8px;">
-              <span>السؤال الثاني: القواعد اللغوية والإعراب:</span>
-              <span style="float: left; color: #4338ca; font-size: 14px;">[ 25 علامة ]</span>
-            </p>
-            <p style="font-size: 15px; line-height: 2; margin-right: 12px;">
-              أعرب الكلمات التي تحتها خط في الجملة الآتية: <strong>«كَتَبَ <u>الطالبُ</u> <u>الدَّرْسَ</u> بإتقانٍ»</strong>.<br>
-              • <strong>الطالبُ:</strong> ................................................................................................................................................<br>
-              • <strong>الدَّرْسَ:</strong> ................................................................................................................................................
-            </p>
-          </div>
-
-          <div class="question-block" style="margin-bottom: 24px;">
-            <p style="font-weight: bold; font-size: 17px; color: #0f172a; margin-bottom: 8px;">
-              <span>السؤال الثالث: ضع إشارة ( ✓ ) أو ( ✗ ) أمام العبارات الآتية:</span>
-              <span style="float: left; color: #4338ca; font-size: 14px;">[ 25 علامة ]</span>
-            </p>
-            <ol style="font-size: 15px; line-height: 2; margin-right: 14px;">
-              <li>الفعل المضارع يبدأ دائماً بأحد حروف كلمة (نأتي) .................................................... ( &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; )</li>
-              <li>المبتدأ والخبر يكونان دائماً في حالة نصب ................................................................ ( &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; )</li>
-              <li>تكتب التاء المربوطة في أواخر الأسماء المفردة المؤنثة .................................................. ( &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; )</li>
-            </ol>
-          </div>
-
-          <div class="question-block" style="margin-bottom: 24px;">
-            <p style="font-weight: bold; font-size: 17px; color: #0f172a; margin-bottom: 8px;">
-              <span>السؤال الرابع: التعبير الكتابي والإملاء:</span>
-              <span style="float: left; color: #4338ca; font-size: 14px;">[ 25 علامة ]</span>
-            </p>
-            <p style="font-size: 15px; line-height: 1.8; margin-right: 12px;">
-              اكتب فقرة لا تتجاوز خمسة أسطر تتحدث فيها عن <strong>أهمية القراءة والمطالعة في بناء العقل</strong>، مع مراعاة علامات الترقيم وصحة الإملاء.<br>
-              ....................................................................................................................................................................................................................<br>
-              ....................................................................................................................................................................................................................
-            </p>
-          </div>
-        `
-      },
-      {
-        id: 'exam_sample_2',
-        title: 'اختبار مادة الرياضيات - المسائل والعمليات الحسابية',
-        teacherId: 't2',
-        teacherName: 'سارة الخطيب',
-        subject: 'الرياضيات',
-        classId: 'c2',
-        className: 'الصف الثاني - الشعبة (أ)',
-        dateCreated: new Date(Date.now() - 86400000).toISOString(),
-        status: 'approved',
-        headerConfig: {
-          ministryText: 'الجمهورية العربية السورية - وزارة التربية',
-          schoolName: 'المدرسة الدولية الخاصة',
-          examTitle: 'اختبار مادة الرياضيات الشهري',
-          academicYear: '2025 - 2026 م',
-          subject: 'الرياضيات',
-          className: 'الصف الثاني - الشعبة (أ)',
-          examDate: '2026-10-28',
-          duration: 'ساعة واحدة (60 دقيقة)',
-          totalMarks: '100 درجة',
-          teacherName: 'سارة الخطيب',
-          instructions: 'يُمنع استخدام الآلة الحاسبة. أجب عن كافة العمليات الحسابية موضحاً خطوات الحل.',
-          customFields: [
-            { label: 'رقم القاعة', value: 'القاعة (3)' },
-            { label: 'الفرع', value: 'العلمي الأساسي' }
-          ]
-        },
-        contentHtml: `
-          <div class="question-block" style="margin-bottom: 24px;">
-            <p style="font-weight: bold; font-size: 17px; color: #0f172a; margin-bottom: 8px;">
-              <span>السؤال الأول: اختر الإجابة الصحيحة لكل مما يأتي:</span>
-              <span style="float: left; color: #4338ca; font-size: 14px;">[ 30 علامة ]</span>
-            </p>
-            <ol style="font-size: 15px; line-height: 2; margin-right: 14px;">
-              <li>ناتج العملية الحسابية: ( 25 × 4 ) + 50 يساوي: &nbsp;&nbsp;&nbsp;&nbsp; [ 100 &nbsp;|&nbsp; 150 &nbsp;|&nbsp; 200 &nbsp;|&nbsp; 250 ]</li>
-              <li>الكسر المكافئ للكسر 1/2 هو: &nbsp;&nbsp;&nbsp;&nbsp; [ 2/4 &nbsp;|&nbsp; 3/4 &nbsp;|&nbsp; 1/4 &nbsp;|&nbsp; 2/3 ]</li>
-              <li>محيط المربع الذي طول ضلعه 5 سم يساوي: &nbsp;&nbsp;&nbsp;&nbsp; [ 10 سم &nbsp;|&nbsp; 15 سم &nbsp;|&nbsp; 20 سم &nbsp;|&nbsp; 25 سم ]</li>
-            </ol>
-          </div>
-
-          <div class="question-block" style="margin-bottom: 24px;">
-            <p style="font-weight: bold; font-size: 17px; color: #0f172a; margin-bottom: 8px;">
-              <span>السؤال الثاني: أوجد ناتج العمليات الآتية مع كتابة الخطوات:</span>
-              <span style="float: left; color: #4338ca; font-size: 14px;">[ 35 علامة ]</span>
-            </p>
-            <table style="width: 100%; border-collapse: collapse; border: 1px solid #1e293b; text-align: center; margin: 10px 0;" dir="rtl">
-              <tr style="background-color: #f1f5f9;">
-                <th style="border: 1px solid #1e293b; padding: 8px;">العملية الحسابية</th>
-                <th style="border: 1px solid #1e293b; padding: 8px;">خطوات الحل والناتج</th>
-              </tr>
-              <tr>
-                <td style="border: 1px solid #1e293b; padding: 12px; font-weight: bold; font-family: monospace; font-size: 16px;">1450 + 2350 = ?</td>
-                <td style="border: 1px solid #1e293b; padding: 12px;">............................................................................................................</td>
-              </tr>
-              <tr>
-                <td style="border: 1px solid #1e293b; padding: 12px; font-weight: bold; font-family: monospace; font-size: 16px;">560 ÷ 7 = ?</td>
-                <td style="border: 1px solid #1e293b; padding: 12px;">............................................................................................................</td>
-              </tr>
-            </table>
-          </div>
-
-          <div class="question-block" style="margin-bottom: 24px;">
-            <p style="font-weight: bold; font-size: 17px; color: #0f172a; margin-bottom: 8px;">
-              <span>السؤال الثالث: مسألة لفظية تطبيقية:</span>
-              <span style="float: left; color: #4338ca; font-size: 14px;">[ 35 علامة ]</span>
-            </p>
-            <p style="font-size: 15px; line-height: 1.8; margin-right: 12px;">
-              «اشترى أحمد 4 كتب سعر الكتاب الواحد 250 ليرة، و3 دفاتر سعر الدفتر الواحد 100 ليرة. احسب المبلغ الإجمالي الذي دفعه للبائع؟»<br>
-              <strong>الحل:</strong><br>
-              ثمن الكتب: .......................................................................................................................................................................<br>
-              ثمن الدفاتر: .......................................................................................................................................................................<br>
-              المبلغ الإجمالي: .................................................................................................................................................................
-            </p>
-          </div>
-        `
-      }
-    ];
-  });
+  const [examQuestions, setExamQuestions] = useState<ExamQuestionPaper[]>(() =>
+    safeParseStorageArray<ExamQuestionPaper>('school_exam_questions')
+  );
 
   const saveExamQuestionPaper = async (paper: ExamQuestionPaper) => {
     let updatedPapers: ExamQuestionPaper[] = [];
@@ -484,8 +280,13 @@ export default function App() {
   // Help modal for configuring and testing notifications
   const [showNotificationHelper, setShowNotificationHelper] = useState<boolean>(false);
 
+  const isFirstPortalEffectRef = React.useRef(true);
   useEffect(() => {
     saveLocalSeedWithoutCloudWrite('school_active_portal', activePortal);
+    if (isFirstPortalEffectRef.current) {
+      isFirstPortalEffectRef.current = false;
+      return;
+    }
     if (activePortal === 'director' || activePortal === 'teacher') {
       ensureAllRealtimeListeners();
     } else if (activePortal === 'parent') {
@@ -554,56 +355,40 @@ export default function App() {
 
     window.addEventListener('school_storage_update', handleStorageUpdate);
 
-    // Initial load check to capture early Firebase synced keys in localStorage
-    const reloadFromLocalStorage = () => {
-      const keysToLoad: Record<string, (val: any) => void> = {
-        'school_teachers': (val: any) => {
-          const list = mergeTeachersWithSeed(Array.isArray(val) ? val : [], INITIAL_TEACHERS);
-          setTeachers(list);
-        },
-        'school_classes': (val: any) => {
-          const list = mergeClassesWithSeed(Array.isArray(val) ? val : [], INITIAL_CLASSES);
-          setClasses(list);
-        },
-        'school_parents': (val: any) => {
-          const list = mergeParentsWithSeed(Array.isArray(val) ? val : [], INITIAL_PARENTS);
-          setParents(list);
-        },
-        'school_students': (val: any) => {
-          const merged = mergeStudentsWithSeed(Array.isArray(val) ? val : [], INITIAL_STUDENTS);
-          const cleanList = sanitizeAndDeduplicateStudents(merged);
-          setStudents(cleanList.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar')));
-        },
-        'school_attendance': setAttendance,
-        'school_grades': setGrades,
-        'school_announcements': setAnnouncements,
-        'school_messages': setMessages,
-        'school_excuses': setExcuses,
-        'school_exam_questions': setExamQuestions,
-      };
+    // Reload from localStorage helper (used after async hydration/cache sync finishes)
+    const reloadFromLocalStorage = async () => {
+      const savedTeachers = safeParseStorageArray<Teacher>('school_teachers');
+      const savedClasses = safeParseStorageArray<Class>('school_classes');
+      const savedParents = safeParseStorageArray<Parent>('school_parents');
+      const savedStudents = safeParseStorageArray<Student>('school_students');
+      const savedGrades = safeParseStorageArray<Grade>('school_grades');
+      const savedAtt = safeParseStorageArray<Attendance>('school_attendance');
+      const savedAnn = safeParseStorageArray<Announcement>('school_announcements');
+      const savedMsgs = safeParseStorageArray<Message>('school_messages');
+      const savedExc = safeParseStorageArray<AbsenceExcuse>('school_excuses');
+      const savedExams = safeParseStorageArray<ExamQuestionPaper>('school_exam_questions');
 
-      Object.entries(keysToLoad).forEach(([key, setter]) => {
-        const saved = localStorage.getItem(key);
-        if (saved) {
-          try {
-            setter(JSON.parse(saved));
-          } catch (e) {
-            // ignore
-          }
-        }
-      });
+      if (savedTeachers.length > 0) setTeachers(savedTeachers);
+      if (savedClasses.length > 0) setClasses(savedClasses);
+      if (savedParents.length > 0) setParents(savedParents);
+      if (savedStudents.length > 0) {
+        const cleanList = sanitizeAndDeduplicateStudents(savedStudents);
+        setStudents(cleanList.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar')));
+      }
+      if (savedAtt.length > 0) setAttendance(savedAtt);
+      if (savedGrades.length > 0) setGrades(savedGrades);
+      if (savedAnn.length > 0) setAnnouncements(savedAnn);
+      if (savedMsgs.length > 0) setMessages(savedMsgs);
+      if (savedExc.length > 0) setExcuses(savedExc);
+      if (savedExams.length > 0) setExamQuestions(savedExams);
 
       const savedPwd = localStorage.getItem('school_director_password');
-      if (savedPwd) {
-        setDirectorPassword(savedPwd);
-      }
+      if (savedPwd) setDirectorPassword(savedPwd);
 
       const savedIcon = localStorage.getItem('school_app_icon');
-      if (savedIcon !== null) {
-        setAppIcon(savedIcon);
-      }
+      if (savedIcon !== null) setAppIcon(savedIcon);
 
-      // Automatically clean up duplicate sent grade sheets while preserving each teacher's submissions
+      // Deduplicate sent grade sheets cleanly if present
       const savedSheetsRaw = localStorage.getItem('school_sent_grade_sheets');
       if (savedSheetsRaw) {
         try {
@@ -616,86 +401,120 @@ export default function App() {
           }
         } catch {}
       }
-      // Healing check: only set local default classes if both local and remote have never been configured
-      const currentClassesRaw = localStorage.getItem('school_classes');
-      let currentClassesList: Class[] = [];
-      try {
-        currentClassesList = currentClassesRaw ? JSON.parse(currentClassesRaw) : [];
-      } catch {}
-      if (!Array.isArray(currentClassesList) || currentClassesList.length === 0) {
-        // Do NOT overwrite Firestore! Just retain existing classes or initial empty state until remote arrives
-        console.log('[Classes Init] Awaiting classes from Firestore cloud...');
+
+      // Lazy-load default exam samples ONLY if none exist locally
+      if (savedExams.length === 0) {
+        import('./lib/defaultExamSamples')
+          .then(({ getDefaultExamSamples }) => {
+            setExamQuestions((prev) => (prev.length === 0 ? getDefaultExamSamples() : prev));
+          })
+          .catch(() => {});
       }
 
-      // Healing check: only set local default teachers if both local and remote have never been configured
-      const currentTeachersRaw = localStorage.getItem('school_teachers');
-      let currentTeachersList: Teacher[] = [];
-      try {
-        currentTeachersList = currentTeachersRaw ? JSON.parse(currentTeachersRaw) : [];
-      } catch {}
-      if (!Array.isArray(currentTeachersList) || currentTeachersList.length === 0) {
-        // Do NOT overwrite Firestore! Just retain existing teachers until remote arrives
-        console.log('[Teachers Init] Awaiting teachers from Firestore cloud...');
-      }
+      // Lazy-load seed bundles ONLY on first-ever run or when core tables are empty
+      const needsCoreSeed =
+        savedTeachers.length === 0 ||
+        savedClasses.length === 0 ||
+        savedStudents.length === 0 ||
+        savedParents.length === 0 ||
+        localStorage.getItem('school_seed_applied_v1') !== '1';
 
-      // Healing check: if grades were empty, reconstruct from certified sent grade sheet
-      const currentGradesRaw = localStorage.getItem('school_grades');
-      let currentGradesList: Grade[] = [];
-      try {
-        currentGradesList = currentGradesRaw ? JSON.parse(currentGradesRaw) : [];
-      } catch {}
-      if ((!Array.isArray(currentGradesList) || currentGradesList.length === 0) && savedSheetsRaw) {
+      if (needsCoreSeed) {
         try {
-          const parsedSheets = JSON.parse(savedSheetsRaw);
-          if (Array.isArray(parsedSheets) && parsedSheets.length > 0) {
-            const reconstructedGrades: Grade[] = [];
-            for (const sheet of parsedSheets) {
-              const month = sheet.month || 'التاسع';
-              const summaryList = sheet.studentsSummary || sheet.studentResults || [];
-              for (const res of summaryList) {
-                if (res.studentId && Array.isArray(res.scores)) {
-                  for (const sc of res.scores) {
-                    if (sc.subject && sc.score !== null && sc.score !== undefined) {
-                      reconstructedGrades.push({
-                        id: `g_rec_${res.studentId}_${sc.subject}_${month}`.replace(/\s+/g, '_'),
-                        studentId: res.studentId,
-                        subject: sc.subject,
-                        examName: month,
-                        score: Number(sc.score) || 0,
-                        maxScore: Number(sc.maxScore) || 100,
-                        date: sheet.dateSent ? sheet.dateSent.slice(0, 10) : new Date().toISOString().slice(0, 10),
-                        teacherId: 'director',
-                        examType: 'monthly'
-                      });
+          const seed = await loadInitialSeedBundle();
+          if (seed.teachers.length > 0) {
+            const merged = mergeTeachersWithSeed(savedTeachers, seed.teachers);
+            setTeachers(merged);
+          }
+          if (seed.classes.length > 0) {
+            const merged = mergeClassesWithSeed(savedClasses, seed.classes);
+            setClasses(merged);
+          }
+          if (seed.parents.length > 0) {
+            const merged = mergeParentsWithSeed(savedParents, seed.parents);
+            setParents(merged);
+          }
+          if (seed.students.length > 0) {
+            const merged = mergeStudentsWithSeed(savedStudents, seed.students);
+            const cleaned = sanitizeAndDeduplicateStudents(merged).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
+            setStudents(cleaned);
+          }
+          try {
+            localStorage.setItem('school_seed_applied_v1', '1');
+          } catch {}
+        } catch {}
+      }
+
+      if (savedGrades.length === 0) {
+        // First try reconstructing from saved sent sheets, else lazy-load backup JSON
+        let reconstructed = false;
+        if (savedSheetsRaw) {
+          try {
+            const parsedSheets = JSON.parse(savedSheetsRaw);
+            if (Array.isArray(parsedSheets) && parsedSheets.length > 0) {
+              const reconstructedGrades: Grade[] = [];
+              for (const sheet of parsedSheets) {
+                const month = sheet.month || 'التاسع';
+                const summaryList = sheet.studentsSummary || sheet.studentResults || [];
+                for (const res of summaryList) {
+                  if (res.studentId && Array.isArray(res.scores)) {
+                    for (const sc of res.scores) {
+                      if (sc.subject && sc.score !== null && sc.score !== undefined) {
+                        reconstructedGrades.push({
+                          id: `g_rec_${res.studentId}_${sc.subject}_${month}`.replace(/\s+/g, '_'),
+                          studentId: res.studentId,
+                          subject: sc.subject,
+                          examName: month,
+                          score: Number(sc.score) || 0,
+                          maxScore: Number(sc.maxScore) || 100,
+                          date: sheet.dateSent ? sheet.dateSent.slice(0, 10) : new Date().toISOString().slice(0, 10),
+                          teacherId: 'director',
+                          examType: 'monthly'
+                        });
+                      }
                     }
                   }
                 }
               }
+              if (reconstructedGrades.length > 0) {
+                setGrades(reconstructedGrades);
+                try { localStorage.setItem('school_grades', JSON.stringify(reconstructedGrades)); } catch {}
+                reconstructed = true;
+              }
             }
-            if (reconstructedGrades.length > 0) {
-              setGrades(reconstructedGrades);
-              try { localStorage.setItem('school_grades', JSON.stringify(reconstructedGrades)); } catch {}
-            }
-          }
-        } catch {}
+          } catch {}
+        }
+        if (!reconstructed) {
+          loadFirestoreBackupBundle()
+            .then((backup) => {
+              if (Array.isArray(backup.grades) && backup.grades.length > 0) {
+                setGrades((prev) => (prev.length === 0 ? backup.grades : prev));
+              }
+            })
+            .catch(() => {});
+        }
       }
     };
 
-    reloadFromLocalStorage();
+    // Defer heavy IndexedDB hydration & Firestore cache sync until right after first paint
+    const startupTimer = setTimeout(() => {
+      hydrateFromOfflineVault()
+        .then((restored) => {
+          if (restored) reloadFromLocalStorage();
+        })
+        .catch(() => {});
 
-    // Hydrate from durable IndexedDB offline vault in case localStorage was evicted or hit 5MB limit
-    hydrateFromOfflineVault().then((restored) => {
-      if (restored) reloadFromLocalStorage();
-    }).catch(() => {});
-
-    // Cache-first startup sync: displays IndexedDB persistentLocalCache immediately (0 server reads for cached docs)
-    forceRefreshDataFromFirestore({ forceServer: false }).then(() => {
-      reloadFromLocalStorage();
-    }).catch(err => {
-      console.warn('Startup Firestore cache refresh notice:', err);
-    });
+      forceRefreshDataFromFirestore({ forceServer: false })
+        .then(() => {
+          reloadFromLocalStorage();
+        })
+        .catch((err) => {
+          console.warn('Startup Firestore cache refresh notice:', err);
+        });
+    }, 50);
 
     return () => {
+      clearTimeout(startupTimer);
       window.removeEventListener('school_storage_update', handleStorageUpdate);
     };
   }, []);
@@ -1041,9 +860,21 @@ export default function App() {
       );
       const latest = sortedIncoming.find(m => {
         if (m.read || m.receiverRole === 'parent') return false;
+        const msgId = String(m.id || '');
+        const msgContent = String(m.content || '');
+        if (
+          m.category === 'grade_report' ||
+          msgId.startsWith('m_grades_') ||
+          msgId.startsWith('m_t_appr_') ||
+          msgId.startsWith('m_ack_') ||
+          msgContent.includes('[إشعار كشف درجات]') ||
+          msgContent.includes('[اعتماد كشف الدرجات')
+        ) {
+          return false;
+        }
         const msgTime = new Date(m.date || 0).getTime();
         if (!msgTime || Math.abs(nowMs - msgTime) > RECENT_MSG_WINDOW_MS) return false;
-        if ((m.content || '').includes('تجربة إشعار') || (m.content || '').includes('تجربة تفعيل النظام')) return false;
+        if (msgContent.includes('تجربة إشعار') || msgContent.includes('تجربة تفعيل النظام')) return false;
         if (activePortal === 'director') return m.receiverRole === 'director' || m.receiverId === 'director';
         if (activePortal === 'teacher') {
           return (
@@ -1095,8 +926,8 @@ export default function App() {
         const patches: string[] = JSON.parse(stored);
         patches.forEach((codeStr, idx) => {
           try {
-            eval(codeStr);
-            console.log(`Successfully booted loaded system patch #${idx + 1}`);
+            const runner = new Function(codeStr);
+            runner();
           } catch (err) {
             console.error(`Error loading stored patch #${idx + 1}:`, err);
           }
@@ -1439,15 +1270,16 @@ export default function App() {
   };
 
   // 10. System reset simulator data helper
-  const handleResetData = () => {
+  const handleResetData = async () => {
     if (window.confirm('هل تريد بالتأكيد إعادة النظام للحالة الافتراضية وحذف التعديلات؟')) {
       localStorage.clear();
-      setTeachers(INITIAL_TEACHERS);
-      setClasses(INITIAL_CLASSES);
-      setParents(INITIAL_PARENTS);
-      setStudents(INITIAL_STUDENTS);
+      const [seed, backup] = await Promise.all([loadInitialSeedBundle(), loadFirestoreBackupBundle()]);
+      setTeachers(seed.teachers);
+      setClasses(seed.classes);
+      setParents(seed.parents);
+      setStudents(seed.students);
       setAttendance(INITIAL_ATTENDANCE);
-      setGrades(INITIAL_GRADES);
+      setGrades(backup.grades);
       setAnnouncements(INITIAL_ANNOUNCEMENTS);
       setMessages(INITIAL_MESSAGES);
       setExcuses(INITIAL_EXCUSES);
@@ -1709,80 +1541,89 @@ export default function App() {
             key={activePortal}
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.25 }}
+            transition={{ duration: 0.2 }}
             className="w-full min-h-[640px]"
           >
-            {activePortal === 'director' && (
-              <DirectorPortal
-                teachers={teachers}
-                students={students}
-                classes={classes}
-                excuses={excuses}
-                announcements={announcements}
-                grades={grades}
-                parents={parents}
-                attendance={attendance}
-                messages={messages}
-                setStudents={safeSetStudents}
-                setTeachers={setTeachers}
-                setParents={setParents}
-                setGrades={setGrades}
-                setClasses={setClasses}
-                setAttendance={setAttendance}
-                setAnnouncements={setAnnouncements}
-                setMessages={setMessages}
-                setExcuses={setExcuses}
-                addTeacher={addTeacher}
-                addStudent={addStudent}
-                addAnnouncement={addAnnouncement}
-                updateExcuseStatus={updateExcuseStatus}
-                directorPassword={directorPassword}
-                changeDirectorPassword={changeDirectorPassword}
-                updateTeacherPassword={updateTeacherPassword}
-                examQuestions={examQuestions}
-                saveExamQuestionPaper={saveExamQuestionPaper}
-                deleteExamQuestionPaper={deleteExamQuestionPaper}
-              />
-            )}
+            <Suspense
+              fallback={
+                <div className="w-full min-h-[420px] flex flex-col items-center justify-center gap-3 bg-white rounded-2xl border border-slate-200 shadow-2xs p-8 text-center">
+                  <div className="w-10 h-10 border-4 border-indigo-100 border-t-indigo-600 rounded-full animate-spin"></div>
+                  <p className="text-sm font-bold text-slate-700">جاري تجهيز البوابة...</p>
+                </div>
+              }
+            >
+              {activePortal === 'director' && (
+                <DirectorPortal
+                  teachers={teachers}
+                  students={students}
+                  classes={classes}
+                  excuses={excuses}
+                  announcements={announcements}
+                  grades={grades}
+                  parents={parents}
+                  attendance={attendance}
+                  messages={messages}
+                  setStudents={safeSetStudents}
+                  setTeachers={setTeachers}
+                  setParents={setParents}
+                  setGrades={setGrades}
+                  setClasses={setClasses}
+                  setAttendance={setAttendance}
+                  setAnnouncements={setAnnouncements}
+                  setMessages={setMessages}
+                  setExcuses={setExcuses}
+                  addTeacher={addTeacher}
+                  addStudent={addStudent}
+                  addAnnouncement={addAnnouncement}
+                  updateExcuseStatus={updateExcuseStatus}
+                  directorPassword={directorPassword}
+                  changeDirectorPassword={changeDirectorPassword}
+                  updateTeacherPassword={updateTeacherPassword}
+                  examQuestions={examQuestions}
+                  saveExamQuestionPaper={saveExamQuestionPaper}
+                  deleteExamQuestionPaper={deleteExamQuestionPaper}
+                />
+              )}
 
-            {activePortal === 'teacher' && (
-              <TeacherPortal
-                teachers={teachers}
-                students={students}
-                classes={classes}
-                attendance={attendance}
-                grades={grades}
-                parents={parents}
-                messages={messages}
-                announcements={announcements}
-                saveAttendance={saveAttendance}
-                saveGrade={saveGrade}
-                sendMessage={sendMessage}
-                setMessages={setMessages}
-                setGrades={setGrades}
-                addAnnouncement={addAnnouncement}
-                examQuestions={examQuestions}
-                saveExamQuestionPaper={saveExamQuestionPaper}
-                deleteExamQuestionPaper={deleteExamQuestionPaper}
-              />
-            )}
+              {activePortal === 'teacher' && (
+                <TeacherPortal
+                  teachers={teachers}
+                  students={students}
+                  classes={classes}
+                  attendance={attendance}
+                  grades={grades}
+                  parents={parents}
+                  messages={messages}
+                  announcements={announcements}
+                  saveAttendance={saveAttendance}
+                  saveGrade={saveGrade}
+                  sendMessage={sendMessage}
+                  setMessages={setMessages}
+                  setGrades={setGrades}
+                  addAnnouncement={addAnnouncement}
+                  examQuestions={examQuestions}
+                  saveExamQuestionPaper={saveExamQuestionPaper}
+                  deleteExamQuestionPaper={deleteExamQuestionPaper}
+                />
+              )}
 
-            {activePortal === 'parent' && (
-              <ParentPortal
-                parents={parents}
-                students={students}
-                classes={classes}
-                teachers={teachers}
-                attendance={attendance}
-                grades={grades}
-                announcements={announcements}
-                messages={messages}
-                excuses={excuses}
-                submitExcuse={submitExcuse}
-                sendMessageFromParent={sendMessageFromParent}
-                setMessages={setMessages}
-              />
-            )}
+              {activePortal === 'parent' && (
+                <ParentPortal
+                  parents={parents}
+                  students={students}
+                  classes={classes}
+                  teachers={teachers}
+                  attendance={attendance}
+                  grades={grades}
+                  announcements={announcements}
+                  messages={messages}
+                  excuses={excuses}
+                  submitExcuse={submitExcuse}
+                  sendMessageFromParent={sendMessageFromParent}
+                  setMessages={setMessages}
+                />
+              )}
+            </Suspense>
           </motion.div>
         </div>
       </main>

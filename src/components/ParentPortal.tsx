@@ -48,9 +48,9 @@ import {
   Share2,
   RefreshCw
 } from 'lucide-react';
-import * as XLSX from 'xlsx';
+import { loadXlsx } from '../lib/xlsxLoader';
 import { Parent, Student, Attendance, Grade, Announcement, Message, AbsenceExcuse, Teacher, Class, SentGradeSheet } from '../types';
-import { INITIAL_STUDENTS, INITIAL_CLASSES, INITIAL_TEACHERS, INITIAL_SENT_GRADE_SHEETS, DEFAULT_EVALUATION_MONTH } from '../data';
+import { DEFAULT_EVALUATION_MONTH, loadInitialSeedBundle, loadFirestoreBackupBundle } from '../data';
 import { PortalDesignerBadge } from './PortalDesignerBadge';
 import { GradeSheetSignatures } from './GradeSheetSignatures';
 import { printElementById, downloadElementAsImage, exportElementAsPdf } from '../lib/printUtils';
@@ -172,12 +172,6 @@ export const findStudentByUnifiedInput = (input: string | undefined | null, list
     }
   } catch {}
 
-  // Step 3: Search in INITIAL_STUDENTS as guaranteed permanent fallback
-  if (Array.isArray(INITIAL_STUDENTS) && list !== INITIAL_STUDENTS) {
-    const res = searchInList(INITIAL_STUDENTS);
-    if (res) return res;
-  }
-
   return undefined;
 };
 
@@ -230,7 +224,6 @@ export default function ParentPortal({
   const activeStudentObj: Student | undefined = 
     activeDirectStudent || 
     findStudentByUnifiedInput(loggedInStudentId, students) ||
-    findStudentByUnifiedInput(loggedInStudentId, INITIAL_STUDENTS) ||
     (() => {
       try {
         const raw = localStorage.getItem('school_students');
@@ -244,11 +237,6 @@ export default function ParentPortal({
       return undefined;
     })() ||
     students.find(s => 
-      (s && s.id && s.id === loggedInStudentId) || 
-      (s && s.unifiedNo && String(s.unifiedNo).trim() === loggedInStudentId.trim()) ||
-      (s && s.rollNo && String(s.rollNo).trim() === loggedInStudentId.trim())
-    ) ||
-    INITIAL_STUDENTS.find(s => 
       (s && s.id && s.id === loggedInStudentId) || 
       (s && s.unifiedNo && String(s.unifiedNo).trim() === loggedInStudentId.trim()) ||
       (s && s.rollNo && String(s.rollNo).trim() === loggedInStudentId.trim())
@@ -323,7 +311,7 @@ export default function ParentPortal({
     ? null 
     : parseFloat(displayPassGrade) || null;
 
-  const handleExportStudentGradesExcel = (studentName: string, childClass: string, targetMonth: string, gradeValues: any[], avg: string | null, estimation: string) => {
+  const handleExportStudentGradesExcel = async (studentName: string, childClass: string, targetMonth: string, gradeValues: any[], avg: string | null, estimation: string) => {
     const data = gradeValues.map((gv, idx) => ({
       'م': idx + 1,
       'المادة الدراسية': gv.subject,
@@ -342,13 +330,14 @@ export default function ParentPortal({
       'التقدير والمستوى': estimation
     });
 
+    const XLSX = await loadXlsx();
     const worksheet = XLSX.utils.json_to_sheet(data);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'كشف الدرجات');
     XLSX.writeFile(workbook, `كشف_درجات_${studentName.replace(/\s+/g, '_')}_شهر_${targetMonth}.xlsx`);
   };
 
-  const handleExportCohortStudentsExcel = (childClass: string) => {
+  const handleExportCohortStudentsExcel = async (childClass: string) => {
     const targetStudents = students.filter(s => s.classId === activeChild?.classId || s.shift === activeChild?.shift);
     const listToExport = targetStudents.length > 0 ? targetStudents : students;
 
@@ -360,6 +349,7 @@ export default function ParentPortal({
       'الفوج': s.shift === 'evening' ? 'الفوج المسائي' : 'الفوج الصباحي'
     }));
 
+    const XLSX = await loadXlsx();
     const worksheet = XLSX.utils.json_to_sheet(data);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'حصر أسماء الفوج');
@@ -388,8 +378,19 @@ export default function ParentPortal({
         }
       }
     } catch {}
-    return deduplicateGradeSheets(INITIAL_SENT_GRADE_SHEETS as SentGradeSheet[]);
+    return [];
   });
+
+  // Load backup sheets lazily ONLY when localStorage had no sent sheets
+  React.useEffect(() => {
+    if (sentGradeSheets.length === 0) {
+      loadFirestoreBackupBundle().then((backup) => {
+        if (Array.isArray(backup.sentGradeSheets) && backup.sentGradeSheets.length > 0) {
+          setSentGradeSheets((prev) => prev.length === 0 ? deduplicateGradeSheets(backup.sentGradeSheets as SentGradeSheet[]) : prev);
+        }
+      }).catch(() => {});
+    }
+  }, []);
 
   const [directMessages, setDirectMessages] = useState<Message[]>(() => {
     try {
@@ -668,13 +669,10 @@ export default function ParentPortal({
     }
   }, [selectedParentId, selectedChildId]);
 
-  const activeChildClass = classes.find(c => c.id === activeChild?.classId) ||
-                           INITIAL_CLASSES.find(c => c.id === activeChild?.classId);
+  const activeChildClass = classes.find(c => c.id === activeChild?.classId);
   const activeChildTeacher = 
     teachers.find(t => t.id === activeChildClass?.teacherId) ||
     teachers.find(t => activeChildClass?.id && t.classes && t.classes.includes(activeChildClass.id)) ||
-    INITIAL_TEACHERS.find(t => t.id === activeChildClass?.teacherId) ||
-    INITIAL_TEACHERS[0] ||
     teachers[0];
 
   // --- Auto-Login & Save Phone Number States ---
@@ -1518,9 +1516,8 @@ ${url}
     setLoginError('');
 
     try {
-      // 1. Look up student across students list, localStorage, and INITIAL_STUDENTS (0ms instant lookup)
-      let foundStudent = findStudentByUnifiedInput(cleanInput, students) ||
-                         findStudentByUnifiedInput(cleanInput, INITIAL_STUDENTS);
+      // 1. Look up student across students list & localStorage (0ms instant lookup)
+      let foundStudent = findStudentByUnifiedInput(cleanInput, students);
 
       // 2. Look up in localStorage school_students if not found
       if (!foundStudent) {
@@ -1571,6 +1568,14 @@ ${url}
         }
       }
 
+      // 3.5 Fallback to lazy seed bundle if not found yet
+      if (!foundStudent) {
+        try {
+          const seed = await loadInitialSeedBundle();
+          foundStudent = findStudentByUnifiedInput(cleanInput, seed.students);
+        } catch {}
+      }
+
       // 4. Fast single-doc fetch from Firestore with short 1.2s timeout only if not found locally
       if (!foundStudent) {
         try {
@@ -1607,7 +1612,7 @@ ${url}
       }
     } catch (err) {
       console.error('Error during parent login:', err);
-      const fallback = findStudentByUnifiedInput(cleanInput, students) || findStudentByUnifiedInput(cleanInput, INITIAL_STUDENTS);
+      const fallback = findStudentByUnifiedInput(cleanInput, students);
       if (fallback) {
         setActiveDirectStudent(fallback);
         localStorage.setItem('parent_portal_active_student_obj', JSON.stringify(fallback));

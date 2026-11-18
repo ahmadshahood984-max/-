@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Suspense } from 'react';
 import { 
   Users, 
   BookOpen, 
@@ -43,9 +43,11 @@ import {
   Eye,
   ClipboardList
 } from 'lucide-react';
-import * as XLSX from 'xlsx';
+import { loadXlsx } from '../lib/xlsxLoader';
 import { buildWhatsAppUrl, openWhatsAppDirectly, getWhatsAppSentRecords, recordWhatsAppSent, WhatsAppSentRecord } from '../lib/whatsapp';
-import { WhatsAppMessageCustomizerModal } from './WhatsAppMessageCustomizerModal';
+const WhatsAppMessageCustomizerModal = React.lazy(() =>
+  import('./WhatsAppMessageCustomizerModal').then((m) => ({ default: m.WhatsAppMessageCustomizerModal }))
+);
 import { PortalDesignerBadge } from './PortalDesignerBadge';
 import { Teacher, Student, Class, Attendance, Grade, Parent, Message, Announcement, ExamQuestionPaper, SentGradeSheet, SentGradeSheetStudentSummary } from '../types';
 import { sanitizeAndDeduplicateStudents, getSafeStudentKey } from '../lib/studentDeduplicator';
@@ -704,18 +706,6 @@ export default function TeacherPortal({
     const updatedSentSheets = deduplicateGradeSheetsPreservingTeachers([sheetRecord, ...filteredSheets]);
     setSentGradeSheets(updatedSentSheets);
 
-    // Send notification message to Director (with explicit cohort shift)
-    sendMessage({
-      senderId: selectedTeacherId,
-      senderName: activeTeacher?.name ? `المعلم ${activeTeacher.name}` : 'معلم الصف',
-      senderRole: 'teacher',
-      receiverId: 'director',
-      receiverName: 'المدير العام (إدارة المدرسة)',
-      receiverRole: 'director',
-      shift: targetClass.shift || activeTeacher?.shift || 'morning',
-      content: `📢 [إشعار كشف درجات]\nقام المعلم ${activeTeacher?.name || ''} برصد وتعبئة كشف درجات (${targetClass.name}) لشهر (${currentEvaluationMonth}) بإجمالي (${classStudents.length} طالب)، وهو جاهز بانتظار اعتمادكم الكريم وإرسال النتائج لأولياء الأمور 📊🚀`
-    });
-
     // Cloud persist directly and await completion (only Director approval publishes to consolidated parent collection)
     await Promise.all([
       persistDirectToFirestore('school_sent_grade_sheets', updatedSentSheets),
@@ -728,10 +718,10 @@ export default function TeacherPortal({
 
     setSheetSuccessMessage(`🎉 تم بنجاح حفظ وإرسال كشف درجات صف (${targetClass.name}) لشهر (${currentEvaluationMonth}) إلى المدير العام بانتظار الاعتماد الرسمي! 🚀`);
     setTimeout(() => setSheetSuccessMessage(null), 6000);
-    alert(`🎉 تم بنجاح حفظ وإرسال كشف الدرجات للمدير العام!\n\n🏫 الصف: ${targetClass.name}\n📅 الشهر: ${currentEvaluationMonth}\n👨‍🎓 عدد الطلاب: ${classStudents.length} طالب\n\n✅ تم إشعار المدير العام وربط الكشف بالكامل في سجل الكشوفات بانتظار اعتماده وإرساله لأولياء الأمور! 🚀`);
+    alert(`🎉 تم بنجاح حفظ وإرسال كشف الدرجات للمدير العام!\n\n🏫 الصف: ${targetClass.name}\n📅 الشهر: ${currentEvaluationMonth}\n👨‍🎓 عدد الطلاب: ${classStudents.length} طالب\n\n✅ تم ربط الكشف بالكامل في سجل كشوفات المدير العام بانتظار اعتماده وإرساله لأولياء الأمور! 🚀`);
   };
 
-  const handleExportTeacherClassExcel = () => {
+  const handleExportTeacherClassExcel = async () => {
     if (!selectedClassId) {
       alert('الرجاء اختيار الصف أولاً.');
       return;
@@ -787,6 +777,7 @@ export default function TeacherPortal({
       return row;
     });
 
+    const XLSX = await loadXlsx();
     const worksheet = XLSX.utils.json_to_sheet(data);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'كشف الدرجات');
@@ -3810,17 +3801,19 @@ export default function TeacherPortal({
         )}
         {/* WhatsApp Customizer Modal for Teacher */}
         {waModalState && (
-          <WhatsAppMessageCustomizerModal
-            isOpen={waModalState.isOpen}
-            onClose={() => setWaModalState(null)}
-            studentName={waModalState.studentName}
-            studentId={waModalState.studentId}
-            recipientPhone={waModalState.recipientPhone}
-            initialMessage={waModalState.initialMessage}
-            defaultTemplateText={waModalState.defaultTemplateText}
-            templateStorageKey="school_whatsapp_behavior_template"
-            onConfirmSend={handleConfirmSendWhatsAppTeacher}
-          />
+          <Suspense fallback={null}>
+            <WhatsAppMessageCustomizerModal
+              isOpen={waModalState.isOpen}
+              onClose={() => setWaModalState(null)}
+              studentName={waModalState.studentName}
+              studentId={waModalState.studentId}
+              recipientPhone={waModalState.recipientPhone}
+              initialMessage={waModalState.initialMessage}
+              defaultTemplateText={waModalState.defaultTemplateText}
+              templateStorageKey="school_whatsapp_behavior_template"
+              onConfirmSend={handleConfirmSendWhatsAppTeacher}
+            />
+          </Suspense>
         )}
 
         {/* Welcome Greeting Modal for Teacher */}

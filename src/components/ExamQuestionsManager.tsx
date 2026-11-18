@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useState, Suspense } from 'react';
 import { 
   FileText, 
   Plus, 
@@ -26,9 +26,13 @@ import {
   Send
 } from 'lucide-react';
 import { ExamQuestionPaper, Teacher, Class } from '../types';
-import { ExamQuestionPaperEditor } from './ExamQuestionPaperEditor';
-import { exportExamPaperToWord } from '../lib/wordExport';
-import { ExamExportModal } from './ExamExportModal';
+
+const ExamQuestionPaperEditor = React.lazy(() =>
+  import('./ExamQuestionPaperEditor').then((m) => ({ default: m.ExamQuestionPaperEditor }))
+);
+const ExamExportModal = React.lazy(() =>
+  import('./ExamExportModal').then((m) => ({ default: m.ExamExportModal }))
+);
 
 interface ExamQuestionsManagerProps {
   currentUserRole: 'teacher' | 'director';
@@ -120,22 +124,24 @@ export const ExamQuestionsManager: React.FC<ExamQuestionsManagerProps> = ({
           </button>
         </div>
 
-        <ExamQuestionPaperEditor
-          paper={editingPaper}
-          currentUserRole={currentUserRole}
-          currentTeacherName={currentTeacher?.name || 'المعلم'}
-          currentTeacherId={currentTeacher?.id || 't1'}
-          defaultSubject={currentTeacher?.subject || availableSubjects[0] || 'الرياضيات'}
-          defaultClassName={currentClass?.name || 'الصف الأول'}
-          defaultClassId={currentClass?.id || 'c1'}
-          availableClasses={classes.map(c => ({ id: c.id, name: c.name }))}
-          availableSubjects={availableSubjects}
-          onSave={handleSave}
-          onClose={() => {
-            setEditingPaper(null);
-            setIsCreatingNew(false);
-          }}
-        />
+        <Suspense fallback={<div className="p-8 text-center text-sm font-bold text-slate-500">جاري تحميل محرر الأسئلة...</div>}>
+          <ExamQuestionPaperEditor
+            paper={editingPaper}
+            currentUserRole={currentUserRole}
+            currentTeacherName={currentTeacher?.name || 'المعلم'}
+            currentTeacherId={currentTeacher?.id || 't1'}
+            defaultSubject={currentTeacher?.subject || availableSubjects[0] || 'الرياضيات'}
+            defaultClassName={currentClass?.name || 'الصف الأول'}
+            defaultClassId={currentClass?.id || 'c1'}
+            availableClasses={classes.map(c => ({ id: c.id, name: c.name }))}
+            availableSubjects={availableSubjects}
+            onSave={handleSave}
+            onClose={() => {
+              setEditingPaper(null);
+              setIsCreatingNew(false);
+            }}
+          />
+        </Suspense>
       </div>
     );
   }
@@ -413,11 +419,13 @@ export const ExamQuestionsManager: React.FC<ExamQuestionsManagerProps> = ({
 
       {/* Mobile-Friendly Word & PDF Export Modal */}
       {exportingPaper && (
-        <ExamExportModal
-          paper={exportingPaper}
-          isOpen={true}
-          onClose={() => setExportingPaper(null)}
-        />
+        <Suspense fallback={null}>
+          <ExamExportModal
+            paper={exportingPaper}
+            isOpen={true}
+            onClose={() => setExportingPaper(null)}
+          />
+        </Suspense>
       )}
     </div>
   );

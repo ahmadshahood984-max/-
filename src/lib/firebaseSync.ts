@@ -1301,10 +1301,11 @@ export function ensureParentRealtimeListeners() {
   attachRealtimeListenersForKeys(PARENT_REALTIME_KEYS);
 }
 
-export function setupFirebaseSync() {
-  if (setupInitialized) return;
-  setupInitialized = true;
-  console.log('Initializing Firebase real-time database synchronization with durable offline vault protection...');
+let backgroundSyncStarted = false;
+
+export function startDeferredFirebaseSync() {
+  if (backgroundSyncStarted) return;
+  backgroundSyncStarted = true;
 
   // Request persistent storage & hydrate any offline IndexedDB records
   requestPersistentStorage().catch(() => {});
@@ -1313,6 +1314,27 @@ export function setupFirebaseSync() {
       flushPendingLocalSyncKeys().catch(() => {});
     }
   }).catch(() => {});
+
+  if (isFirestoreQuotaExceeded()) {
+    console.log('[Firestore Sync] Quota limit is active; running in pure offline / broadcast local mode.');
+    return;
+  }
+
+  // Set up automatic Firestore Real-time Listeners across portals
+  // Parent/Student portal subscribes ONLY to essential live communication & record keys;
+  // Teacher & Director portals subscribe to all SYNC_KEYS.
+  if (isStudentOrParentPortal()) {
+    console.log('[Firestore Sync] Parent/Student session active: attaching scoped real-time listeners for automatic updates.');
+    attachRealtimeListenersForKeys(PARENT_REALTIME_KEYS);
+    return;
+  }
+
+  attachRealtimeListenersForKeys(SYNC_KEYS);
+}
+
+export function setupFirebaseSync(options?: { deferNetwork?: boolean }) {
+  if (setupInitialized) return;
+  setupInitialized = true;
 
   if (typeof window !== 'undefined') {
     window.addEventListener('online', () => {
@@ -1435,19 +1457,7 @@ export function setupFirebaseSync() {
     originalRemoveItem(key);
   };
 
-  if (isFirestoreQuotaExceeded()) {
-    console.log('[Firestore Sync] Quota limit is active; running in pure offline / broadcast local mode.');
-    return;
+  if (!options?.deferNetwork) {
+    startDeferredFirebaseSync();
   }
-
-  // 3. Set up automatic Firestore Real-time Listeners across portals
-  // Parent/Student portal subscribes ONLY to essential live communication & record keys;
-  // Teacher & Director portals subscribe to all SYNC_KEYS.
-  if (isStudentOrParentPortal()) {
-    console.log('[Firestore Sync] Parent/Student session active: attaching scoped real-time listeners for automatic updates.');
-    attachRealtimeListenersForKeys(PARENT_REALTIME_KEYS);
-    return;
-  }
-
-  attachRealtimeListenersForKeys(SYNC_KEYS);
 }

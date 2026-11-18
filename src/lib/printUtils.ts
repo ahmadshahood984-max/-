@@ -1,5 +1,5 @@
-import html2canvas from 'html2canvas';
-import jsPDF from 'jspdf';
+// html2canvas and jsPDF are dynamically imported only when exporting images/PDFs
+// so they do not delay initial app startup.
 
 // Browser-based 2D canvas context for accurate parsing and conversion of modern CSS colors (oklab, oklch, color(), lab, etc.) to standard rgb/rgba
 let helperCanvas: HTMLCanvasElement | null = null;
@@ -313,6 +313,7 @@ export const captureElementToDataUrl = async (elementId: string): Promise<string
       return null;
     }
 
+    const { default: html2canvas } = await import('html2canvas');
     const canvas = await html2canvas(element, {
       scale: 2,
       useCORS: true,
@@ -349,6 +350,7 @@ export const downloadElementAsImage = async (
     }
 
     // Capture element with html2canvas at 2x scale with oklch sanitizer
+    const { default: html2canvas } = await import('html2canvas');
     const canvas = await html2canvas(element, {
       scale: 2,
       useCORS: true,
@@ -438,6 +440,10 @@ export const exportElementAsPdf = async (
     }
 
     // Capture element with html2canvas at high resolution (scale 2.5)
+    const [{ default: html2canvas }, { default: jsPDF }] = await Promise.all([
+      import('html2canvas'),
+      import('jspdf')
+    ]);
     const canvas = await html2canvas(element, {
       scale: 2.5,
       useCORS: true,

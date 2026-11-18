@@ -88,8 +88,25 @@ export default defineConfig(() => {
       },
     },
     build: {
-      target: ['chrome70', 'safari12', 'firefox60', 'edge79', 'es2015'],
-      cssTarget: ['chrome70', 'safari12', 'firefox60', 'edge79'],
+      target: ['es2020', 'chrome87', 'safari14', 'firefox78', 'edge88'],
+      cssTarget: ['chrome87', 'safari14', 'firefox78', 'edge88'],
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (id.includes('seedData.json') || id.includes('firestoreBackup.json')) {
+              return 'seed-data';
+            }
+            if (id.includes('node_modules')) {
+              if (id.includes('xlsx')) return 'vendor-xlsx';
+              if (id.includes('jspdf') || id.includes('html2canvas')) return 'vendor-pdf';
+              if (id.includes('firebase')) return 'vendor-firebase';
+              if (id.includes('motion') || id.includes('framer-motion')) return 'vendor-motion';
+              if (id.includes('lucide-react')) return 'vendor-icons';
+              if (id.includes('react-dom') || id.includes('/react/')) return 'vendor-react';
+            }
+          }
+        }
+      }
     },
     server: {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.

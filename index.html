@@ -12,8 +12,25 @@
     <title>المدرسة الدولية - حلب مدينة مارع</title>
     <meta name="description" content="النظام المدرسي المتكامل للمدرسة الدولية في حلب - مدينة مارع يربط بين المدير والمعلم وولي الأمر بمزامنة فورية كاملة." />
   </head>
-  <body class="notranslate select-none" translate="no">
-    <div id="root"></div>
+  <body class="notranslate select-none bg-slate-100" translate="no">
+    <div id="root">
+      <div style="min-height:100vh;display:flex;flex-direction:column;background:#f1f5f9;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;direction:rtl;">
+        <div style="background:#ffffff;border-bottom:1px solid #e2e8f0;padding:12px 24px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 1px 2px rgba(0,0,0,0.03);">
+          <div style="display:flex;align-items:center;gap:12px;">
+            <div style="width:40px;height:40px;border-radius:12px;background:#4338ca;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800;font-size:18px;">م</div>
+            <div>
+              <div style="font-size:16px;font-weight:700;color:#1e293b;line-height:1.2;">المدرسة الدولية</div>
+              <div style="font-size:11px;color:#64748b;margin-top:2px;">حلب - مدينة مارع</div>
+            </div>
+          </div>
+        </div>
+        <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px;text-align:center;">
+          <div style="width:42px;height:42px;border:3.5px solid #e0e7ff;border-top-color:#4338ca;border-radius:50%;animation:appBootSpin 0.7s linear infinite;"></div>
+          <div style="font-size:14px;font-weight:700;color:#334155;">جاري فتح المنصة...</div>
+        </div>
+      </div>
+      <style>@keyframes appBootSpin{to{transform:rotate(360deg)}}</style>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, Suspense } from 'react';
 import { 
   Users, 
   UserSquare2, 
@@ -71,16 +71,18 @@ import {
 import { printElementById, downloadElementAsImage, exportElementAsPdf } from '../lib/printUtils';
 import { buildWhatsAppUrl, openWhatsAppDirectly, getWhatsAppSentRecords, recordWhatsAppSent, WhatsAppSentRecord } from '../lib/whatsapp';
 import { generateEvaluationCardImage, shareOrDownloadEvaluationImage } from '../lib/generateCardImage';
-import { WhatsAppMessageCustomizerModal } from './WhatsAppMessageCustomizerModal';
+const WhatsAppMessageCustomizerModal = React.lazy(() =>
+  import('./WhatsAppMessageCustomizerModal').then((m) => ({ default: m.WhatsAppMessageCustomizerModal }))
+);
 import { PortalDesignerBadge } from './PortalDesignerBadge';
 import { Teacher, Student, Parent, Class, AbsenceExcuse, Announcement, Grade, Attendance, Message, SentGradeSheet, SentGradeSheetStudentSummary, ExamQuestionPaper } from '../types';
 import { sanitizeAndDeduplicateStudents, getSafeStudentKey } from '../lib/studentDeduplicator';
 import { GradeSheetSignatures } from './GradeSheetSignatures';
-import { SealAndSignaturesModal } from './SealAndSignaturesModal';
+const SealAndSignaturesModal = React.lazy(() => import('./SealAndSignaturesModal'));
 import { GradeCellInput } from './GradeCellInput';
 import { applyGradePartUpdate, computeGradeTotal, hasSubGradeParts } from '../lib/gradeSplitUtils';
 import { motion, AnimatePresence } from 'motion/react';
-import * as XLSX from 'xlsx';
+import { loadXlsx } from '../lib/xlsxLoader';
 import { db } from '../lib/firebase';
 import { collection, addDoc, setDoc, deleteDoc, doc, serverTimestamp, writeBatch, getDocs } from 'firebase/firestore';
 import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead, checkDailyRollover, fetchCentralizedConsumptionOnce, resetCentralizedFirestoreConsumption, calibrateCentralConsumptionBaseline, getRecentUtcDates, getTimeUntilFirebaseQuotaReset, SPARK_DAILY_READ_LIMIT, SPARK_DAILY_WRITE_LIMIT, FIREBASE_PROJECT_ID, FIREBASE_DATABASE_ID } from '../lib/firestoreTracker';
@@ -1092,21 +1094,40 @@ export default function DirectorPortal({
     return () => window.removeEventListener('school_storage_update', handleStorage);
   }, []);
 
+  const isAutoGradeNotificationMessage = (m: Partial<Message> | null | undefined): boolean => {
+    if (!m) return false;
+    if (m.category === 'grade_report') return true;
+    const id = String(m.id || '');
+    if (id.startsWith('m_grades_') || id.startsWith('m_t_appr_') || id.startsWith('m_ack_')) return true;
+    const content = String(m.content || '');
+    return (
+      content.includes('[إشعار كشف درجات]') ||
+      content.includes('[اعتماد كشف الدرجات') ||
+      content.includes('كشف رصد وتقرير درجات معتمد') ||
+      content.includes('كشف التقييم والنتائج المعتمد لشهر')
+    );
+  };
+
+  useEffect(() => {
+    if (!Array.isArray(messages) || messages.length === 0) return;
+    if (!messages.some(isAutoGradeNotificationMessage)) return;
+    const cleaned = messages.filter(m => !isAutoGradeNotificationMessage(m));
+    setMessages(cleaned);
+    try {
+      const serialized = JSON.stringify(cleaned);
+      localStorage.setItem('school_messages', serialized);
+      safeDispatchStorageUpdate('school_messages', serialized);
+    } catch {}
+    persistDirectToFirestore('school_messages', cleaned);
+  }, [messages]);
+
   const handleApproveTeacherGradeSheet = async (sheet: SentGradeSheet) => {
     if (!sheet) return;
 
-    const nowIso = new Date().toISOString();
-    const newMessagesList: Message[] = [];
-
     const updatedSummaryList: SentGradeSheetStudentSummary[] = [];
 
-    // Dispatch messages and push notifications to parents for all students in the sheet (Total score ONLY)
+    // Compute total-only summary for parents (no bulk messages or notification bloat)
     for (const stSummary of sheet.studentsSummary) {
-      const studentClass = sheet.className || 'الصف الدراسي';
-      const studentParent = parents.find(p => p.id === stSummary.parentId || p.childrenIds.includes(stSummary.studentId));
-      const receiverParentId = stSummary.parentId || studentParent?.id || 'parent';
-      const receiverParentName = stSummary.parentName || studentParent?.name || 'ولي الأمر';
-
       // Always pull latest live total (المجموع) from grades if available, fallback to sheet summary score
       const liveStudentGrades = grades.filter(
         g => g.studentId === stSummary.studentId && (g.examName === sheet.month || !g.examName)
@@ -1145,89 +1166,6 @@ export default function DirectorPortal({
         estimation: computedEstimation,
         scores: totalOnlyScores
       });
-
-      const scoresDetails = totalOnlyScores.map(sc => {
-        const scoreVal = sc.score !== null && sc.score !== undefined ? sc.score : 'لم ترصد';
-        const scaleSuffix = sc.score !== null && directorMaxGradeType !== 'unspecified' ? ` /${sc.maxScore || 100}` : '';
-        return `• 📘 *${sc.subject}:* ❪ *${scoreVal}*${scaleSuffix} ❫`;
-      }).join('\n');
-
-      let directivesFormatted = '';
-      if (stSummary.teacherNotes && stSummary.directorNotes) {
-        directivesFormatted = `👨‍🏫 *توجيهات المعلم:* ❪ ${stSummary.teacherNotes} ❫\n🏫 *توجيهات الإدارة:* ❪ ${stSummary.directorNotes} ❫`;
-      } else if (stSummary.teacherNotes) {
-        directivesFormatted = `👨‍🏫 *توجيهات المعلم:* ❪ ${stSummary.teacherNotes} ❫`;
-      } else if (stSummary.directorNotes) {
-        directivesFormatted = `🏫 *توجيهات الإدارة:* ❪ ${stSummary.directorNotes} ❫`;
-      } else {
-        directivesFormatted = `✨ نتمنى للطالب دوام التوفيق والتميز العلمي.`;
-      }
-
-      const formattedMessage = `💚 المدرسة الدولية الخاصة 💚
-📜 كشف التقييم والنتائج المعتمد لشهر [${sheet.month}]
-─────────────────────────
-👤 الطالب: ${stSummary.studentName} | 🏫 الصف: ${studentClass}
-🔢 الرقم الموحد: #${stSummary.unifiedNo || stSummary.rollNo || '---'}
-
-📚 نتائج المواد الدراسية:
-${scoresDetails}
-
-📊 المعدل العام: ❪ ${computedAvg} ❫ | 🌟 التقدير العام: ${computedEstimation}
-
-📝 توجيهات وتقارير المتابعة:
-${directivesFormatted}
-─────────────────────────
-🏛️ كشف معتمد وموثق إلكترونياً من الإدارة العامة للمدرسة`;
-
-      const msgId = 'm_grades_appr_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
-      const gradeMsg: Message = {
-        id: msgId,
-        senderId: 'director',
-        senderName: 'المدير العام (إدارة المدرسة)',
-        senderRole: 'director',
-        receiverId: receiverParentId,
-        receiverName: receiverParentName,
-        receiverRole: 'parent',
-        content: formattedMessage,
-        date: nowIso,
-        read: false,
-        studentId: stSummary.studentId,
-        category: 'grade_report',
-        shift: sheet.cohort === 'evening' ? 'evening' : 'morning'
-      };
-
-      newMessagesList.push(gradeMsg);
-
-      if (studentParent?.id) {
-        sendParentPushNotification(studentParent.id, {
-          title: `📊 كشف درجات معتمد: ${stSummary.studentName} - ${sheet.month}`,
-          body: `اعتمدت إدارة المدرسة كشف الدرجات لشهر (${sheet.month}) بمعدل (${computedAvg}) وتقدير (${computedEstimation}). اضغط للمعاينة.`,
-          tag: `grades_${stSummary.studentId}_${sheet.month}`,
-          url: `/?portal=parent&tab=grades&unified=${encodeURIComponent(stSummary.unifiedNo || stSummary.rollNo || stSummary.studentId)}`,
-          msgId: msgId,
-          studentId: stSummary.studentId,
-          studentName: stSummary.studentName,
-          category: 'grades'
-        });
-      }
-    }
-
-    // Notify the teacher that their sheet was approved
-    if (sheet.teacherId) {
-      const teacher = teachers.find(t => t.id === sheet.teacherId);
-      newMessagesList.push({
-        id: 'm_t_appr_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
-        senderId: 'director',
-        senderName: 'المدير العام',
-        senderRole: 'director',
-        receiverId: teacher?.id || sheet.teacherId,
-        receiverName: teacher?.name || sheet.sentBy || 'المعلم',
-        receiverRole: 'teacher',
-        shift: sheet.cohort === 'evening' ? 'evening' : 'morning',
-        content: `🎉 [اعتماد كشف الدرجات]\nتم بحمد الله وتوفيقه اعتماد وتوثيق كشف درجات (${sheet.className}) لشهر (${sheet.month}) وإرسال النتائج والتقارير الرسمية لكافة أولياء الأمور بنجاح! شكراً لجهودكم المتميزة 🌟`,
-        date: nowIso,
-        read: false
-      });
     }
 
     // Update the sheet status to 'approved' with total-only scores for parents
@@ -1244,19 +1182,24 @@ ${directivesFormatted}
     setSentGradeSheets(updatedSentSheets);
     setSelectedSentSheetToView(updatedSheet);
 
-    const updatedMessages = [...newMessagesList, ...messages];
-    setMessages(updatedMessages);
+    const hadAutoGradeMsgs = messages.some(isAutoGradeNotificationMessage);
+    const cleanedMessages = hadAutoGradeMsgs
+      ? messages.filter(m => !isAutoGradeNotificationMessage(m))
+      : messages;
+    if (hadAutoGradeMsgs) {
+      setMessages(cleanedMessages);
+    }
 
-    // Persist
+    // Persist grade sheet & consolidated scores without generating notification/message clutter
     await persistGradeReportBatchDirect({
       grades,
-      messages: updatedMessages,
+      ...(hadAutoGradeMsgs ? { messages: cleanedMessages } : {}),
       sentSheets: updatedSentSheets,
       monthlyEvaluations,
       currentMonth: sheet.month
     });
 
-    alert(`🎉 تم بنجاح اعتماد كشف درجات المعلم وإرسال النتائج لجميع أولياء الأمور!\n\n🏫 الصف: ${sheet.className}\n📅 الشهر: ${sheet.month}\n👨‍🎓 عدد الطلاب: ${sheet.studentCount} طالب وطالبة\n\n✅ تم إرسال الإشعارات والرسائل لكافة أولياء الأمور وإشعار المعلم بالاعتماد! 🚀`);
+    alert(`🎉 تم بنجاح اعتماد كشف درجات المعلم وإتاحته لأولياء الأمور!\n\n🏫 الصف: ${sheet.className}\n📅 الشهر: ${sheet.month}\n👨‍🎓 عدد الطلاب: ${sheet.studentCount} طالب وطالبة\n\n✅ تم اعتماد الكشف وإظهاره في بوابات أولياء الأمور مباشرة دون تراكم إشعارات أو رسائل! 🚀`);
   };
 
   const handleSendMonthlyWhatsApp = (
@@ -1943,7 +1886,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     alert('تم رصد وحفظ سجل حضور وغياب الطلاب بنجاح! وتم إرسال الإشعارات التلقائية لأولياء أمورهم 📲');
   };
 
-  const handleExportAttendanceToExcel = () => {
+  const handleExportAttendanceToExcel = async () => {
     if (!selectedClassForAttendance) return;
     const cls = classes.find(c => c.id === selectedClassForAttendance);
     if (!cls) return;
@@ -1966,6 +1909,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       };
     });
 
+    const XLSX = await loadXlsx();
     const worksheet = XLSX.utils.json_to_sheet(data);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'سجل الحضور والغياب');
@@ -2507,8 +2451,9 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     return true;
   }).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
 
-  const exportRegistryExcel = (exportAll: boolean = true) => {
+  const exportRegistryExcel = async (exportAll: boolean = true) => {
     try {
+      const XLSX = await loadXlsx();
       const headers = [
         "الرقم التسلسلي",
         "الرقم الموحد",
@@ -2711,13 +2656,14 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     }, 300);
   };
 
-  const exportRegistryExcelTemplate = (targetClassId?: string) => {
+  const exportRegistryExcelTemplate = async (targetClassId?: string) => {
     try {
       const sortedClasses = getSortedClassesForUnifiedNumbers(classes);
       if (sortedClasses.length === 0) {
         alert("يرجى إضافة صف دراسي واحد على الأقل قبل تحميل القالب.");
         return;
       }
+      const XLSX = await loadXlsx();
 
       // If user wants all classes in one workbook with separate sheets:
       if (targetClassId === 'all_classes') {
@@ -3142,8 +3088,9 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     setRegExcelFileName(file.name);
 
     const reader = new FileReader();
-    reader.onload = (evt) => {
+    reader.onload = async (evt) => {
       try {
+        const XLSX = await loadXlsx();
         const data = new Uint8Array(evt.target?.result as ArrayBuffer);
         const wb = XLSX.read(data, { type: 'array' });
         const firstSheetName = wb.SheetNames[0];
@@ -3826,7 +3773,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     setClipboardModalSuccess(copied);
   };
 
-  const handleDownloadStudentAffairsTemplate = () => {
+  const handleDownloadStudentAffairsTemplate = async () => {
     const headers = [
       "الرقم الموحد",
       "اسم الطالب",
@@ -3866,6 +3813,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     const textToCopy = `${headers.join('\t')}\n${textRows}`;
 
     try {
+      const XLSX = await loadXlsx();
       const worksheet = XLSX.utils.json_to_sheet(dataToExport);
       const workbook = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(workbook, worksheet, 'نموذج تسجيل الطلاب');
@@ -4023,8 +3971,9 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       return;
     }
     const reader = new FileReader();
-    reader.onload = (evt) => {
+    reader.onload = async (evt) => {
       try {
+        const XLSX = await loadXlsx();
         const data = new Uint8Array(evt.target?.result as ArrayBuffer);
         const workbook = XLSX.read(data, { type: 'array' });
         const sheetName = workbook.SheetNames[0];
@@ -4173,7 +4122,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     reader.readAsArrayBuffer(file);
   };
 
-  const handleDownloadEmptyTemplate = (cohortMode: boolean = false) => {
+  const handleDownloadEmptyTemplate = async (cohortMode: boolean = false) => {
     let targetStudents: Student[] = [];
     let fileSuffix = '';
 
@@ -4221,6 +4170,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       return row;
     });
 
+    const XLSX = await loadXlsx();
     const worksheet = XLSX.utils.json_to_sheet(data);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'نموذج رصد الدرجات');
@@ -4417,8 +4367,9 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (evt) => {
+    reader.onload = async (evt) => {
       try {
+        const XLSX = await loadXlsx();
         const data = new Uint8Array(evt.target?.result as ArrayBuffer);
         const workbook = XLSX.read(data, { type: 'array' });
         const sheetName = workbook.SheetNames[0];
@@ -4656,12 +4607,10 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       ? customSubjects 
       : ['الرياضيات', 'العلوم', 'اللغة العربية', 'التربية الإسلامية', 'اللغة الإنجليزية', 'الاجتماعيات'];
 
-    const newMessagesList: Message[] = [];
     const studentsSummary: any[] = [];
     const nowIso = new Date().toISOString();
 
     for (const student of targetStudents) {
-      const studentClass = classes.find(c => c.id === student.classId)?.name || scopeTitle;
       const studentGrades = grades.filter(g => g.studentId === student.id && (g.examName === currentEvaluationMonth || !g.examName));
 
       let studentTotalScore = 0;
@@ -4693,13 +4642,6 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
         else estimation = 'ضعيف 🔴';
       }
 
-      // Attendance stats for student
-      const studentAtt = attendance.filter(a => a.studentId === student.id);
-      const presentDays = studentAtt.filter(a => a.status === 'present').length;
-      const absentDays = studentAtt.filter(a => a.status === 'absent').length;
-      const lateDays = studentAtt.filter(a => a.status === 'late').length;
-      const totalDays = studentAtt.length;
-
       // Evaluation directives
       const evalForStudentMonth = monthlyEvaluations[`${student.id}_${currentEvaluationMonth}`] || 
         monthlyEvaluations[`${student.unifiedNo}_${currentEvaluationMonth}`] ||
@@ -4709,78 +4651,9 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       const teacherDirectiveText = evalForStudentMonth?.teacherText || evalForStudentMonth?.text || '';
       const directorDirectiveText = evalForStudentMonth?.directorText || '';
 
-      let directivesFormatted = '';
-      if (teacherDirectiveText && directorDirectiveText) {
-        directivesFormatted = `👨‍🏫 توجيهات المعلم: ❪ ${teacherDirectiveText} ❫\n🏫 توجيهات الإدارة: ❪ ${directorDirectiveText} ❫`;
-      } else if (teacherDirectiveText) {
-        directivesFormatted = `👨‍🏫 توجيهات المعلم: ❪ ${teacherDirectiveText} ❫`;
-      } else if (directorDirectiveText) {
-        directivesFormatted = `🏫 توجيهات الإدارة: ❪ ${directorDirectiveText} ❫`;
-      } else {
-        directivesFormatted = '🌟 طالب متميز ومواظب ونتمنى له دوام التوفيق والنجاح.';
-      }
-
-      const subjectsDetails = studentScoresList.map(s => {
-        const scoreVal = s.score !== null
-          ? (directorMaxGradeType === 'unspecified' ? `${s.score}` : `${s.score} / ${s.maxScore}`)
-          : 'قيد الرصد ⏳';
-        return `• 📘 ${s.subject}: ❪ ${scoreVal} ❫`;
-      }).join('\n');
-
-      const formattedMessage = `💚 المدرسة الدولية الخاصة 💚
-📜 كشف رصد وتقرير درجات معتمد وموثق
-─────────────────────────
-🌹 السلام عليكم ورحمة الله وبركاته
-إلى ولي أمر الطالب/ة المحترم:
-
-👤 الطالب: ${student.name} | 🏫 الصف: ${studentClass} | 📅 الشهر: [${currentEvaluationMonth}]
-
-📚 كشف نتائج ودرجات المواد الدراسية:
-${subjectsDetails}
-
-📊 المعدل العام: ❪ ${avgFormatted} ❫ | 🌟 التقدير العام: ${estimation}
-
-📝 توجيهات وتقارير المتابعة:
-${directivesFormatted}
-─────────────────────────
-🏛️ كشف معتمد وموثق إلكترونياً من الإدارة العامة للمدرسة`;
-
       const studentParent = parents.find(p => p.childrenIds.includes(student.id) || p.id === student.parentId);
       const receiverParentId = studentParent?.id || student.parentId || 'parent';
       const receiverParentName = studentParent?.name || student.parentName || 'ولي الأمر';
-
-      const msgId = 'm_grades_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
-      const gradeMsg: Message = {
-        id: msgId,
-        senderId: 'director',
-        senderName: 'المدير العام (إدارة المدرسة)',
-        senderRole: 'director',
-        receiverId: receiverParentId,
-        receiverName: receiverParentName,
-        receiverRole: 'parent',
-        content: formattedMessage,
-        date: nowIso,
-        read: false,
-        studentId: student.id,
-        category: 'grade_report',
-        shift: student.shift
-      };
-
-      newMessagesList.push(gradeMsg);
-
-      // Send clean Push Notification to parent
-      if (studentParent?.id) {
-        sendParentPushNotification(studentParent.id, {
-          title: `📊 كشف درجات معتمد: ${student.name} - ${currentEvaluationMonth}`,
-          body: `أرسلت إدارة المدرسة كشف الدرجات المعتمد لشهر (${currentEvaluationMonth}) بمعدل (${avgFormatted}) وتقدير (${estimation}). اضغط للمعاينة.`,
-          tag: `grades_${student.id}_${currentEvaluationMonth}`,
-          url: `/?portal=parent&tab=grades&unified=${encodeURIComponent(student.unifiedNo || student.rollNo || student.id)}`,
-          msgId: msgId,
-          studentId: student.id,
-          studentName: student.name,
-          category: 'grades'
-        });
-      }
 
       studentsSummary.push({
         studentId: student.id,
@@ -4813,42 +4686,14 @@ ${directivesFormatted}
       studentsSummary
     };
 
-    // Check all teachers who submitted sheets for this class/cohort & month to notify them of approval
-    const matchingSubmittedTeachers = sentGradeSheets.filter(s =>
-      s.month === currentEvaluationMonth &&
-      s.status === 'submitted' &&
-      s.teacherId &&
-      (cohortMode || s.classId === targetClassId || s.className === scopeTitle)
-    );
-    const notifiedTeacherIds = new Set<string>();
-    for (const teacherSubmitted of matchingSubmittedTeachers) {
-      if (!teacherSubmitted.teacherId || notifiedTeacherIds.has(teacherSubmitted.teacherId)) continue;
-      notifiedTeacherIds.add(teacherSubmitted.teacherId);
-      newMessagesList.push({
-        id: 'm_ack_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
-        senderId: 'director',
-        senderName: 'المدير العام (إدارة المدرسة)',
-        senderRole: 'director',
-        receiverId: teacherSubmitted.teacherId,
-        receiverName: teacherSubmitted.sentBy || 'المعلم',
-        receiverRole: 'teacher',
-        shift: activeCohort === 'evening' ? 'evening' : 'morning',
-        content: `🎉 [اعتماد كشف الدرجات وإرساله]\nتمت مراجعة كشف درجات (${teacherSubmitted.className || scopeTitle}) لشهر (${currentEvaluationMonth}) واعتماده رسمياً، وتم إرسال كافة بطاقات الدرجات والتقارير لأولياء الأمور بنجاح 🚀 بوركت جهودكم.`,
-        date: nowIso,
-        read: false,
-        category: 'general'
-      });
+    // 3. Update States (استبدال كشف المدير السابق لنفس الشهر وتحديث حالة كشوف المعلمين إلى معتمد دون إنشاء إشعارات أو رسائل متراكمة)
+    const hadAutoGradeMsgs = messages.some(isAutoGradeNotificationMessage);
+    const cleanedMessages = hadAutoGradeMsgs
+      ? messages.filter(m => !isAutoGradeNotificationMessage(m))
+      : messages;
+    if (hadAutoGradeMsgs) {
+      setMessages(cleanedMessages);
     }
-
-    // 3. Update States (استبدال كشف المدير السابق لنفس الشهر وتحديث حالة كشوف المعلمين إلى معتمد)
-    const existingMessagesWithoutTheseGrades = messages.filter(m => {
-      if (m.category === 'grade_report' && m.content.includes(currentEvaluationMonth)) {
-        return !targetStudents.some(s => s.id === m.studentId);
-      }
-      return true;
-    });
-    const updatedMessages = [...newMessagesList, ...existingMessagesWithoutTheseGrades];
-    setMessages(updatedMessages);
 
     const updatedExistingSheets = sentGradeSheets
       .filter(s => !(s.month === currentEvaluationMonth && (s.classId === targetClassId || s.className === scopeTitle) && !s.teacherId))
@@ -4873,16 +4718,16 @@ ${directivesFormatted}
     // 4. Persist with ultra-fast parallel cloud sync across PC, mobile, and parent devices
     await persistGradeReportBatchDirect({
       grades,
-      messages: updatedMessages,
+      ...(hadAutoGradeMsgs ? { messages: cleanedMessages } : {}),
       sentSheets: updatedSentSheets,
       monthlyEvaluations,
       currentMonth: currentEvaluationMonth
     });
 
-    alert(`🎉 تم بنجاح حفظ واعتماد وإرسال كشف الدرجات لشهر (${currentEvaluationMonth}) إلى أولياء الأمور!\n\n📊 إجمالي الطلاب المستلمين: ${targetStudents.length} طالب وطالبة\n🏫 النطاق: ${scopeTitle}\n\n✅ تم المزامنة السريعة وحفظ الكشف وتحديثه فورياً على كافة حواسب وهواتف الإدارة وأولياء الأمور ⚡`);
+    alert(`🎉 تم بنجاح حفظ واعتماد وإرسال كشف الدرجات لشهر (${currentEvaluationMonth}) إلى أولياء الأمور!\n\n📊 إجمالي الطلاب المستلمين: ${targetStudents.length} طالب وطالبة\n🏫 النطاق: ${scopeTitle}\n\n✅ تم المزامنة السريعة وإظهار الدرجات في بوابات أولياء الأمور مباشرة دون تراكم إشعارات أو رسائل! ⚡`);
   };
 
-  const handleExportGradesExcel = (cohortMode: boolean = false) => {
+  const handleExportGradesExcel = async (cohortMode: boolean = false) => {
     let targetStudents: Student[] = [];
     let exportTitle = '';
 
@@ -4974,13 +4819,14 @@ ${directivesFormatted}
       return;
     }
     
+    const XLSX = await loadXlsx();
     const worksheet = XLSX.utils.json_to_sheet(data);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'تقرير الدرجات');
     XLSX.writeFile(workbook, `تقرير_الدرجات_${exportTitle}_شهر_${currentEvaluationMonth}.xlsx`);
   };
 
-  const handleExportCohortRosterExcel = () => {
+  const handleExportCohortRosterExcel = async () => {
     const cohortClasses = classes.filter(matchesCohort);
     let targetStudents = students.filter(s => cohortClasses.some(c => c.id === s.classId));
     if (targetStudents.length === 0) targetStudents = students.filter(matchesCohort);
@@ -5003,6 +4849,7 @@ ${directivesFormatted}
       };
     });
 
+    const XLSX = await loadXlsx();
     const worksheet = XLSX.utils.json_to_sheet(data);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'حصر أسماء كامل الفوج');
@@ -16183,19 +16030,21 @@ ${sampleEval}
 
         {/* WhatsApp Customizer Modal */}
         {waModalState && (
-          <WhatsAppMessageCustomizerModal
-            isOpen={waModalState.isOpen}
-            onClose={() => setWaModalState(null)}
-            title={waModalState.title || 'تعديل وصياغة رسالة الواتساب لولي الأمر'}
-            studentName={waModalState.studentName}
-            studentId={waModalState.studentId}
-            recipientPhone={waModalState.recipientPhone}
-            initialMessage={waModalState.initialMessage}
-            defaultTemplateText={waModalState.defaultTemplateText}
-            templateStorageKey={waModalState.templateStorageKey || 'school_whatsapp_monthly_template'}
-            quickTags={waModalState.quickTags}
-            onConfirmSend={handleConfirmSendWhatsAppDirector}
-          />
+          <Suspense fallback={null}>
+            <WhatsAppMessageCustomizerModal
+              isOpen={waModalState.isOpen}
+              onClose={() => setWaModalState(null)}
+              title={waModalState.title || 'تعديل وصياغة رسالة الواتساب لولي الأمر'}
+              studentName={waModalState.studentName}
+              studentId={waModalState.studentId}
+              recipientPhone={waModalState.recipientPhone}
+              initialMessage={waModalState.initialMessage}
+              defaultTemplateText={waModalState.defaultTemplateText}
+              templateStorageKey={waModalState.templateStorageKey || 'school_whatsapp_monthly_template'}
+              quickTags={waModalState.quickTags}
+              onConfirmSend={handleConfirmSendWhatsAppDirector}
+            />
+          </Suspense>
         )}
 
         {/* Document Image & PDF Preview & Fast Save Modal */}
@@ -17094,7 +16943,7 @@ ${sampleEval}
                           </button>
                           <button
                             type="button"
-                            onClick={() => {
+                            onClick={async () => {
                               const exportData = selectedSentSheetToView.studentsSummary.map((s, idx) => {
                                 const row: any = {
                                   'م': idx + 1,
@@ -17112,6 +16961,7 @@ ${sampleEval}
                                 row['توجيهات الإدارة'] = s.directorNotes || '';
                                 return row;
                               });
+                              const XLSX = await loadXlsx();
                               const ws = XLSX.utils.json_to_sheet(exportData);
                               const wb = XLSX.utils.book_new();
                               XLSX.utils.book_append_sheet(wb, ws, 'كشف الدرجات المرسل');
@@ -17277,10 +17127,14 @@ ${sampleEval}
         </AnimatePresence>
 
         {/* Official School Seal and Signatures Customization Modal */}
-        <SealAndSignaturesModal
-          isOpen={isSealModalOpen}
-          onClose={() => setIsSealModalOpen(false)}
-        />
+        {isSealModalOpen && (
+          <Suspense fallback={null}>
+            <SealAndSignaturesModal
+              isOpen={isSealModalOpen}
+              onClose={() => setIsSealModalOpen(false)}
+            />
+          </Suspense>
+        )}
 
         {/* Director Student Smart Link Modal */}
         <AnimatePresence>
