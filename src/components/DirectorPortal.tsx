@@ -85,7 +85,7 @@ import { db } from '../lib/firebase';
 import { collection, addDoc, setDoc, deleteDoc, doc, serverTimestamp, writeBatch, getDocs } from 'firebase/firestore';
 import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead, checkDailyRollover, fetchCentralizedConsumptionOnce, resetCentralizedFirestoreConsumption, calibrateCentralConsumptionBaseline, getRecentUtcDates, getTimeUntilFirebaseQuotaReset, SPARK_DAILY_READ_LIMIT, SPARK_DAILY_WRITE_LIMIT, FIREBASE_PROJECT_ID, FIREBASE_DATABASE_ID } from '../lib/firestoreTracker';
 import { calculateStorageUsageReport, measureLiveCloudStorageAudit, StorageUsageReport } from '../lib/storageUsage';
-import { persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate, recordDeletedStudentIds, queueOfflineNotification } from '../lib/firebaseSync';
+import { persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate, recordDeletedStudentIds, queueOfflineNotification, deduplicateGradeSheetsPreservingTeachers } from '../lib/firebaseSync';
 import { isFirestoreQuotaExceeded, markFirestoreQuotaExceeded, isQuotaError } from '../lib/quotaManager';
 import { getStoredWelcomeMessages, saveWelcomeMessages, DEFAULT_WELCOME_MESSAGES, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { Bell, Activity, Info, Smartphone } from 'lucide-react';
@@ -584,33 +584,12 @@ export default function DirectorPortal({
 
   // FCM & External Push Notification States for Director
   const [registeredPushCount, setRegisteredPushCount] = useState<number>(0);
-  const [isTestingBroadcastPush, setIsTestingBroadcastPush] = useState<boolean>(false);
-  const [broadcastPushSuccessMsg, setBroadcastPushSuccessMsg] = useState<string | null>(null);
 
   React.useEffect(() => {
     getRegisteredPushDevicesCount().then(count => {
       setRegisteredPushCount(count);
     }).catch(() => {});
   }, [activeTab]);
-
-  const handleTestBroadcastPush = async () => {
-    setIsTestingBroadcastPush(true);
-    try {
-      const parentIds = parents.map(p => p.id);
-      const res = await sendBroadcastPushNotification(parentIds, {
-        title: '📢 تجربة إشعار إدارة المدرسة الدولية',
-        body: 'فحص دوري للإشعارات الخارجية: تم تأكيد وصول الإشعار لهواتف أولياء الأمور بنجاح وبشكل مجاني 100%!',
-        category: 'announcement'
-      });
-      setBroadcastPushSuccessMsg(`🎉 تم بنجاح إرسال الإشعار التجريبي لـ ${res.sent} ولي أمر مسجل في المنظومة!`);
-      setTimeout(() => setBroadcastPushSuccessMsg(null), 6000);
-      getRegisteredPushDevicesCount().then(count => setRegisteredPushCount(count));
-    } catch (e) {
-      console.warn("Error broadcasting test push:", e);
-    } finally {
-      setIsTestingBroadcastPush(false);
-    }
-  };
 
   const handleSaveStudentWhatsAppOnly = (targetStudent: Student, phoneVal: string) => {
     const cleanPhone = phoneVal.trim();
@@ -1085,17 +1064,9 @@ export default function DirectorPortal({
   // Seal & Signatures Customizer Modal State
   const [isSealModalOpen, setIsSealModalOpen] = useState(false);
 
-  // Sent Grade Sheets Archive State (كشوف الدرجات المرسلة والمحفوظة بدون تكرار)
+  // Sent Grade Sheets Archive State (كشوف الدرجات المرسلة والمحفوظة لكل معلم بدون حذف كشوفات الآخرين)
   const deduplicateGradeSheets = (sheets: SentGradeSheet[]): SentGradeSheet[] => {
-    if (!Array.isArray(sheets)) return [];
-    const map = new Map<string, SentGradeSheet>();
-    for (const s of sheets) {
-      const key = `${s.classId || s.className || 'all'}_${s.month}`;
-      if (!map.has(key) || new Date(s.dateSent).getTime() >= new Date(map.get(key)!.dateSent).getTime()) {
-        map.set(key, s);
-      }
-    }
-    return Array.from(map.values());
+    return deduplicateGradeSheetsPreservingTeachers(sheets);
   };
 
   const [sentGradeSheets, setSentGradeSheets] = useState<SentGradeSheet[]>(() => {
@@ -1244,20 +1215,19 @@ ${directivesFormatted}
     // Notify the teacher that their sheet was approved
     if (sheet.teacherId) {
       const teacher = teachers.find(t => t.id === sheet.teacherId);
-      if (teacher) {
-        newMessagesList.push({
-          id: 'm_t_appr_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
-          senderId: 'director',
-          senderName: 'المدير العام',
-          senderRole: 'director',
-          receiverId: teacher.id,
-          receiverName: teacher.name,
-          receiverRole: 'teacher',
-          content: `🎉 [اعتماد كشف الدرجات]\nتم بحمد الله وتوفيقه اعتماد وتوثيق كشف درجات (${sheet.className}) لشهر (${sheet.month}) وإرسال النتائج والتقارير الرسمية لكافة أولياء الأمور بنجاح! شكراً لجهودكم المتميزة 🌟`,
-          date: nowIso,
-          read: false
-        });
-      }
+      newMessagesList.push({
+        id: 'm_t_appr_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
+        senderId: 'director',
+        senderName: 'المدير العام',
+        senderRole: 'director',
+        receiverId: teacher?.id || sheet.teacherId,
+        receiverName: teacher?.name || sheet.sentBy || 'المعلم',
+        receiverRole: 'teacher',
+        shift: sheet.cohort === 'evening' ? 'evening' : 'morning',
+        content: `🎉 [اعتماد كشف الدرجات]\nتم بحمد الله وتوفيقه اعتماد وتوثيق كشف درجات (${sheet.className}) لشهر (${sheet.month}) وإرسال النتائج والتقارير الرسمية لكافة أولياء الأمور بنجاح! شكراً لجهودكم المتميزة 🌟`,
+        date: nowIso,
+        read: false
+      });
     }
 
     // Update the sheet status to 'approved' with total-only scores for parents
@@ -1268,7 +1238,9 @@ ${directivesFormatted}
       studentsSummary: updatedSummaryList
     };
 
-    const updatedSentSheets = sentGradeSheets.map(s => s.id === sheet.id ? updatedSheet : s);
+    const updatedSentSheets = deduplicateGradeSheets(
+      sentGradeSheets.map(s => s.id === sheet.id ? updatedSheet : s)
+    );
     setSentGradeSheets(updatedSentSheets);
     setSelectedSentSheetToView(updatedSheet);
 
@@ -4841,11 +4813,17 @@ ${directivesFormatted}
       studentsSummary
     };
 
-    // Check if teacher had submitted this sheet to notify them of approval
-    const teacherSubmitted = sentGradeSheets.find(s =>
-      s.month === currentEvaluationMonth && (s.classId === targetClassId || s.className === scopeTitle) && s.teacherId
+    // Check all teachers who submitted sheets for this class/cohort & month to notify them of approval
+    const matchingSubmittedTeachers = sentGradeSheets.filter(s =>
+      s.month === currentEvaluationMonth &&
+      s.status === 'submitted' &&
+      s.teacherId &&
+      (cohortMode || s.classId === targetClassId || s.className === scopeTitle)
     );
-    if (teacherSubmitted && teacherSubmitted.teacherId) {
+    const notifiedTeacherIds = new Set<string>();
+    for (const teacherSubmitted of matchingSubmittedTeachers) {
+      if (!teacherSubmitted.teacherId || notifiedTeacherIds.has(teacherSubmitted.teacherId)) continue;
+      notifiedTeacherIds.add(teacherSubmitted.teacherId);
       newMessagesList.push({
         id: 'm_ack_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
         senderId: 'director',
@@ -4854,14 +4832,15 @@ ${directivesFormatted}
         receiverId: teacherSubmitted.teacherId,
         receiverName: teacherSubmitted.sentBy || 'المعلم',
         receiverRole: 'teacher',
-        content: `🎉 [اعتماد كشف الدرجات وإرساله]\nتمت مراجعة كشف درجات (${scopeTitle}) لشهر (${currentEvaluationMonth}) واعتماده رسمياً، وتم إرسال كافة بطاقات الدرجات والتقارير لأولياء الأمور بنجاح 🚀 بوركت جهودكم.`,
+        shift: activeCohort === 'evening' ? 'evening' : 'morning',
+        content: `🎉 [اعتماد كشف الدرجات وإرساله]\nتمت مراجعة كشف درجات (${teacherSubmitted.className || scopeTitle}) لشهر (${currentEvaluationMonth}) واعتماده رسمياً، وتم إرسال كافة بطاقات الدرجات والتقارير لأولياء الأمور بنجاح 🚀 بوركت جهودكم.`,
         date: nowIso,
         read: false,
         category: 'general'
       });
     }
 
-    // 3. Update States (استبدال الكشف والمراسلات السابقة لنفس الشهر بدلاً من تكرارها)
+    // 3. Update States (استبدال كشف المدير السابق لنفس الشهر وتحديث حالة كشوف المعلمين إلى معتمد)
     const existingMessagesWithoutTheseGrades = messages.filter(m => {
       if (m.category === 'grade_report' && m.content.includes(currentEvaluationMonth)) {
         return !targetStudents.some(s => s.id === m.studentId);
@@ -4871,10 +4850,24 @@ ${directivesFormatted}
     const updatedMessages = [...newMessagesList, ...existingMessagesWithoutTheseGrades];
     setMessages(updatedMessages);
 
-    const filteredPreviousSheets = sentGradeSheets.filter(s => 
-      !(s.month === currentEvaluationMonth && (s.classId === targetClassId || s.className === scopeTitle))
-    );
-    const updatedSentSheets = deduplicateGradeSheets([sheetRecord, ...filteredPreviousSheets]);
+    const updatedExistingSheets = sentGradeSheets
+      .filter(s => !(s.month === currentEvaluationMonth && (s.classId === targetClassId || s.className === scopeTitle) && !s.teacherId))
+      .map(s => {
+        if (
+          s.month === currentEvaluationMonth &&
+          s.status === 'submitted' &&
+          s.teacherId &&
+          (cohortMode || s.classId === targetClassId || s.className === scopeTitle)
+        ) {
+          return {
+            ...s,
+            status: 'approved' as const,
+            sentBy: s.sentBy?.includes('(معتمد)') ? s.sentBy : `${s.sentBy} (معتمد من الإدارة ✅)`
+          };
+        }
+        return s;
+      });
+    const updatedSentSheets = deduplicateGradeSheets([sheetRecord, ...updatedExistingSheets]);
     setSentGradeSheets(updatedSentSheets);
 
     // 4. Persist with ultra-fast parallel cloud sync across PC, mobile, and parent devices
@@ -6489,6 +6482,11 @@ ${directivesFormatted}
             >
               <FileCheck className="w-3.5 h-3.5 shrink-0 text-indigo-400" />
               <span>كشوفات ومعالجة الدرجات</span>
+              {sentGradeSheets.filter(s => s.status === 'submitted').length > 0 && (
+                <span className="mr-auto bg-amber-500 text-slate-950 px-1.5 py-0.5 rounded-full text-[9px] font-black animate-pulse">
+                  {sentGradeSheets.filter(s => s.status === 'submitted').length}
+                </span>
+              )}
             </button>
 
             <button
@@ -10623,7 +10621,7 @@ ${sampleEval}
 
                       <button
                         type="button"
-                        onClick={handleSaveAndSendGradesToParents}
+                        onClick={() => handleSaveAndSendGradesToParents(false)}
                         className="text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white py-2 px-4 rounded-xl transition cursor-pointer shadow-xs flex items-center justify-center gap-1.5"
                       >
                         <Send className="w-3.5 h-3.5" />
@@ -12521,7 +12519,7 @@ ${sampleEval}
                   <div className="space-y-3 max-h-[500px] overflow-y-auto p-1">
                     {(() => {
                       const filtered = messages
-                        .filter(m => matchesCohort(m) && (m.receiverRole === 'director' || m.senderRole === 'director' || m.senderRole === 'parent'))
+                        .filter(m => (!m.shift || matchesCohort(m) || m.receiverRole === 'director' || m.receiverId === 'director') && (m.receiverRole === 'director' || m.receiverId === 'director' || m.senderRole === 'director' || m.senderRole === 'parent'))
                         .filter(m => {
                           // 1. Direction Filter
                           if (msgDirectionFilter === 'incoming' && m.receiverRole !== 'director') return false;
@@ -13732,18 +13730,7 @@ ${sampleEval}
 
               {/* External Push Notification & FCM Control Center */}
               <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={handleTestBroadcastPush}
-                      disabled={isTestingBroadcastPush}
-                      className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white font-extrabold text-xs px-4 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-2 shadow-xs"
-                    >
-                      <Sparkles className="w-4 h-4 text-amber-300" />
-                      <span>{isTestingBroadcastPush ? 'جارِ إرسال الإشعار التجريبي...' : 'اختبار إرسال إشعار لكافة الهواتف 📢'}</span>
-                    </button>
-                  </div>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-end gap-4">
                   <div className="text-right">
                     <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2 justify-end">
                       <span>مركز الإشعارات الخارجية للهواتف (FCM & Web Push) 🔔</span>
@@ -13753,13 +13740,6 @@ ${sampleEval}
                     </p>
                   </div>
                 </div>
-
-                {broadcastPushSuccessMsg && (
-                  <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 p-3.5 rounded-xl text-xs font-bold text-right flex items-center justify-end gap-2">
-                    <span>{broadcastPushSuccessMsg}</span>
-                    <CheckCircle className="w-4 h-4 text-emerald-600" />
-                  </div>
-                )}
 
                 {/* 3 Status Metric Badges */}
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-right">
@@ -14549,7 +14529,7 @@ ${sampleEval}
                       }
                       const updated = messages.map(m => m.id === editingMessage.id ? { ...m, content: editMessageContent } : m);
                       setMessages(updated);
-                      localStorage.setItem('school_messages', JSON.stringify(updated));
+                      persistDirectToFirestore('school_messages', updated);
                       alert('✅ تم تعديل الرسالة بنجاح.');
                       setEditingMessage(null);
                     }}

@@ -45,14 +45,12 @@ import {
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { buildWhatsAppUrl, openWhatsAppDirectly, getWhatsAppSentRecords, recordWhatsAppSent, WhatsAppSentRecord } from '../lib/whatsapp';
-import { sendParentPushNotification } from '../lib/pushDispatcher';
 import { WhatsAppMessageCustomizerModal } from './WhatsAppMessageCustomizerModal';
 import { PortalDesignerBadge } from './PortalDesignerBadge';
 import { Teacher, Student, Class, Attendance, Grade, Parent, Message, Announcement, ExamQuestionPaper, SentGradeSheet, SentGradeSheetStudentSummary } from '../types';
 import { sanitizeAndDeduplicateStudents, getSafeStudentKey } from '../lib/studentDeduplicator';
 import { getStoredWelcomeMessages, WelcomeMessagesConfig } from '../lib/welcomeMessages';
-import { persistDirectToFirestore, safeDispatchStorageUpdate } from '../lib/firebaseSync';
-import { batchSaveStudentsGradesConsolidated } from '../lib/studentGradesQuery';
+import { persistDirectToFirestore, safeDispatchStorageUpdate, deduplicateGradeSheetsPreservingTeachers } from '../lib/firebaseSync';
 import { printElementById } from '../lib/printUtils';
 import { GradeSheetSignatures } from './GradeSheetSignatures';
 import { GradeCellInput } from './GradeCellInput';
@@ -195,11 +193,23 @@ export default function TeacherPortal({
     }
   }, [selectedTeacherId]);
 
+  const isMessageToCurrentTeacher = (m: Message) => {
+    if (!m) return false;
+    return (
+      m.receiverId === selectedTeacherId ||
+      m.receiverId === 'all_teachers' ||
+      m.receiverId === 'teacher' ||
+      (m.receiverRole === 'teacher' && !m.receiverId)
+    );
+  };
+
+  const [directorDirectReplyText, setDirectorDirectReplyText] = useState('');
+
   const markAsRead = (msgId: string) => {
     if (setMessages) {
       setMessages(prev => {
         const updated = prev.map(m => m.id === msgId ? { ...m, read: true } : m);
-        localStorage.setItem('school_messages', JSON.stringify(updated));
+        persistDirectToFirestore('school_messages', updated);
         return updated;
       });
     }
@@ -208,8 +218,8 @@ export default function TeacherPortal({
   const markAllAsRead = () => {
     if (setMessages) {
       setMessages(prev => {
-        const updated = prev.map(m => m.receiverId === selectedTeacherId && !m.read ? { ...m, read: true } : m);
-        localStorage.setItem('school_messages', JSON.stringify(updated));
+        const updated = prev.map(m => isMessageToCurrentTeacher(m) && !m.read ? { ...m, read: true } : m);
+        persistDirectToFirestore('school_messages', updated);
         return updated;
       });
     }
@@ -218,8 +228,8 @@ export default function TeacherPortal({
   const markAllAsReadForStudent = (studentId: string) => {
     if (setMessages) {
       setMessages(prev => {
-        const updated = prev.map(m => m.receiverId === selectedTeacherId && m.studentId === studentId && !m.read ? { ...m, read: true } : m);
-        localStorage.setItem('school_messages', JSON.stringify(updated));
+        const updated = prev.map(m => isMessageToCurrentTeacher(m) && m.studentId === studentId && !m.read ? { ...m, read: true } : m);
+        persistDirectToFirestore('school_messages', updated);
         return updated;
       });
     }
@@ -270,20 +280,7 @@ export default function TeacherPortal({
         return updated;
       });
 
-      // Dispatch push notification to parent for grade edit
-      const student = students.find(s => s.id === gradeToEdit.studentId);
-      const studentParent = parents.find(p => p.childrenIds.includes(gradeToEdit.studentId) || (student && student.parentId === p.id));
-      if (studentParent && student) {
-        sendParentPushNotification(studentParent.id, {
-          title: `📊 تحديث درجة: ${student.name}`,
-          body: `تم تعديل درجة مادة ${gradeToEdit.subject} (${gradeToEdit.examName}): النتيجة المحدثة ${newScore}/${effectiveMax}`,
-          studentId: student.id,
-          studentName: student.name,
-          category: 'grades'
-        });
-      }
-
-      alert('🎉 تم تعديل الدرجة بنجاح وتحديثها لدى ولي الأمر فوراً!');
+      alert('✅ تم تعديل الدرجة في سجل المعلم بنجاح! ستظهر لدى ولي الأمر فور اعتمادها وإرسالها من قبل المدير العام.');
     }
     setGradeToEdit(null);
     setEditGradeScore('');
@@ -469,7 +466,7 @@ export default function TeacherPortal({
 
     });
 
-    alert(`🎉 تم رصد درجات عدد ${enteredScores.length} مادة بنجاح للطالب (${selectedStudentForAllGrades.name}) وتم إرسال إشعار فوري لولي الأمر! 🔔`);
+    alert(`🎉 تم حفظ درجات عدد ${enteredScores.length} مادة بنجاح للطالب (${selectedStudentForAllGrades.name})! ستصل لولي الأمر فور اعتمادها وإرسالها من المدير العام.`);
     
     // Clear state & Close modal
     if (gradingMode !== 'all') {
@@ -572,12 +569,17 @@ export default function TeacherPortal({
     const isGeneralTeacher = teacherSubjects.some(sub => sub === 'عام - جميع المواد' || sub.includes('جميع المواد'));
     
     if (isGeneralTeacher) {
-      return classSubjects.filter(sub => sub !== 'عام - جميع المواد' && !sub.includes('جميع المواد'));
+      const allSubs = customSubjects && customSubjects.length > 0 ? customSubjects : classSubjects;
+      return Array.from(new Set(allSubs.filter(sub => sub && sub !== 'عام - جميع المواد' && !sub.includes('جميع المواد'))));
     }
     
-    // Return exactly the subjects assigned to this active teacher, excluding placeholder roles, filtered by classSubjects
-    return teacherSubjects.filter(sub => sub !== 'عام - جميع المواد' && !sub.includes('جميع المواد') && classSubjects.includes(sub));
-  }, [selectedClassId, activeTeacher, classSubjects]);
+    // Return strictly the subjects assigned to this active teacher
+    return Array.from(
+      new Set(
+        teacherSubjects.filter(sub => sub && sub !== 'عام - جميع المواد' && !sub.includes('جميع المواد'))
+      )
+    );
+  }, [selectedClassId, activeTeacher, classSubjects, customSubjects]);
 
   // Auto-update gradeSubject when class changes to ensure it matches one of the teacher's/class's assigned subjects
   useEffect(() => {
@@ -597,11 +599,8 @@ export default function TeacherPortal({
     : (directorMaxGradeSetting === '50' ? 50 : directorMaxGradeSetting === '20' ? 20 : 100);
 
   const uniqueSubjects = React.useMemo(() => {
-    const list = customSubjects && customSubjects.length > 0 
-      ? customSubjects 
-      : ['الرياضيات', 'العلوم', 'اللغة العربية', 'التربية الإسلامية', 'اللغة الإنجليزية', 'الاجتماعيات'];
-    return Array.from(new Set(list));
-  }, [customSubjects]);
+    return Array.from(new Set(teacherClassSubjects));
+  }, [teacherClassSubjects]);
 
   const handleSaveAndSendGradeSheetToDirector = async () => {
     if (!selectedClassId) {
@@ -690,15 +689,22 @@ export default function TeacherPortal({
       studentsSummary
     };
 
-    const filteredSheets = sentGradeSheets.filter(s =>
-      !(s.month === currentEvaluationMonth && s.classId === targetClass.id)
+    let latestStoredSheets: SentGradeSheet[] = [];
+    try {
+      const raw = localStorage.getItem('school_sent_grade_sheets');
+      if (raw) latestStoredSheets = JSON.parse(raw);
+    } catch {}
+    const mergedBaseSheets = deduplicateGradeSheetsPreservingTeachers([
+      ...(Array.isArray(latestStoredSheets) ? latestStoredSheets : []),
+      ...sentGradeSheets
+    ]);
+    const filteredSheets = mergedBaseSheets.filter(s =>
+      !(s.month === currentEvaluationMonth && s.classId === targetClass.id && s.teacherId === selectedTeacherId)
     );
-    const updatedSentSheets = [sheetRecord, ...filteredSheets];
+    const updatedSentSheets = deduplicateGradeSheetsPreservingTeachers([sheetRecord, ...filteredSheets]);
     setSentGradeSheets(updatedSentSheets);
-    localStorage.setItem('school_sent_grade_sheets', JSON.stringify(updatedSentSheets));
-    safeDispatchStorageUpdate('school_sent_grade_sheets', JSON.stringify(updatedSentSheets));
 
-    // Send notification message to Director
+    // Send notification message to Director (with explicit cohort shift)
     sendMessage({
       senderId: selectedTeacherId,
       senderName: activeTeacher?.name ? `المعلم ${activeTeacher.name}` : 'معلم الصف',
@@ -706,39 +712,16 @@ export default function TeacherPortal({
       receiverId: 'director',
       receiverName: 'المدير العام (إدارة المدرسة)',
       receiverRole: 'director',
+      shift: targetClass.shift || activeTeacher?.shift || 'morning',
       content: `📢 [إشعار كشف درجات]\nقام المعلم ${activeTeacher?.name || ''} برصد وتعبئة كشف درجات (${targetClass.name}) لشهر (${currentEvaluationMonth}) بإجمالي (${classStudents.length} طالب)، وهو جاهز بانتظار اعتمادكم الكريم وإرسال النتائج لأولياء الأمور 📊🚀`
     });
 
-    // Cloud persist
-    await persistDirectToFirestore('school_sent_grade_sheets', updatedSentSheets);
-    await persistDirectToFirestore('school_monthly_evaluations', monthlyEvaluations);
-    await persistDirectToFirestore('school_grades', latestGrades);
-
-    // Atomically persist consolidated single-document student grades (students_grades/{studentId}) via writeBatch
-    const consolidatedBatch = studentsSummary.map(s => {
-      const subjectsMap: Record<string, { score: number | null; maxScore: number; examName?: string; notes?: string }> = {};
-      (s.scores || []).forEach(sc => {
-        subjectsMap[sc.subject] = {
-          score: sc.score !== null ? Number(sc.score) : null,
-          maxScore: Number(sc.maxScore) || 100,
-          examName: currentEvaluationMonth,
-          notes: ''
-        };
-      });
-      return {
-        studentId: s.studentId,
-        studentName: s.studentName,
-        classId: targetClass.id,
-        className: targetClass.name,
-        unifiedNo: s.unifiedNo,
-        rollNo: s.rollNo,
-        month: currentEvaluationMonth,
-        subjects: subjectsMap,
-        teacherNotes: s.teacherNotes,
-        directorNotes: s.directorNotes
-      };
-    });
-    batchSaveStudentsGradesConsolidated(consolidatedBatch).catch(() => {});
+    // Cloud persist directly and await completion (only Director approval publishes to consolidated parent collection)
+    await Promise.all([
+      persistDirectToFirestore('school_sent_grade_sheets', updatedSentSheets),
+      persistDirectToFirestore('school_monthly_evaluations', monthlyEvaluations),
+      persistDirectToFirestore('school_grades', latestGrades)
+    ]);
 
     safeDispatchStorageUpdate('school_grades', JSON.stringify(latestGrades));
     safeDispatchStorageUpdate('school_monthly_evaluations', JSON.stringify(monthlyEvaluations));
@@ -990,7 +973,7 @@ export default function TeacherPortal({
     setGradeAttachedMedia(prev => ({ ...prev, [studentId]: null }));
     setGradeAttachedMediaType(prev => ({ ...prev, [studentId]: null }));
 
-    alert(`تم رصد درجة الطالب بنجاح وتم إرسال إشعار فوري لولي الأمر! 🔔`);
+    alert(`✅ تم حفظ درجة الطالب في السجل بنجاح! ستظهر لولي الأمر فور اعتماد المدير العام وإرسال الكشف.`);
   };
 
   // Format notification type and custom text
@@ -1329,16 +1312,16 @@ export default function TeacherPortal({
               >
                 <div className="relative shrink-0">
                   <MessageSquare className="w-4 h-4" />
-                  {messages.filter(m => m.receiverId === selectedTeacherId && !m.read).length > 0 && (
+                  {messages.filter(m => isMessageToCurrentTeacher(m) && !m.read).length > 0 && (
                     <span className="absolute -top-1.5 -right-1.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-rose-600 text-[8px] font-extrabold text-white ring-1 ring-white animate-bounce">
-                      {messages.filter(m => m.receiverId === selectedTeacherId && !m.read).length}
+                      {messages.filter(m => isMessageToCurrentTeacher(m) && !m.read).length}
                     </span>
                   )}
                 </div>
-                <span>مراسلة أولياء الأمور</span>
-                {messages.filter(m => m.receiverId === selectedTeacherId && !m.read).length > 0 && (
+                <span>الرسائل والتوجيهات</span>
+                {messages.filter(m => isMessageToCurrentTeacher(m) && !m.read).length > 0 && (
                   <span className="mr-auto bg-rose-600 text-white px-1.5 py-0.5 rounded-full text-[8px] font-bold animate-pulse">
-                    {messages.filter(m => m.receiverId === selectedTeacherId && !m.read).length} جديدة
+                    {messages.filter(m => isMessageToCurrentTeacher(m) && !m.read).length} جديدة
                   </span>
                 )}
               </button>
@@ -1595,6 +1578,11 @@ export default function TeacherPortal({
                       </div>
 
                       {/* Responsive Table */}
+                      {uniqueSubjects.length === 0 && (
+                        <div className="p-6 text-center bg-amber-50 border border-amber-200 rounded-2xl text-amber-900 text-xs font-bold mb-3">
+                          ⚠️ لا توجد مواد دراسية مسندة لحسابك حالياً في إدارة المدرسة. يرجى مراجعة المدير العام لإسناد المواد.
+                        </div>
+                      )}
                       <div className="overflow-x-auto border border-slate-200 rounded-2xl shadow-2xs">
                         <table className="w-full text-right border-collapse text-xs">
                           <thead className="bg-slate-50 text-slate-700 border-b border-slate-200 font-black">
@@ -2488,10 +2476,10 @@ export default function TeacherPortal({
             >
               <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
                 <div>
-                  <h2 className="text-xl font-bold text-slate-800">مراسلة أولياء الأمور</h2>
-                  <p className="text-slate-500 text-xs mt-1">تواصل مباشرة مع والد الطالب لإرسال تقرير سلوكي، شكر وتقدير، أو ملاحظة أكاديمية.</p>
+                  <h2 className="text-xl font-bold text-slate-800">الرسائل والتواصل (المدير العام وأولياء الأمور)</h2>
+                  <p className="text-slate-500 text-xs mt-1">استقبل توجيهات وتعميمات المدير العام، وتواصل مباشرة مع الإدارة وأولياء الأمور.</p>
                 </div>
-                {messages.filter(m => m.receiverId === selectedTeacherId && !m.read).length > 0 && (
+                {messages.filter(m => isMessageToCurrentTeacher(m) && !m.read).length > 0 && (
                   <button
                     type="button"
                     onClick={() => {
@@ -2504,6 +2492,110 @@ export default function TeacherPortal({
                   </button>
                 )}
               </div>
+
+              {/* Director & School Administration Inbox + Quick Message */}
+              {(() => {
+                const adminMessages = messages
+                  .filter(m =>
+                    (isMessageToCurrentTeacher(m) && (m.senderRole === 'director' || m.senderId === 'director' || m.receiverId === 'all_teachers' || !m.studentId)) ||
+                    (m.senderId === selectedTeacherId && (m.receiverRole === 'director' || m.receiverId === 'director'))
+                  )
+                  .sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime());
+                const unreadAdminCount = adminMessages.filter(m => isMessageToCurrentTeacher(m) && !m.read).length;
+
+                return (
+                  <div className="bg-white p-5 rounded-2xl border border-indigo-100 shadow-sm space-y-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
+                      <div className="flex items-center gap-2">
+                        <span className="w-8 h-8 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center text-base">🏛️</span>
+                        <div>
+                          <h3 className="font-extrabold text-slate-800 text-sm">رسائل وتوجيهات المدير العام والإدارة</h3>
+                          <p className="text-[11px] text-slate-500">تصل هنا إشعارات اعتماد الكشوفات، تعميمات الإدارة، والرسائل المباشرة من المدير العام.</p>
+                        </div>
+                      </div>
+                      {unreadAdminCount > 0 && (
+                        <span className="bg-rose-600 text-white text-[10px] font-black px-2.5 py-1 rounded-full animate-pulse">
+                          {unreadAdminCount} رسائل غير مقروءة
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <input
+                        type="text"
+                        value={directorDirectReplyText}
+                        onChange={e => setDirectorDirectReplyText(e.target.value)}
+                        placeholder="اكتب رسالة سريعة لإرسالها مباشرة إلى المدير العام..."
+                        className="flex-1 text-xs border border-slate-200 px-3.5 py-2.5 rounded-xl bg-slate-50/50 focus:bg-white focus:border-indigo-500 focus:outline-none text-right"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!directorDirectReplyText.trim()) return;
+                          sendMessage({
+                            senderId: selectedTeacherId,
+                            senderName: activeTeacher?.name ? `المعلم ${activeTeacher.name}` : 'معلم الصف',
+                            senderRole: 'teacher',
+                            receiverId: 'director',
+                            receiverName: 'المدير العام (إدارة المدرسة)',
+                            receiverRole: 'director',
+                            shift: activeTeacher?.shift || 'morning',
+                            content: directorDirectReplyText.trim(),
+                            category: 'general'
+                          });
+                          setDirectorDirectReplyText('');
+                        }}
+                        className="bg-slate-900 hover:bg-indigo-700 text-white text-xs font-bold px-4 py-2.5 rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5 shrink-0"
+                      >
+                        <Send className="w-3.5 h-3.5" />
+                        <span>إرسال للمدير العام</span>
+                      </button>
+                    </div>
+
+                    {adminMessages.length === 0 ? (
+                      <div className="text-center py-6 text-xs text-slate-400 bg-slate-50/70 rounded-xl border border-dashed border-slate-200">
+                        لا توجد رسائل أو تعميمات من المدير العام حتى الآن.
+                      </div>
+                    ) : (
+                      <div className="space-y-2.5 max-h-[280px] overflow-y-auto pr-1">
+                        {adminMessages.map(msg => {
+                          const isIncomingUnread = isMessageToCurrentTeacher(msg) && !msg.read;
+                          const isFromMe = msg.senderId === selectedTeacherId;
+                          return (
+                            <div
+                              key={msg.id}
+                              onClick={() => {
+                                if (isIncomingUnread) markAsRead(msg.id);
+                              }}
+                              className={`p-3.5 rounded-xl border text-xs transition ${
+                                isFromMe
+                                  ? 'bg-indigo-50/50 border-indigo-100 mr-4'
+                                  : isIncomingUnread
+                                  ? 'bg-amber-50 border-amber-300 ring-1 ring-amber-400 cursor-pointer ml-4'
+                                  : 'bg-slate-50 border-slate-100 ml-4'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-2 text-[10px] font-bold text-slate-500 mb-1">
+                                <span className="flex items-center gap-1.5">
+                                  <span>{isFromMe ? 'أنت ← المدير العام' : msg.senderName}</span>
+                                  {msg.receiverId === 'all_teachers' && (
+                                    <span className="bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded text-[9px]">تعميم للمعلمين</span>
+                                  )}
+                                  {isIncomingUnread && (
+                                    <span className="bg-amber-500 text-white px-1.5 py-0.5 rounded text-[9px]">جديد ✉️</span>
+                                  )}
+                                </span>
+                                <span className="font-mono text-slate-400">{new Date(msg.date).toLocaleString('ar-EG')}</span>
+                              </div>
+                              <p className="text-slate-800 whitespace-pre-wrap leading-relaxed font-medium">{msg.content}</p>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 {/* Send Message Form */}
@@ -3645,7 +3737,7 @@ export default function TeacherPortal({
                     if (setMessages) {
                       setMessages(prev => {
                         const updated = prev.filter(m => m.id !== messageToDelete);
-                        localStorage.setItem('school_messages', JSON.stringify(updated));
+                        persistDirectToFirestore('school_messages', updated);
                         return updated;
                       });
                     }
@@ -3700,7 +3792,7 @@ export default function TeacherPortal({
                     if (setMessages) {
                       setMessages(prev => {
                         const updated = prev.map(m => m.id === messageToEdit.id ? { ...m, content: editMessageContent.trim() } : m);
-                        localStorage.setItem('school_messages', JSON.stringify(updated));
+                        persistDirectToFirestore('school_messages', updated);
                         return updated;
                       });
                       alert('🎉 تم تعديل نص الرسالة/السلوك بنجاح وتحديثه فوراً!');

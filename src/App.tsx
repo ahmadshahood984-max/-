@@ -46,9 +46,10 @@ import {
   safeDispatchStorageUpdate,
   hydrateFromOfflineVault,
   saveLocalSeedWithoutCloudWrite,
-  ensureAllRealtimeListeners
+  ensureAllRealtimeListeners,
+  ensureParentRealtimeListeners,
+  deduplicateGradeSheetsPreservingTeachers
 } from './lib/firebaseSync';
-import { syncSingleGradeToFirestore } from './lib/studentGradesQuery';
 import { 
   Building, 
   Users, 
@@ -59,7 +60,6 @@ import {
   Info,
   Lock,
   Bell,
-  Volume2,
   Smartphone,
   X,
   ExternalLink,
@@ -485,8 +485,11 @@ export default function App() {
   const [showNotificationHelper, setShowNotificationHelper] = useState<boolean>(false);
 
   useEffect(() => {
+    saveLocalSeedWithoutCloudWrite('school_active_portal', activePortal);
     if (activePortal === 'director' || activePortal === 'teacher') {
       ensureAllRealtimeListeners();
+    } else if (activePortal === 'parent') {
+      ensureParentRealtimeListeners();
     }
   }, [activePortal]);
 
@@ -600,20 +603,13 @@ export default function App() {
         setAppIcon(savedIcon);
       }
 
-      // Automatically clean up any duplicate sent grade sheets from previous runs
+      // Automatically clean up duplicate sent grade sheets while preserving each teacher's submissions
       const savedSheetsRaw = localStorage.getItem('school_sent_grade_sheets');
       if (savedSheetsRaw) {
         try {
           const parsedSheets = JSON.parse(savedSheetsRaw);
           if (Array.isArray(parsedSheets) && parsedSheets.length > 0) {
-            const map = new Map<string, any>();
-            for (const s of parsedSheets) {
-              const key = `${s.classId || s.className || 'all'}_${s.month}`;
-              if (!map.has(key) || new Date(s.dateSent).getTime() >= new Date(map.get(key)!.dateSent).getTime()) {
-                map.set(key, s);
-              }
-            }
-            const deduped = Array.from(map.values());
+            const deduped = deduplicateGradeSheetsPreservingTeachers(parsedSheets);
             if (deduped.length !== parsedSheets.length) {
               persistDirectToFirestore('school_sent_grade_sheets', deduped);
             }
@@ -943,19 +939,14 @@ export default function App() {
 
   const requestNotificationPermission = async () => {
     if (!('Notification' in window)) {
-      alert('عذراً، متصفحك أو هذا الجهاز لا يدعم الإشعارات الخارجية حالياً. سنقوم بالاعتماد على محاكي التنبيهات الداخلي الذكي!');
+      alert('عذراً، متصفحك أو هذا الجهاز لا يدعم الإشعارات الخارجية حالياً.');
       return;
     }
     try {
       const permission = await Notification.requestPermission();
       setNotificationPermission(permission);
       if (permission === 'granted') {
-        playPingSound();
-        safeShowNotification('🔔 تم تفعيل الإشعارات بنجاح', {
-          body: 'المدرسة الدولية: ستصلك رسائل المعلمين والتقارير المدرسية هنا بشكل مباشر وفوري!',
-          dir: 'rtl'
-        });
-        alert('🔔 تم تفعيل إشعارات الهاتف الخارجية بنجاح! ستصلك الآن التنبيهات والرسائل بقمم الهواتف حتى لو كان التطبيق بالخلفية.');
+        alert('🔔 تم تفعيل إشعارات الهاتف الخارجية بنجاح! ستصلك التنبيهات والرسائل الفعلية فور إرسالها.');
       } else if (permission === 'denied') {
         alert('⚠️ تم رفض أو حظر إذن الإشعارات من المتصفح.\n\nلتفعيلها يدوياً:\n1. اضغط على رمز القفل أو علامة التعجب بجوار عنوان الموقع في شريط المتصفح.\n2. ابحث عن خيار "الإشعارات" (Notifications) وقم بتغييره إلى "السماح" (Allow).\n3. أعد تحميل الصفحة وجرب مجدداً!');
       }
@@ -963,17 +954,6 @@ export default function App() {
       console.error('Error requesting permission', e);
       alert('⚠️ لم نتمكن من فتح نافذة السماح بالإشعارات بسبب قيود الأمان داخل إطار المعاينة (IFrame).\n\n💡 الحل السريع والفعال:\n1. اضغط على زر "فتح في تبويب جديد" أعلى يسار الشاشة لتشغيل التطبيق بشكل مباشر بمتصفحك.\n2. انقر على زر "تفعيل الإشعارات" هناك وستظهر لك نافذة السماح فوراً كالهاتف!');
     }
-  };
-
-  const testNotificationSimulation = () => {
-    playPingSound();
-    setActiveToast({
-      id: 'test-ping-' + Date.now(),
-      senderName: 'المربّي / إدارة المدرسة',
-      content: '📢 [تصنيف الإشعار: تجربة تفعيل النظام]\nمرحباً بك! هذا تنبيه تجريبي فوري يحاكي إشعارات WhatsApp بالهاتف مع نغمة الرنين المزدوجة المميزة. نظام الإشعارات والمزامنة المباشرة مفعّل وجاهز بالكامل!',
-      msgNumber: '777',
-      studentName: 'اسم الطالب (تجريبي)'
-    });
   };
 
   // --- Active Teacher and Parent tracking for accurate recipient counters ---
@@ -1012,13 +992,20 @@ export default function App() {
 
   const getTeacherUnreadCount = () => {
     if (!activeTeacherId) return 0;
-    return messages.filter(m => m.receiverId === activeTeacherId && !m.read).length;
+    return messages.filter(m =>
+      !m.read && (
+        m.receiverId === activeTeacherId ||
+        m.receiverId === 'all_teachers' ||
+        m.receiverId === 'teacher' ||
+        (m.receiverRole === 'teacher' && !m.receiverId)
+      )
+    ).length;
   };
 
   const getParentUnreadCount = () => {
     if (!activeParentId) return 0;
     return messages.filter(
-      m => m.receiverId === activeParentId && 
+      m => (m.receiverId === activeParentId || m.receiverId === 'all' || m.receiverId === 'all_cohort_parents' || m.receiverId === 'all_everyone') &&
            !m.read && 
            !m.content.includes('سلوك') && 
            !m.content.includes('تنبيه سلوكي') && 
@@ -1046,14 +1033,26 @@ export default function App() {
     });
 
     if (newlyArrived.length > 0) {
-      // Find the newest unread message intended for the active portal recipient
+      const nowMs = Date.now();
+      const RECENT_MSG_WINDOW_MS = 3 * 60 * 1000;
+      // Find the newest unread recent message intended for the active portal recipient (never replay historical/test messages)
       const sortedIncoming = [...newlyArrived].sort(
         (a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime()
       );
       const latest = sortedIncoming.find(m => {
         if (m.read || m.receiverRole === 'parent') return false;
+        const msgTime = new Date(m.date || 0).getTime();
+        if (!msgTime || Math.abs(nowMs - msgTime) > RECENT_MSG_WINDOW_MS) return false;
+        if ((m.content || '').includes('تجربة إشعار') || (m.content || '').includes('تجربة تفعيل النظام')) return false;
         if (activePortal === 'director') return m.receiverRole === 'director' || m.receiverId === 'director';
-        if (activePortal === 'teacher') return m.receiverRole === 'teacher' && (!activeTeacherId || m.receiverId === activeTeacherId);
+        if (activePortal === 'teacher') {
+          return (
+            m.receiverId === activeTeacherId ||
+            m.receiverId === 'all_teachers' ||
+            m.receiverId === 'teacher' ||
+            (m.receiverRole === 'teacher' && (!m.receiverId || !activeTeacherId))
+          );
+        }
         return false;
       });
 
@@ -1332,71 +1331,36 @@ export default function App() {
     logEvent(`المعلم قام بتحضير الطلاب وتوثيق: ${presentCount} حضور، ${absentCount} غياب.`, 'info');
   };
 
-  // 6. Teacher records a Grade
+  // 6. Teacher records a Grade (kept internal until Director approves and sends to parents)
   const saveGrade = (gradeData: Omit<Grade, 'id' | 'date'>) => {
-    const id = 'g' + (grades.length + 1);
+    const id = 'g_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
     const date = new Date().toISOString().split('T')[0];
     const newGrade: Grade = { ...gradeData, id, date };
 
     setGrades(prev => {
       const updated = [newGrade, ...prev];
       persistDirectToFirestore('school_grades', updated);
-      syncSingleGradeToFirestore(newGrade).catch(() => {});
       return updated;
     });
     const student = students.find(s => s.id === gradeData.studentId);
-    logEvent(`المعلم رصد درجة الطالب ${student?.name || ''} بمادة ${gradeData.subject}: ${gradeData.score}/${gradeData.maxScore}`, 'success');
-
-    // Send instant grade notification message to parent
-    const studentParent = parents.find(p => p.childrenIds.includes(gradeData.studentId) || (student && student.parentId === p.id));
-    if (studentParent && student) {
-      const teacher = teachers.find(t => t.id === gradeData.teacherId);
-      const msgId = 'm_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
-      const notifBody = `📢 [تصنيف الإشعار: رصد الدرجات الأكاديمية]\nتم رصد درجة جديدة للطالب (${student.name}) في مادة (${gradeData.subject}) - تقييم (${gradeData.examName}): الدرجة (${gradeData.score}/${gradeData.maxScore}).`;
-      const newMsg: Message = {
-        id: msgId,
-        senderId: gradeData.teacherId || 'teacher',
-        senderName: teacher?.name || 'استاذ المادة',
-        senderRole: 'teacher',
-        receiverId: studentParent.id,
-        receiverName: studentParent.name,
-        receiverRole: 'parent',
-        content: notifBody,
-        date: new Date().toISOString(),
-        read: false,
-        studentId: student.id,
-        category: 'grades'
-      };
-      setMessages(prev => {
-        const updated = [newMsg, ...prev];
-        persistDirectToFirestore('school_messages', updated);
-        return updated;
-      });
-
-      // External Push Notification to parent's device
-      sendParentPushNotification(studentParent.id, {
-        title: `📊 رصد درجة جديدة: ${student.name}`,
-        body: `مادة ${gradeData.subject} (${gradeData.examName}): النتيجة ${gradeData.score}/${gradeData.maxScore}`,
-        msgId: msgId,
-        studentId: student.id,
-        studentName: student.name,
-        category: 'grades'
-      });
-    }
+    logEvent(`المعلم رصد درجة الطالب ${student?.name || ''} بمادة ${gradeData.subject}: ${gradeData.score}/${gradeData.maxScore} (بانتظار اعتماد المدير العام)`, 'success');
   };
 
   // 7. Messaging
   const sendMessage = (msgData: Omit<Message, 'id' | 'date' | 'read'>) => {
     const id = 'm_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
     const date = new Date().toISOString();
-    const newMsg: Message = { ...msgData, id, date, read: false };
+    const relatedStudent = msgData.studentId ? students.find(s => s.id === msgData.studentId) : undefined;
+    const relatedTeacher = msgData.senderRole === 'teacher' ? teachers.find(t => t.id === msgData.senderId) : undefined;
+    const inferredShift = msgData.shift || relatedStudent?.shift || relatedTeacher?.shift;
+    const newMsg: Message = { ...msgData, ...(inferredShift ? { shift: inferredShift } : {}), id, date, read: false };
 
     setMessages(prev => {
       const updated = [...prev, newMsg];
       persistDirectToFirestore('school_messages', updated);
       return updated;
     });
-    logEvent(`رسالة جديدة من المعلم ${msgData.senderName} إلى ولي الأمر ${msgData.receiverName}`, 'primary');
+    logEvent(`رسالة جديدة من ${msgData.senderName} إلى ${msgData.receiverName}`, 'primary');
 
     // Dispatch external push if recipient is a parent
     if (msgData.receiverRole === 'parent' && msgData.receiverId) {
@@ -1855,7 +1819,7 @@ export default function App() {
             <div className="bg-emerald-600 px-4 py-2 flex items-center justify-between text-[11px] font-bold tracking-tight text-white/95">
               <div className="flex items-center gap-2">
                 <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>
-                <span>💬 إشعار فوري (محاكي تنبيه الهاتف)</span>
+                <span>📩 إشعار رسالة جديدة واردة</span>
               </div>
               <div className="bg-emerald-700/80 px-2 py-0.5 rounded text-[10px] font-mono">
                 رسالة رقم #{activeToast.msgNumber}
@@ -1967,23 +1931,6 @@ export default function App() {
                       <span>طلب الإذن الآن</span>
                     </button>
                   </div>
-                </div>
-
-                {/* Simulation / Diagnostic Tools */}
-                <div className="space-y-2">
-                  <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wider flex items-center gap-2">
-                    <Volume2 className="w-4 h-4 text-emerald-600" />
-                    <span>🔊 تجربة واختبار النظام الفوري (بدون إذن خارجي)</span>
-                  </h4>
-                  <p className="text-[11px] text-slate-500 leading-relaxed">
-                    إذا كان جهازك لا يدعم الإشعارات الخارجية أو كنت داخل إطار المعاينة، يمكنك اختبار نغمة رنين الـ WhatsApp والمنبه المدمج بالتطبيق فوراً عبر الزر أدناه:
-                  </p>
-                  <button
-                    onClick={testNotificationSimulation}
-                    className="w-full bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-xs font-bold py-2.5 px-4 rounded-xl transition cursor-pointer flex items-center justify-center gap-2"
-                  >
-                    <span>🔊 تجربة الرنين مع إشعار محاكي للهاتف</span>
-                  </button>
                 </div>
 
                 {/* Step-by-Step Device Instruction Guides */}

@@ -5,7 +5,6 @@
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { Grade, SentGradeSheet } from '../types';
-import { INITIAL_GRADES, INITIAL_SENT_GRADE_SHEETS, INITIAL_MONTHLY_EVALUATIONS } from '../data';
 
 // Default / fallback Supabase credentials
 const supabaseUrl = (import.meta as any).env?.VITE_SUPABASE_URL || 'https://ai-studio-school-db.supabase.co';
@@ -54,12 +53,7 @@ export async function fetchStudentGradesByParent(
     console.warn('Supabase query notice (falling back to synchronized store):', err);
   }
 
-  // 2. High-reliability fallback: filter from bundled store
-  const fallbackList = (INITIAL_GRADES || []) as Grade[];
-  return fallbackList.filter(g => {
-    if (studentId && g.studentId === studentId) return true;
-    return false;
-  });
+  return [];
 }
 
 /**
@@ -89,5 +83,5 @@ export async function fetchCertifiedGradeSheetsByParent(
     console.warn('Supabase sheets query notice:', err);
   }
 
-  return (INITIAL_SENT_GRADE_SHEETS || []) as SentGradeSheet[];
+  return [];
 }

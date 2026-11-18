@@ -99,12 +99,13 @@ export function unpackConsolidatedGrades(rec: ConsolidatedStudentGradeRecord): G
   const month = rec.evaluationMonth || rec.term || 'general';
 
   Object.entries(rec.subjects || {}).forEach(([subjectName, s]) => {
+    if (!s || s.score === null || s.score === undefined) return;
     list.push({
       id: `${sId}_${subjectName}_${month}`,
       studentId: sId,
       subject: subjectName,
       examName: s.examName || month,
-      score: s.score !== null ? Number(s.score) : 0,
+      score: Number(s.score),
       maxScore: Number(s.maxScore) || 100,
       date: s.date || new Date().toISOString().split('T')[0],
       teacherId: 'teacher',
@@ -670,6 +671,13 @@ export async function seedGradesToStudentCollection(grades: Grade[]): Promise<vo
 export async function syncSentGradeSheetsToConsolidatedCollection(sheets: SentGradeSheet[]): Promise<void> {
   if (!Array.isArray(sheets) || sheets.length === 0) return;
 
+  // STRICT GATE: Only Director-approved/sent grade sheets may be synced to students_grades.
+  // Never sync teacher-submitted ('submitted') or draft sheets before the Director approves & sends them.
+  const approvedSheets = sheets.filter(
+    (s) => s && (s.status === 'approved' || (!s.teacherId && s.status !== 'submitted' && s.status !== 'draft'))
+  );
+  if (approvedSheets.length === 0) return;
+
   const records: Array<{
     studentId: string;
     studentName?: string;
@@ -683,7 +691,11 @@ export async function syncSentGradeSheetsToConsolidatedCollection(sheets: SentGr
     directorNotes?: string;
   }> = [];
 
-  sheets.forEach(sheet => {
+  const orderedSheets = [...approvedSheets].sort((a, b) => {
+    return (new Date(a.dateSent || 0).getTime() || 0) - (new Date(b.dateSent || 0).getTime() || 0);
+  });
+
+  orderedSheets.forEach(sheet => {
     (sheet.studentsSummary || []).forEach(st => {
       const cleanId = normalizeId(st.studentId);
       if (!cleanId) return;
@@ -691,7 +703,7 @@ export async function syncSentGradeSheetsToConsolidatedCollection(sheets: SentGr
       const subjectsMap: Record<string, { score: number | null; maxScore: number; examName?: string; notes?: string }> = {};
       (st.scores || []).forEach(sc => {
         subjectsMap[sc.subject] = {
-          score: sc.score !== null ? Number(sc.score) : null,
+          score: sc.score !== null && sc.score !== undefined ? Number(sc.score) : null,
           maxScore: Number(sc.maxScore) || 100,
           examName: sheet.month,
           notes: ''
@@ -711,8 +723,10 @@ export async function syncSentGradeSheetsToConsolidatedCollection(sheets: SentGr
         directorNotes: st.directorNotes
       };
 
+      const sigKey = `${cleanId}_${sheet.month || ''}`;
       const sig = computeRecordSignature(rec);
-      if (lastSyncedConsolidatedSignatures.get(cleanId) !== sig) {
+      if (lastSyncedConsolidatedSignatures.get(sigKey) !== sig) {
+        lastSyncedConsolidatedSignatures.set(sigKey, sig);
         records.push(rec);
       }
     });

@@ -50,18 +50,16 @@ import {
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { Parent, Student, Attendance, Grade, Announcement, Message, AbsenceExcuse, Teacher, Class, SentGradeSheet } from '../types';
-import { INITIAL_STUDENTS, INITIAL_CLASSES, INITIAL_TEACHERS, INITIAL_GRADES, INITIAL_SENT_GRADE_SHEETS, INITIAL_MONTHLY_EVALUATIONS, DEFAULT_EVALUATION_MONTH } from '../data';
+import { INITIAL_STUDENTS, INITIAL_CLASSES, INITIAL_TEACHERS, INITIAL_SENT_GRADE_SHEETS, DEFAULT_EVALUATION_MONTH } from '../data';
 import { PortalDesignerBadge } from './PortalDesignerBadge';
 import { GradeSheetSignatures } from './GradeSheetSignatures';
 import { printElementById, downloadElementAsImage, exportElementAsPdf } from '../lib/printUtils';
 import { safeShowNotification, dismissNotification, dismissAllNotifications } from '../lib/notificationHelper';
-import { sendParentPushNotification } from '../lib/pushDispatcher';
 import { getStoredWelcomeMessages, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { motion, AnimatePresence } from 'motion/react';
 import { trackActivityOperation } from '../lib/firestoreTracker';
-import { fetchStudentsOnlyDirectly } from '../lib/firebaseSync';
-import { supabase, fetchStudentGradesByParent, fetchCertifiedGradeSheetsByParent } from '../lib/supabase';
-import { fetchStudentGradesOnDemand, unpackConsolidatedGrades, type ConsolidatedStudentGradeRecord } from '../lib/studentGradesQuery';
+import { fetchStudentsOnlyDirectly, ensureParentRealtimeListeners, deduplicateGradeSheetsPreservingTeachers } from '../lib/firebaseSync';
+import { fetchCertifiedGradeSheetsByParent } from '../lib/supabase';
 import { 
   isFirestoreQuotaExceeded, 
   markFirestoreQuotaExceeded, 
@@ -370,16 +368,15 @@ export default function ParentPortal({
 
   // Sent Grade Sheets Archive State (كشوف الدرجات المرسلة والمحفوظة بدون تكرار)
   const deduplicateGradeSheets = (sheets: SentGradeSheet[]): SentGradeSheet[] => {
-    if (!Array.isArray(sheets)) return [];
-    const map = new Map<string, SentGradeSheet>();
-    for (const s of sheets) {
-      const key = `${s.classId || s.className || 'all'}_${s.month}`;
-      if (!map.has(key) || new Date(s.dateSent).getTime() >= new Date(map.get(key)!.dateSent).getTime()) {
-        map.set(key, s);
-      }
-    }
-    return Array.from(map.values());
+    return deduplicateGradeSheetsPreservingTeachers(sheets);
   };
+
+  // Only sheets explicitly approved/sent by the Director are visible to Parents
+  const isApprovedSentSheet = React.useCallback((sheet: SentGradeSheet | undefined | null): boolean => {
+    if (!sheet) return false;
+    if (sheet.status === 'submitted' || sheet.status === 'draft') return false;
+    return sheet.status === 'approved' || !sheet.teacherId;
+  }, []);
 
   const [sentGradeSheets, setSentGradeSheets] = useState<SentGradeSheet[]>(() => {
     try {
@@ -394,19 +391,6 @@ export default function ParentPortal({
     return deduplicateGradeSheets(INITIAL_SENT_GRADE_SHEETS as SentGradeSheet[]);
   });
 
-  const [directGrades, setDirectGrades] = useState<Grade[]>(() => {
-    try {
-      const saved = localStorage.getItem('school_grades');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed;
-        }
-      }
-    } catch {}
-    return INITIAL_GRADES;
-  });
-
   const [directMessages, setDirectMessages] = useState<Message[]>(() => {
     try {
       const saved = localStorage.getItem('school_messages');
@@ -416,8 +400,60 @@ export default function ParentPortal({
     }
   });
 
-  const effectiveGrades = (grades && grades.length > 0) ? grades : directGrades;
-  const effectiveMessages = (messages && messages.length > 0) ? messages : directMessages;
+  // STRICT GATING: Parents NEVER see raw draft school_grades; only grades inside Director-approved SentGradeSheets
+  const effectiveGrades = React.useMemo(() => {
+    const map = new Map<string, Grade>();
+    const approvedSheets = sentGradeSheets.filter(isApprovedSentSheet);
+    approvedSheets.forEach(sheet => {
+      const month = sheet.month || '';
+      (sheet.studentsSummary || []).forEach(st => {
+        const sId = String(st.studentId || '').trim();
+        if (!sId || !Array.isArray(st.scores)) return;
+        st.scores.forEach(sc => {
+          if (sc && sc.subject && sc.score !== null && sc.score !== undefined) {
+            const key = `${sId}__${String(sc.subject).trim()}__${month}`;
+            map.set(key, {
+              id: `approved_${sheet.id || month}_${sId}_${sc.subject}`,
+              studentId: sId,
+              subject: sc.subject,
+              examName: month,
+              score: Number(sc.score),
+              maxScore: Number(sc.maxScore) || 100,
+              date: sheet.dateSent || new Date().toISOString().split('T')[0],
+              teacherId: 'director',
+              examType: 'monthly',
+              classId: sheet.classId
+            });
+          }
+        });
+      });
+    });
+    return Array.from(map.values());
+  }, [sentGradeSheets, isApprovedSentSheet]);
+
+  const effectiveMessages = React.useMemo(() => {
+    const isTestOrFakeMsg = (m: Message) => {
+      const c = m?.content || '';
+      return c.includes('تجربة إشعار') || c.includes('فحص دوري للإشعارات') || c.includes('تجربة تفعيل النظام');
+    };
+    const map = new Map<string, Message>();
+    (Array.isArray(messages) ? messages : []).forEach(m => {
+      if (m && m.id && !isTestOrFakeMsg(m)) map.set(String(m.id), m);
+    });
+    (Array.isArray(directMessages) ? directMessages : []).forEach(m => {
+      if (!m || !m.id || isTestOrFakeMsg(m)) return;
+      const key = String(m.id);
+      const existing = map.get(key);
+      if (existing) {
+        map.set(key, { ...existing, ...m, read: Boolean(existing.read || m.read) });
+      } else {
+        map.set(key, m);
+      }
+    });
+    return Array.from(map.values()).sort(
+      (a, b) => (new Date(a.date || 0).getTime() || 0) - (new Date(b.date || 0).getTime() || 0)
+    );
+  }, [messages, directMessages]);
 
   // Complete cache-first fetch function from Firestore:
   // On reopen (forceServer = false), serves IndexedDB persistentLocalCache first (0 server reads!).
@@ -453,37 +489,47 @@ export default function ParentPortal({
       const targetStudentId = activeChild?.id || loggedInStudentId;
       const targetUnifiedNo = activeChild?.unifiedNo || activeChild?.rollNo;
 
-      const [sentSnap, msgsSnap, evalSnap, monthSnap, studentGrades] = await Promise.all([
+      const [sentSnap, msgsSnap, evalSnap, monthSnap] = await Promise.all([
         fetchDocCacheOrServer(doc(db, 'school_live_data', 'school_sent_grade_sheets')),
         fetchDocCacheOrServer(doc(db, 'school_live_data', 'school_messages')),
         fetchDocCacheOrServer(doc(db, 'school_live_data', 'school_monthly_evaluations')),
-        fetchDocCacheOrServer(doc(db, 'school_live_data', 'school_evaluation_current_month')),
-        targetStudentId ? fetchStudentGradesOnDemand(targetStudentId, undefined, targetUnifiedNo, effectiveForceServer) : Promise.resolve([])
+        fetchDocCacheOrServer(doc(db, 'school_live_data', 'school_evaluation_current_month'))
       ]);
 
       if (sentSnap && sentSnap.exists()) {
         const sheetsData = sentSnap.data()?.data;
         if (Array.isArray(sheetsData) && sheetsData.length > 0) {
-          setSentGradeSheets(prev => deduplicateGradeSheets([...prev, ...sheetsData]));
-          localStorage.setItem('school_sent_grade_sheets', JSON.stringify(sheetsData));
+          setSentGradeSheets(prev => {
+            const merged = deduplicateGradeSheets([...prev, ...sheetsData]);
+            localStorage.setItem('school_sent_grade_sheets', JSON.stringify(merged));
+            return merged;
+          });
         }
-      }
-
-      if (Array.isArray(studentGrades) && studentGrades.length > 0) {
-        setDirectGrades(prev => {
-          const map = new Map<string, Grade>();
-          prev.forEach(g => map.set(g.id || `${g.studentId}_${g.subject}_${g.examName}`, g));
-          studentGrades.forEach(g => map.set(g.id || `${g.studentId}_${g.subject}_${g.examName}`, g));
-          return Array.from(map.values());
-        });
       }
 
       if (msgsSnap && msgsSnap.exists()) {
         const data = msgsSnap.data()?.data;
         if (Array.isArray(data) && data.length > 0) {
-          setDirectMessages(data);
-          if (setMessages) setMessages(data);
-          localStorage.setItem('school_messages', JSON.stringify(data));
+          const mergeMsgList = (base: Message[]) => {
+            const map = new Map<string, Message>();
+            base.forEach(m => { if (m && m.id) map.set(String(m.id), m); });
+            data.forEach((m: Message) => {
+              if (!m || !m.id) return;
+              const existing = map.get(String(m.id));
+              map.set(String(m.id), existing ? { ...existing, ...m, read: Boolean(existing.read || m.read) } : m);
+            });
+            return Array.from(map.values());
+          };
+          setDirectMessages(prev => mergeMsgList(prev));
+          if (setMessages) {
+            setMessages(prev => {
+              const merged = mergeMsgList(prev);
+              localStorage.setItem('school_messages', JSON.stringify(merged));
+              return merged;
+            });
+          } else {
+            localStorage.setItem('school_messages', JSON.stringify(data));
+          }
         }
       }
 
@@ -503,21 +549,9 @@ export default function ParentPortal({
         }
       }
 
-      // 6. Supabase & Relational Database query for student grades by Parent / Student ID
       try {
         if (activeChild) {
-          const [supaGrades, supaSheets] = await Promise.all([
-            fetchStudentGradesByParent(selectedParentId, activeChild.id, activeChild.unifiedNo),
-            fetchCertifiedGradeSheetsByParent(selectedParentId, activeChild.id, activeChild.unifiedNo)
-          ]);
-          if (Array.isArray(supaGrades) && supaGrades.length > 0) {
-            setDirectGrades(prev => {
-              const map = new Map<string, Grade>();
-              prev.forEach(g => map.set(g.id || `${g.studentId}_${g.subject}_${g.examName}`, g));
-              supaGrades.forEach(g => map.set(g.id || `${g.studentId}_${g.subject}_${g.examName}`, g));
-              return Array.from(map.values());
-            });
-          }
+          const supaSheets = await fetchCertifiedGradeSheetsByParent(selectedParentId, activeChild.id, activeChild.unifiedNo);
           if (Array.isArray(supaSheets) && supaSheets.length > 0) {
             setSentGradeSheets(prev => deduplicateGradeSheets([...prev, ...supaSheets]));
           }
@@ -549,13 +583,6 @@ export default function ParentPortal({
         } catch {}
       }
 
-      const savedGrades = localStorage.getItem('school_grades');
-      if (savedGrades) {
-        try {
-          setDirectGrades(JSON.parse(savedGrades));
-        } catch {}
-      }
-
       const savedMsgs = localStorage.getItem('school_messages');
       if (savedMsgs) {
         try {
@@ -579,69 +606,14 @@ export default function ParentPortal({
     };
     window.addEventListener('school_storage_update', handleStorageUpdate);
 
+    // Ensure real-time Firestore listeners are active for parent keys regardless of portal entry path
+    ensureParentRealtimeListeners();
+
     // Initial cache-first Firestore load on mount (serves IndexedDB cache first -> 0 server reads on reopen)
     fetchAllParentDataFromFirestore(false);
 
     return () => window.removeEventListener('school_storage_update', handleStorageUpdate);
   }, []);
-
-  // Automatic real-time listener for logged-in student's consolidated grades (`students_grades/{studentId}`)
-  React.useEffect(() => {
-    const targetStudentId = activeChild?.id || loggedInStudentId;
-    if (!targetStudentId || isFirestoreQuotaExceeded()) return;
-
-    let cancelled = false;
-    let unsubDoc: (() => void) | null = null;
-
-    (async () => {
-      try {
-        const { doc, onSnapshot } = await import('firebase/firestore');
-        const { db } = await import('../lib/firebase');
-        const { trackFirestoreRead } = await import('../lib/firestoreTracker');
-        if (!db || cancelled) return;
-
-        const docRef = doc(db, 'students_grades', String(targetStudentId).trim());
-        const rawUnsub = onSnapshot(
-          docRef,
-          (snap) => {
-            if (!snap.metadata?.fromCache) {
-              trackFirestoreRead(1, 'مزامنة فورية لدرجات الطالب', { isRealtime: true });
-            }
-            if (snap.exists()) {
-              const data = snap.data() as ConsolidatedStudentGradeRecord;
-              if (data && data.subjects) {
-                const unpacked = unpackConsolidatedGrades(data);
-                if (unpacked.length > 0) {
-                  setDirectGrades(prev => {
-                    const map = new Map<string, Grade>();
-                    prev.forEach(g => map.set(g.id || `${g.studentId}_${g.subject}_${g.examName}`, g));
-                    unpacked.forEach(g => map.set(g.id || `${g.studentId}_${g.subject}_${g.examName}`, g));
-                    return Array.from(map.values());
-                  });
-                }
-              }
-            }
-          },
-          (err: any) => {
-            if (isQuotaError(err)) {
-              markFirestoreQuotaExceeded(err);
-            }
-          }
-        );
-        unsubDoc = registerActiveFirestoreListener(rawUnsub);
-        if (cancelled && unsubDoc) {
-          unsubDoc();
-        }
-      } catch {}
-    })();
-
-    return () => {
-      cancelled = true;
-      if (unsubDoc) {
-        try { unsubDoc(); } catch {}
-      }
-    };
-  }, [activeChild?.id, loggedInStudentId]);
 
   // Track read state for various categories per parent
   const [readGradeIds, setReadGradeIds] = useState<string[]>(() => {
@@ -968,69 +940,50 @@ ${url}
     }, 6000);
   };
 
-  // Refs for tracking changes
-  const prevGradesRef = React.useRef<string[]>([]);
+  // Refs for tracking changes (only genuinely recent real-time updates after mount notify)
+  const portalMountedAtRef = React.useRef<number>(Date.now());
   const prevAttendanceRef = React.useRef<string[]>([]);
   const prevAnnouncementsRef = React.useRef<string[]>([]);
   const prevMessagesRef = React.useRef<string[]>([]);
   const initialLoadCompletedRef = React.useRef<boolean>(false);
 
-  // Monitor additions in real-time
+  // Monitor additions in real-time (NEVER triggers for draft grades or historical messages on startup)
   React.useEffect(() => {
     if (!selectedChildId || !selectedParentId) {
       initialLoadCompletedRef.current = false;
       return;
     }
 
-    const currentGrades = grades.filter(g => g.studentId === selectedChildId);
     const currentAttendance = attendance.filter(a => a.studentId === selectedChildId);
     const currentAnnouncements = announcements;
-    const currentMessages = messages.filter(m => 
-      m.receiverId === selectedParentId || 
-      m.receiverId === 'all' || 
-      m.receiverId === 'all_cohort_parents' || 
+    const currentMessages = effectiveMessages.filter(m =>
+      m.receiverId === selectedParentId ||
+      m.receiverId === 'all' ||
+      m.receiverId === 'all_cohort_parents' ||
       (m.receiverId?.startsWith('all_class_') && activeChild?.classId === m.receiverId.replace('all_class_', '')) ||
       m.receiverRole === 'parent'
     );
 
-    const gradeIds = currentGrades.map(g => g.id);
     const attendanceIds = currentAttendance.map(a => `${a.date}_${a.status}`);
     const announcementIds = currentAnnouncements.map(an => an.id);
     const messageIds = currentMessages.map(m => m.id);
 
     if (!initialLoadCompletedRef.current) {
-      // Establish baseline on login or child swap
-      prevGradesRef.current = gradeIds;
       prevAttendanceRef.current = attendanceIds;
       prevAnnouncementsRef.current = announcementIds;
       prevMessagesRef.current = messageIds;
       initialLoadCompletedRef.current = true;
-      console.log("[Notification Monitor] Baseline established for Child:", selectedChildId);
       return;
     }
 
-    // Check for NEW Grades
-    const newGrades = currentGrades.filter(g => !prevGradesRef.current.includes(g.id));
-    if (newGrades.length > 0) {
-      newGrades.forEach(g => {
-        const title = `📈 درجة جديدة: ${g.subject}`;
-        const body = `تم رصد درجة الطالب ${activeChild?.name} في تقييم (${g.examName}): ${g.score}/${g.maxScore}`;
-        playCustomNotificationSound();
-        showLocalPortalToast(title, body, 'grade');
-        safeShowNotification(title, {
-          body,
-          icon: '/icon.png',
-          badge: '/badge.png',
-          tag: `grade_${g.id}`,
-          renotify: true,
-          data: { msgId: g.id, url: `/?portal=parent&tab=grades` }
-        });
-      });
-      prevGradesRef.current = gradeIds;
-    }
+    const nowMs = Date.now();
+    const todayStr = new Date().toISOString().split('T')[0];
+    const isPastStartupWindow = (nowMs - portalMountedAtRef.current) > 3500;
 
-    // Check for NEW Attendance / Absences
-    const newAttendance = currentAttendance.filter(a => !prevAttendanceRef.current.includes(`${a.date}_${a.status}`));
+    // Check for NEW Attendance / Absences recorded live today
+    const newAttendance = isPastStartupWindow
+      ? currentAttendance.filter(a => !prevAttendanceRef.current.includes(`${a.date}_${a.status}`) && a.date === todayStr)
+      : [];
     if (newAttendance.length > 0) {
       newAttendance.forEach(a => {
         const statusAr = a.status === 'absent' ? 'غياب ❌' : a.status === 'late' ? 'تأخر ⚠️' : 'حضور ✅';
@@ -1047,11 +1000,12 @@ ${url}
           data: { url: `/?portal=parent&tab=attendance` }
         });
       });
-      prevAttendanceRef.current = attendanceIds;
     }
 
-    // Check for NEW Announcements
-    const newAnnouncements = currentAnnouncements.filter(an => !prevAnnouncementsRef.current.includes(an.id));
+    // Check for NEW Announcements published live today
+    const newAnnouncements = isPastStartupWindow
+      ? currentAnnouncements.filter(an => !prevAnnouncementsRef.current.includes(an.id) && an.date === todayStr)
+      : [];
     if (newAnnouncements.length > 0) {
       newAnnouncements.forEach(an => {
         const title = `📢 إعلان وتعميم مدرسي جديد`;
@@ -1067,38 +1021,39 @@ ${url}
           data: { msgId: an.id, url: `/?portal=parent&tab=notes` }
         });
       });
-      prevAnnouncementsRef.current = announcementIds;
     }
 
-    // Check for NEW Messages
-    const newMessages = currentMessages.filter(m => !prevMessagesRef.current.includes(m.id));
+    // Check for genuinely NEW Messages (created within the last 3 minutes, never historical sync or test pings)
+    const RECENT_WINDOW_MS = 3 * 60 * 1000;
+    const newMessages = currentMessages.filter(m => {
+      if (prevMessagesRef.current.includes(m.id)) return false;
+      if (m.senderRole === 'parent' || m.read) return false;
+      const msgTime = new Date(m.date || 0).getTime();
+      return msgTime > 0 && Math.abs(nowMs - msgTime) <= RECENT_WINDOW_MS;
+    });
     if (newMessages.length > 0) {
       newMessages.forEach(m => {
-        if (m.senderRole !== 'parent') {
-          const title = `💬 رسالة جديدة من: ${m.senderName}`;
-          const body = m.content.replace(/^📢 \[تصنيف الإشعار:[^\]]+\]\n/, '');
-          playCustomNotificationSound();
-          showLocalPortalToast(title, body, 'message');
-          safeShowNotification(title, {
-            body,
-            icon: '/icon.png',
-            badge: '/badge.png',
-            tag: `notif_${m.id}`,
-            renotify: false,
-            data: { msgId: m.id, url: `/?portal=parent&tab=messages&msgId=${m.id}` }
-          });
-        }
+        const title = `💬 رسالة جديدة من: ${m.senderName}`;
+        const body = m.content.replace(/^📢 \[تصنيف الإشعار:[^\]]+\]\n/, '');
+        playCustomNotificationSound();
+        showLocalPortalToast(title, body, 'message');
+        safeShowNotification(title, {
+          body,
+          icon: '/icon.png',
+          badge: '/badge.png',
+          tag: `notif_${m.id}`,
+          renotify: false,
+          data: { msgId: m.id, url: `/?portal=parent&tab=messages&msgId=${m.id}` }
+        });
       });
-      prevMessagesRef.current = messageIds;
     }
 
     // Keep arrays in sync
-    prevGradesRef.current = gradeIds;
     prevAttendanceRef.current = attendanceIds;
     prevAnnouncementsRef.current = announcementIds;
     prevMessagesRef.current = messageIds;
 
-  }, [grades, attendance, announcements, messages, selectedChildId, selectedParentId, activeChild]);
+  }, [attendance, announcements, effectiveMessages, selectedChildId, selectedParentId, activeChild]);
 
   // Firebase Live Sync status
   const [isFirebaseLive, setIsFirebaseLive] = useState<boolean>(true);
@@ -1109,8 +1064,6 @@ ${url}
   const [pushPermissionStatus, setPushPermissionStatus] = useState<string>(
     typeof window !== 'undefined' && 'Notification' in window ? Notification.permission : 'unsupported'
   );
-  const [isTestingPush, setIsTestingPush] = useState<boolean>(false);
-  const [testPushSuccess, setTestPushSuccess] = useState<boolean>(false);
   const [showRestrictedEnvModal, setShowRestrictedEnvModal] = useState<boolean>(false);
   const [copiedLink, setCopiedLink] = useState<boolean>(false);
   const [openedMessageDetail, setOpenedMessageDetail] = useState<Message | null>(null);
@@ -1312,37 +1265,6 @@ ${url}
     }
   };
 
-  // Test push notification delivery directly on parent's phone
-  const handleTestParentNotification = async () => {
-    setIsTestingPush(true);
-    try {
-      // 1. Show immediate system notification via Service Worker / Native API
-      await safeShowNotification('🔔 تجربة إشعار المدرسة الدولية', {
-        body: `مرحباً ${activeParent?.name || 'ولي الأمر'}! تم تفعيل الإشعارات بنجاح. ستصلك درجات وملاحظات الطالب (${activeChild?.name || ''}) فوراً حتى لو كان التطبيق مغلقاً.`,
-        icon: '/icon.png',
-        tag: `test_push_${Date.now()}`
-      });
-
-      // 2. Dispatch external push via Push Dispatcher
-      if (selectedParentId) {
-        await sendParentPushNotification(selectedParentId, {
-          title: '🔔 تجربة إشعار المدرسة الدولية',
-          body: `فحص وصول الإشعارات: إشعارات الهاتف لولي الأمر (${activeParent?.name || ''}) تعمل بكفاءة وبشكل مجاني 100%!`,
-          category: 'general',
-          studentId: activeChild?.id,
-          studentName: activeChild?.name
-        });
-      }
-
-      setTestPushSuccess(true);
-      setTimeout(() => setTestPushSuccess(false), 5000);
-    } catch (err) {
-      console.warn('Error testing push notification:', err);
-    } finally {
-      setIsTestingPush(false);
-    }
-  };
-
   // Helper to copy website link for opening in Chrome
   const handleCopySiteLink = () => {
     if (typeof window !== 'undefined') {
@@ -1454,11 +1376,21 @@ ${url}
         }
 
         // Fetch cache-first scoped specifically to notifications for this parent/student
-        const q = selectedParentId 
+        const notificationReceivers = Array.from(new Set([
+          selectedParentId,
+          activeChild?.id,
+          activeChild?.unifiedNo,
+          activeChild?.classId ? `all_class_${activeChild.classId}` : '',
+          'all',
+          'all_cohort_parents',
+          'all_everyone'
+        ].filter(Boolean) as string[])).slice(0, 10);
+
+        const q = notificationReceivers.length > 0
           ? query(
               collection(db, 'notifications'),
-              where('receiverId', 'in', [selectedParentId, 'all', 'all_cohort_parents']),
-              limit(40)
+              where('receiverId', 'in', notificationReceivers),
+              limit(50)
             )
           : query(
               collection(db, 'notifications'),
@@ -1478,6 +1410,10 @@ ${url}
           const incomingMsgs: Message[] = [];
           snapshot.forEach((docSnap) => {
             const data = docSnap.data();
+            const titleOrBody = `${data.title || ''} ${data.content || ''} ${data.body || ''}`;
+            if (titleOrBody.includes('تجربة إشعار') || titleOrBody.includes('فحص دوري للإشعارات')) {
+              return;
+            }
             incomingMsgs.push({
               id: data.id || docSnap.id,
               senderId: data.senderId,
@@ -1660,17 +1596,7 @@ ${url}
         localStorage.setItem('parent_portal_auto_login', rememberMe ? 'true' : 'false');
         setLoginError('');
 
-        // On-demand fetch scoped strictly to this student: where("studentId", "==", currentUserId)
-        fetchStudentGradesOnDemand(foundStudent.id, undefined, foundStudent.unifiedNo || foundStudent.rollNo).then(gList => {
-          if (Array.isArray(gList) && gList.length > 0) {
-            setDirectGrades(prev => {
-              const map = new Map<string, Grade>();
-              prev.forEach(g => map.set(g.id || `${g.studentId}_${g.subject}_${g.examName}`, g));
-              gList.forEach(g => map.set(g.id || `${g.studentId}_${g.subject}_${g.examName}`, g));
-              return Array.from(map.values());
-            });
-          }
-        }).catch(() => {});
+        fetchAllParentDataFromFirestore(true).catch(() => {});
       } else {
         if (!isAuto) {
           setLoginError(
@@ -1690,17 +1616,7 @@ ${url}
         localStorage.setItem('parent_portal_unified_no', fallback.unifiedNo || fallback.rollNo || '');
         setLoginError('');
 
-        // Scoped on-demand fetch
-        fetchStudentGradesOnDemand(fallback.id, undefined, fallback.unifiedNo || fallback.rollNo).then(gList => {
-          if (Array.isArray(gList) && gList.length > 0) {
-            setDirectGrades(prev => {
-              const map = new Map<string, Grade>();
-              prev.forEach(g => map.set(g.id || `${g.studentId}_${g.subject}_${g.examName}`, g));
-              gList.forEach(g => map.set(g.id || `${g.studentId}_${g.subject}_${g.examName}`, g));
-              return Array.from(map.values());
-            });
-          }
-        }).catch(() => {});
+        fetchAllParentDataFromFirestore(false).catch(() => {});
       } else if (!isAuto) {
         setLoginError(`تعذر التحقق من الرقم الموحد (${cleanInput}). يرجى التأكد من كتابة الرقم بشكل صحيح والمحاولة مجدداً.`);
       }
@@ -1727,6 +1643,7 @@ ${url}
   };
 
   const markAsRead = async (msgId: string) => {
+    setDirectMessages(prev => prev.map(m => m.id === msgId ? { ...m, read: true } : m));
     if (setMessages) {
       setMessages(prev => {
         const updated = prev.map(m => m.id === msgId ? { ...m, read: true } : m);
@@ -1978,6 +1895,7 @@ ${url}
       if (
         mRec === 'all' || 
         mRec === 'all_cohort_parents' || 
+        mRec === 'all_everyone' ||
         (mRec.startsWith('all_class_') && activeChild.classId === mRec.replace('all_class_', ''))
       ) {
         if (!m.studentId) return true;
@@ -2176,7 +2094,7 @@ ${url}
         // ignore
       }
     }
-    return INITIAL_MONTHLY_EVALUATIONS;
+    return {};
   });
 
   // Blocked Grades state for ParentPortal
@@ -2195,7 +2113,7 @@ ${url}
   // Mark all grades for selected child as read when visiting 'grades' tab
   React.useEffect(() => {
     if (activeTab === 'grades' && selectedChildId && selectedParentId) {
-      const currentChildGradeIds = grades.filter(g => g.studentId === selectedChildId).map(g => g.id);
+      const currentChildGradeIds = effectiveGrades.filter(g => g.studentId === selectedChildId).map(g => g.id);
       if (currentChildGradeIds.length > 0) {
         setReadGradeIds(prev => {
           const next = Array.from(new Set([...prev, ...currentChildGradeIds]));
@@ -2204,14 +2122,14 @@ ${url}
         });
       }
       
-      // Also mark monthly evaluation as read
+      // Also mark monthly evaluation as read if approved
       if (monthlyEvaluations[selectedChildId]) {
-        const currentText = monthlyEvaluations[selectedChildId].text;
+        const currentText = monthlyEvaluations[selectedChildId].text || '';
         localStorage.setItem(`read_monthly_eval_${selectedChildId}`, currentText);
         setReadMonthlyEval(currentText);
       }
     }
-  }, [activeTab, selectedChildId, grades, selectedParentId, monthlyEvaluations]);
+  }, [activeTab, selectedChildId, effectiveGrades, selectedParentId, monthlyEvaluations]);
 
   // Mark all attendance for selected child as read when visiting 'attendance' tab
   React.useEffect(() => {
@@ -2766,11 +2684,7 @@ ${url}
 
   // Track unread counts for grades, attendance, announcements
   const unreadGradesCount = effectiveGrades.filter(g => isGradeForActiveChild(g) && !readGradeIds.includes(g.id)).length;
-  const isEvalUnread = !!(
-    (monthlyEvaluations[selectedChildId] && monthlyEvaluations[selectedChildId].text.trim() && monthlyEvaluations[selectedChildId].text !== readMonthlyEval) ||
-    (activeChild?.unifiedNo && monthlyEvaluations[activeChild.unifiedNo] && monthlyEvaluations[activeChild.unifiedNo].text.trim() && monthlyEvaluations[activeChild.unifiedNo].text !== readMonthlyEval)
-  );
-  const totalUnreadGrades = unreadGradesCount + (isEvalUnread ? 1 : 0);
+  const totalUnreadGrades = unreadGradesCount;
 
   const unreadAttendanceCount = attendance.filter(a => isAttendanceForActiveChild(a) && !readAttendanceIds.includes(a.id)).length;
   const unreadAnnouncementsCount = filteredAnnouncements.filter(a => !readAnnouncementIds.includes(a.id)).length;
@@ -3521,22 +3435,15 @@ ${url}
                 </button>
               )}
 
-              {/* زر الإشعارات المصغر والأنيق */}
+              {/* مؤشر حالة الإشعارات بدون إرسال إشعارات تجريبية */}
               {pushPermissionStatus === 'granted' ? (
-                <button
-                  type="button"
-                  onClick={handleTestParentNotification}
-                  disabled={isTestingPush}
-                  className="bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200/80 px-3 py-2 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs shrink-0"
-                  title="الإشعارات مفعلة - اضغط لإجراء تجربة"
+                <div
+                  className="bg-emerald-50 text-emerald-800 border border-emerald-200/80 px-3 py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-2xs shrink-0"
+                  title="الإشعارات الرسمية مفعلة"
                 >
-                  <span className="relative flex h-2 w-2">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                    <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                  </span>
                   <BellRing className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>{isTestingPush ? 'فحص...' : testPushSuccess ? 'وصل بنجاح ✓' : 'الإشعارات'}</span>
-                </button>
+                  <span>الإشعارات مفعّلة ✓</span>
+                </div>
               ) : (
                 <button
                   type="button"
@@ -3723,34 +3630,67 @@ ${url}
                           return false;
                         };
 
-                        // 1. Get all grades for this child across all identifiers
-                        const allChildGrades = effectiveGrades.filter(isGradeForActiveChild);
+                        // 1. Get ONLY Director-approved certified grade sheets for this student (NEVER teacher 'submitted' or draft grades)
+                        const studentSheets = sentGradeSheets
+                          .filter(sheet =>
+                            isApprovedSentSheet(sheet) &&
+                            Array.isArray(sheet.studentsSummary) &&
+                            sheet.studentsSummary.some(s => doesSummaryContainStudent(s, activeChild))
+                          )
+                          .sort((a, b) => {
+                            const aAppr = a.status === 'approved' ? 1 : 0;
+                            const bAppr = b.status === 'approved' ? 1 : 0;
+                            if (aAppr !== bAppr) return bAppr - aAppr;
+                            return (new Date(b.dateSent || 0).getTime() || 0) - (new Date(a.dateSent || 0).getTime() || 0);
+                          });
 
-                        // 2. Get all certified grade sheets sent for this student
-                        const studentSheets = sentGradeSheets.filter(sheet => 
-                          Array.isArray(sheet.studentsSummary) && sheet.studentsSummary.some(s => doesSummaryContainStudent(s, activeChild))
+                        // 2. Also allow official Director-sent grade_report messages (never raw teacher drafts)
+                        const studentGradeMessages = effectiveMessages.filter(m =>
+                          m.senderRole === 'director' &&
+                          isMessageForThisStudent(m) &&
+                          (m.category === 'grade_report' || isTeacherGradeMessage(m))
                         );
+
+                        // If the Director has NOT clicked "Send to Parents" yet, do NOT expose any draft grades or report card
+                        if (studentSheets.length === 0 && studentGradeMessages.length === 0) {
+                          return (
+                            <div className="bg-white rounded-3xl border-2 border-dashed border-indigo-200 p-8 sm:p-12 text-center space-y-4 shadow-sm mb-6">
+                              <div className="w-16 h-16 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center mx-auto text-3xl shadow-2xs">
+                                ⏳
+                              </div>
+                              <h4 className="text-base sm:text-lg font-black text-slate-800">
+                                لم يتم إرسال كشف الدرجات من قبل إدارة المدرسة بعد
+                              </h4>
+                              <p className="text-xs text-slate-500 max-w-md mx-auto leading-relaxed">
+                                لا تظهر الدرجات أو الشهادات لولي الأمر إلا بعد مراجعتها واعتمادها والضغط على زر <strong>«إرسال لأولياء الأمور»</strong> من قبل المدير العام.
+                              </p>
+                            </div>
+                          );
+                        }
+
+                        const allChildGrades = effectiveGrades.filter(isGradeForActiveChild);
                         const childSentMonths = studentSheets.map(s => s.month).filter(Boolean);
+                        const messageMonths = studentGradeMessages
+                          .map(m => {
+                            const mm = m.content.match(/الشهر:\s*\[?([^\]\n|]+)\]?/) || m.content.match(/لشهر\s*(?:\(([^)]+)\)|([^\s\n()]+))/);
+                            return (mm?.[1] || mm?.[2] || '').trim();
+                          })
+                          .filter(Boolean);
 
                         const uniqueGradeMonths = Array.from(new Set([
-                          ...allChildGrades.map(g => g.examName).filter(Boolean),
-                          ...childSentMonths
+                          ...childSentMonths,
+                          ...messageMonths,
+                          ...allChildGrades.map(g => g.examName).filter(Boolean)
                         ]));
-                        
-                        // Helper: check if a month has real recorded scores or sent sheet for this child
+
                         const doesMonthHaveRecordedGrades = (m: string) => {
                           if (!m) return false;
-                          const inGrades = allChildGrades.some(g => g.examName === m && g.score !== null && g.score !== undefined);
-                          const inSheets = studentSheets.some(s => s.month === m);
-                          return inGrades || inSheets;
+                          return studentSheets.some(s => s.month === m) ||
+                            allChildGrades.some(g => g.examName === m && g.score !== null && g.score !== undefined);
                         };
 
-                        // Auto-select the month:
-                        // 1. If user explicitly selected parentSelectedMonth AND (it has data OR no month has data)
-                        // 2. Otherwise pick the month with actual recorded grades (e.g. "التاسع")
-                        // 3. Fallback to uniqueGradeMonths[0] or currentEvaluationMonth
-                        let targetMonth = currentEvaluationMonth;
-                        if (parentSelectedMonth && (doesMonthHaveRecordedGrades(parentSelectedMonth) || !uniqueGradeMonths.some(doesMonthHaveRecordedGrades))) {
+                        let targetMonth = uniqueGradeMonths[0] || currentEvaluationMonth;
+                        if (parentSelectedMonth && uniqueGradeMonths.includes(parentSelectedMonth)) {
                           targetMonth = parentSelectedMonth;
                         } else {
                           const monthWithData = uniqueGradeMonths.find(doesMonthHaveRecordedGrades);
@@ -3758,12 +3698,11 @@ ${url}
                         }
                         const studentGrades = allChildGrades.filter(g => g.examName === targetMonth);
 
-                        // Find any certified sent grade sheet for this target month and this child
+                        // Find certified sent grade sheet for this approved target month
                         const sentSheetForMonth = studentSheets.find(sheet => sheet.month === targetMonth);
                         const sentStudentSummary = sentSheetForMonth?.studentsSummary?.find(s => doesSummaryContainStudent(s, activeChild));
 
-                        // 3. Also parse any grades mentioned in teacher/director grade messages for this student & month
-                        const studentGradeMessages = effectiveMessages.filter(m => isMessageForThisStudent(m) && isTeacherGradeMessage(m));
+                        // Parse any grades mentioned in official Director grade messages for this student & month
                         const messageGradesMap: Record<string, number> = {};
                         for (const msg of studentGradeMessages) {
                           if (targetMonth && !msg.content.includes(targetMonth) && studentGradeMessages.length > 1) {
@@ -3782,7 +3721,7 @@ ${url}
                           }
                         }
 
-                        // Collect all distinct subjects from active subjects, sent sheets, and messages
+                        // Collect all distinct subjects from active subjects, approved sent sheets, and Director grade messages
                         const subjectsFromSent = sentStudentSummary && Array.isArray(sentStudentSummary.scores)
                           ? sentStudentSummary.scores.map(sc => sc.subject).filter(Boolean)
                           : [];
@@ -3855,17 +3794,17 @@ ${url}
                           estimation = sentStudentSummary.estimation;
                         }
 
-                        // Evaluation for target month
-                        const evalForMonth = monthlyEvaluations[`${selectedChildId}_${targetMonth}`] || 
-                          monthlyEvaluations[`${activeChild?.unifiedNo}_${targetMonth}`] ||
-                          monthlyEvaluations[`${activeChild?.rollNo}_${targetMonth}`] ||
-                          (monthlyEvaluations[selectedChildId]?.month === targetMonth ? monthlyEvaluations[selectedChildId] : null) ||
-                          monthlyEvaluations[selectedChildId] ||
-                          monthlyEvaluations[activeChild?.unifiedNo || ''] ||
-                          monthlyEvaluations[activeChild?.rollNo || ''];
+                        // Directives ONLY from approved sent summary (or monthlyEvaluations strictly for this approved targetMonth)
+                        const hasApprovedForMonth = Boolean(sentStudentSummary || studentGradeMessages.length > 0);
+                        const evalForMonth = hasApprovedForMonth
+                          ? (monthlyEvaluations[`${selectedChildId}_${targetMonth}`] ||
+                             monthlyEvaluations[`${activeChild?.unifiedNo}_${targetMonth}`] ||
+                             monthlyEvaluations[`${activeChild?.rollNo}_${targetMonth}`] ||
+                             (monthlyEvaluations[selectedChildId]?.month === targetMonth ? monthlyEvaluations[selectedChildId] : null))
+                          : null;
 
-                        const teacherMsg = evalForMonth?.teacherText !== undefined ? evalForMonth.teacherText : (evalForMonth?.text || '');
-                        const directorMsg = evalForMonth?.directorText || sentStudentSummary?.directorNotes || '';
+                        const teacherMsg = sentStudentSummary?.teacherNotes ?? (evalForMonth?.teacherText !== undefined ? evalForMonth.teacherText : (evalForMonth?.text || ''));
+                        const directorMsg = sentStudentSummary?.directorNotes ?? evalForMonth?.directorText ?? '';
 
                         const schoolLogo = localStorage.getItem('school_logo_image') || schoolAppIcon;
                         const studentPhoto = localStorage.getItem(`student_photo_${selectedChildId}`) || localStorage.getItem(`student_photo_${activeChild?.name}`);
@@ -3992,7 +3931,7 @@ ${url}
                                       onChange={(e) => setParentSelectedMonth(e.target.value)}
                                       className="bg-transparent text-white text-xs font-black focus:outline-none cursor-pointer"
                                     >
-                                      {Array.from(new Set([...uniqueGradeMonths, currentEvaluationMonth])).map(m => {
+                                      {uniqueGradeMonths.map(m => {
                                         const hasData = doesMonthHaveRecordedGrades(m);
                                         return (
                                           <option key={m} value={m} className="bg-slate-900 text-white">
@@ -4743,12 +4682,19 @@ ${url}
 
                   {/* Dedicated Student Behavior View */}
                   <div className="space-y-6">
-                    {/* A. Monthly Evaluation/Behavior Card (set by Director) */}
+                    {/* A. Monthly Evaluation/Behavior Card (ONLY shown if Director approved & sent that month's sheet) */}
                     {(() => {
+                      const latestApprovedSheet = sentGradeSheets.find(sheet =>
+                        isApprovedSentSheet(sheet) &&
+                        sheet.month === currentEvaluationMonth &&
+                        Array.isArray(sheet.studentsSummary) &&
+                        sheet.studentsSummary.some(s => String(s.studentId || '').trim() === String(selectedChildId).trim() || (activeChild?.unifiedNo && String(s.unifiedNo || '').trim() === String(activeChild.unifiedNo).trim()))
+                      );
+                      if (!latestApprovedSheet) return null;
+
                       const evalObj = monthlyEvaluations[`${selectedChildId}_${currentEvaluationMonth}`] || 
                         monthlyEvaluations[`${activeChild?.unifiedNo}_${currentEvaluationMonth}`] ||
-                        monthlyEvaluations[selectedChildId] ||
-                        monthlyEvaluations[activeChild?.unifiedNo || ''];
+                        (monthlyEvaluations[selectedChildId]?.month === currentEvaluationMonth ? monthlyEvaluations[selectedChildId] : null);
 
                       const tText = evalObj?.teacherText !== undefined ? evalObj.teacherText : (evalObj?.text || '');
                       const dText = evalObj?.directorText || '';
