@@ -7,7 +7,13 @@ import { db } from './firebase';
 import { collection, setDoc, doc, getDoc, getDocs, serverTimestamp } from 'firebase/firestore';
 import { trackFirestoreRead, trackFirestoreWrite } from './firestoreTracker';
 import { safeShowNotification } from './notificationHelper';
-import { isFirestoreQuotaExceeded, markFirestoreQuotaExceeded, isQuotaError } from './quotaManager';
+import {
+  isFirestoreWriteQuotaExceeded,
+  isFirestoreReadQuotaExceeded,
+  markFirestoreWriteQuotaExceeded,
+  markFirestoreReadQuotaExceeded,
+  isQuotaError
+} from './quotaManager';
 
 export interface PushNotificationPayload {
   title: string;
@@ -44,9 +50,9 @@ export async function sendParentPushNotification(
 
   // 1. Add/set record to Firestore 'notifications' collection using msgId as the document ID
   // Using setDoc ensures that multiple dispatches for the same msgId do not create duplicate documents.
-  if (!payload.skipFirestoreRecord && !isFirestoreQuotaExceeded()) {
+  if (!payload.skipFirestoreRecord && !isFirestoreWriteQuotaExceeded()) {
     try {
-      if (db && !isFirestoreQuotaExceeded()) {
+      if (db && !isFirestoreWriteQuotaExceeded()) {
         await setDoc(doc(db, 'notifications', msgId), {
           id: msgId,
           receiverId: parentId,
@@ -71,7 +77,7 @@ export async function sendParentPushNotification(
       }
     } catch (err: any) {
       if (isQuotaError(err)) {
-        markFirestoreQuotaExceeded(err);
+        markFirestoreWriteQuotaExceeded(err);
       } else {
         console.warn('[PushDispatcher] Could not record notification to Firestore:', err);
       }
@@ -81,9 +87,9 @@ export async function sendParentPushNotification(
   }
 
   // 2. Look up parent's registered FCM/Web Push device token for external background push
-  if (!isFirestoreQuotaExceeded()) {
+  if (!isFirestoreReadQuotaExceeded()) {
     try {
-      if (db && !isFirestoreQuotaExceeded()) {
+      if (db && !isFirestoreReadQuotaExceeded()) {
         const tokenDocRef = doc(db, 'fcm_tokens', parentId);
         const tokenDoc = await getDoc(tokenDocRef);
         trackFirestoreRead(1, `قراءة توكن إشعارات (${parentId})`);
@@ -106,7 +112,7 @@ export async function sendParentPushNotification(
               }
             }
 
-            if (!serverKey && db && !isFirestoreQuotaExceeded()) {
+            if (!serverKey && db && !isFirestoreReadQuotaExceeded()) {
               try {
                 const configDoc = await getDoc(doc(db, 'school_live_data', 'school_fcm_config'));
                 trackFirestoreRead(1, 'قراءة إعدادات FCM');
@@ -120,7 +126,7 @@ export async function sendParentPushNotification(
                   }
                 }
               } catch (cfgErr: any) {
-                if (isQuotaError(cfgErr)) markFirestoreQuotaExceeded(cfgErr);
+                if (isQuotaError(cfgErr)) markFirestoreReadQuotaExceeded(cfgErr);
               }
             }
 
@@ -206,7 +212,7 @@ export async function sendBroadcastPushNotification(
   const msgId = payload.msgId || `m_broadcast_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
 
   // 1. Create exactly ONE broadcast document in Firestore
-  if (!payload.skipFirestoreRecord && db && !isFirestoreQuotaExceeded()) {
+  if (!payload.skipFirestoreRecord && db && !isFirestoreWriteQuotaExceeded()) {
     try {
       const broadcastReceiverId = payload.targetReceiverId || 'all_cohort_parents';
       await setDoc(doc(db, 'notifications', msgId), {
@@ -228,7 +234,7 @@ export async function sendBroadcastPushNotification(
       trackFirestoreWrite(1, 'إرسال تعميم جماعي');
     } catch (err: any) {
       if (isQuotaError(err)) {
-        markFirestoreQuotaExceeded(err);
+        markFirestoreWriteQuotaExceeded(err);
       } else {
         console.warn('[PushDispatcher] Could not record broadcast to Firestore:', err);
       }
@@ -257,14 +263,14 @@ export async function sendBroadcastPushNotification(
  * Gets count of registered push notification devices from Firestore
  */
 export async function getRegisteredPushDevicesCount(): Promise<number> {
-  if (!db || isFirestoreQuotaExceeded()) return 0;
+  if (!db || isFirestoreReadQuotaExceeded()) return 0;
   try {
     const snap = await getDocs(collection(db, 'fcm_tokens'));
     trackFirestoreRead(snap.size || 1, `عد الأجهزة المسجلة (${snap.size})`);
     return snap.size;
   } catch (err: any) {
     if (isQuotaError(err)) {
-      markFirestoreQuotaExceeded(err);
+      markFirestoreReadQuotaExceeded(err);
     } else {
       console.warn('[PushDispatcher] Could not fetch FCM tokens count:', err);
     }

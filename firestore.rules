@@ -1,14 +1,13 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Default deny to ensure security of other collections
+    // Full read and write permissions without auth restrictions across all collections
+    // as requested for direct cross-portal synchronization (Director, Teacher, Parent).
     match /{document=**} {
-      allow read, write: if false;
+      allow read, write: if true;
     }
 
     // Rules for school live data sync keys
-    // Since the app uses client-side password verification rather than Firebase Auth,
-    // this collection must be publicly accessible for reads and writes to sync across devices.
     match /school_live_data/{key} {
       allow read, write: if true;
     }
@@ -19,8 +18,8 @@ service cloud.firestore {
     }
 
     // Startup connection check document
-    match /test/connection {
-      allow read: if true;
+    match /test/{docId} {
+      allow read, write: if true;
     }
 
     // Rules for consolidated single-document student grades (on-demand direct getDoc by studentId)

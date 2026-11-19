@@ -61,11 +61,15 @@ import { trackActivityOperation } from '../lib/firestoreTracker';
 import { fetchStudentsOnlyDirectly, ensureParentRealtimeListeners, deduplicateGradeSheetsPreservingTeachers, syncLivePortalDataFromServer, saveSyncedLocalOnly, PARENT_FAST_LIVE_KEYS } from '../lib/firebaseSync';
 import { fetchGradeReportsFromFirestore, subscribeGradeReportsRealtime } from '../lib/gradeReportsFirestore';
 import { fetchCertifiedGradeSheetsByParent } from '../lib/supabase';
-import { 
-  isFirestoreQuotaExceeded, 
-  markFirestoreQuotaExceeded, 
-  isQuotaError, 
-  registerActiveFirestoreListener 
+import {
+  isFirestoreQuotaExceeded,
+  isFirestoreReadQuotaExceeded,
+  isFirestoreWriteQuotaExceeded,
+  markFirestoreQuotaExceeded,
+  markFirestoreReadQuotaExceeded,
+  markFirestoreWriteQuotaExceeded,
+  isQuotaError,
+  registerActiveFirestoreListener
 } from '../lib/quotaManager';
 
 interface ParentPortalProps {
@@ -480,7 +484,7 @@ export default function ParentPortal({
       const { trackFirestoreRead } = await import('../lib/firestoreTracker');
       if (!db) return;
 
-      const effectiveForceServer = isFirestoreQuotaExceeded() ? false : forceServer;
+      const effectiveForceServer = isFirestoreReadQuotaExceeded() ? false : forceServer;
 
       const fetchDocCacheOrServer = async (docRef: any, ms = 1200): Promise<any> => {
         try {
@@ -494,7 +498,7 @@ export default function ParentPortal({
           return snap;
         } catch (err: any) {
           if (isQuotaError(err)) {
-            markFirestoreQuotaExceeded(err);
+            markFirestoreReadQuotaExceeded(err);
           }
           return null;
         }
@@ -929,7 +933,7 @@ ${url}
         if (db) {
           const { snap, fromCache } = await getDocCacheFirst(
             doc(db, 'school_live_data', 'school_students'),
-            { forceServer: !isFirestoreQuotaExceeded(), timeoutMs: 3500 }
+            { forceServer: !isFirestoreReadQuotaExceeded(), timeoutMs: 3500 }
           );
           if (snap && !fromCache) trackFirestoreRead(1, 'التحقق من رقم الطالب الموحد');
           if (snap && snap.exists()) {
@@ -951,7 +955,7 @@ ${url}
         }
       } catch (err: any) {
         if (isQuotaError(err)) {
-          markFirestoreQuotaExceeded(err);
+          markFirestoreReadQuotaExceeded(err);
         } else {
           console.warn('Auto URL student resolve from Firestore error:', err);
         }
@@ -1026,8 +1030,11 @@ ${url}
     const currentAnnouncements = announcements;
     const currentMessages = effectiveMessages.filter(m =>
       m.receiverId === selectedParentId ||
+      m.receiverId === selectedChildId ||
+      m.studentId === selectedChildId ||
       m.receiverId === 'all' ||
       m.receiverId === 'all_cohort_parents' ||
+      m.receiverId === 'all_everyone' ||
       (m.receiverId?.startsWith('all_class_') && activeChild?.classId === m.receiverId.replace('all_class_', '')) ||
       m.receiverRole === 'parent'
     );
@@ -1297,11 +1304,11 @@ ${url}
         }
 
         // 2. Always persist parent's active device registration in Firestore
-        if (!isFirestoreQuotaExceeded()) {
+        if (!isFirestoreWriteQuotaExceeded()) {
           try {
             const { doc, setDoc } = await import('firebase/firestore');
             const { db } = await import('../lib/firebase');
-            if (db && !isFirestoreQuotaExceeded()) {
+            if (db && !isFirestoreWriteQuotaExceeded()) {
               const { trackFirestoreWrite } = await import('../lib/firestoreTracker');
               await setDoc(doc(db, 'fcm_tokens', selectedParentId), {
                 parentId: selectedParentId,
@@ -1317,7 +1324,7 @@ ${url}
             }
           } catch (storeErr: any) {
             if (isQuotaError(storeErr)) {
-              markFirestoreQuotaExceeded(storeErr);
+              markFirestoreWriteQuotaExceeded(storeErr);
             } else {
               console.warn("[Push Registration] Could not save token to Firestore:", storeErr);
             }
@@ -1427,7 +1434,7 @@ ${url}
     // ON-DEMAND FETCH: Switched from continuous onSnapshot to on-demand getDocs
     // This closes persistent connection streams from students and eliminates quota drain.
     const fetchNotificationsOnDemand = async () => {
-      if (isFirestoreQuotaExceeded()) {
+      if (isFirestoreReadQuotaExceeded()) {
         setIsFirebaseLive(false);
         setFirebaseErrorMsg('');
         return;
@@ -1503,14 +1510,14 @@ ${url}
               prev.forEach(m => map.set(m.id, m));
               incomingMsgs.forEach(m => map.set(m.id, m));
               const updated = Array.from(map.values());
-              localStorage.setItem('school_messages', JSON.stringify(updated));
+              saveSyncedLocalOnly('school_messages', JSON.stringify(updated));
               return updated;
             });
           }
         }
       } catch (err: any) {
         if (isQuotaError(err)) {
-          markFirestoreQuotaExceeded(err);
+          markFirestoreReadQuotaExceeded(err);
         }
         setIsFirebaseLive(false);
       }

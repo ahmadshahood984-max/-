@@ -49,6 +49,7 @@ import {
   FAST_LIVE_SYNC_KEYS,
   PARENT_FAST_LIVE_KEYS
 } from './lib/firebaseSync';
+import { isFirestoreQuotaExceeded, resetFirestoreQuotaBreaker } from './lib/quotaManager';
 import { 
   Building, 
   Users, 
@@ -289,6 +290,9 @@ export default function App() {
     if (isManualSyncing) return;
     setIsManualSyncing(true);
     try {
+      if (isFirestoreQuotaExceeded()) {
+        resetFirestoreQuotaBreaker();
+      }
       const targetKeys = activePortal === 'parent' ? PARENT_FAST_LIVE_KEYS : FAST_LIVE_SYNC_KEYS;
       await syncLivePortalDataFromServer({ keys: targetKeys, minIntervalMs: 0 });
       reloadFromLocalStorageRef.current?.();

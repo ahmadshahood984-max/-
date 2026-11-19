@@ -11,7 +11,13 @@ import {
 } from 'firebase/firestore';
 import { Grade, SentGradeSheet } from '../types';
 import { trackFirestoreRead, trackFirestoreWrite } from './firestoreTracker';
-import { isFirestoreQuotaExceeded, markFirestoreQuotaExceeded, isQuotaError } from './quotaManager';
+import {
+  isFirestoreWriteQuotaExceeded,
+  isFirestoreReadQuotaExceeded,
+  markFirestoreWriteQuotaExceeded,
+  markFirestoreReadQuotaExceeded,
+  isQuotaError
+} from './quotaManager';
 import { enqueuePendingGradeBatch, getPendingGradeBatches, removePendingGradeBatch } from './offlineVault';
 
 /**
@@ -156,8 +162,8 @@ export async function fetchStudentGradesOnDemand(
     return getLocalStudentGrades(cleanUserId, fallbackUnifiedNo);
   }
 
-  // If quota circuit-breaker is tripped, allow cache-only reads without hitting server
-  const effectiveForceServer = isFirestoreQuotaExceeded() ? false : forceServer;
+  // If read quota circuit-breaker is tripped, allow cache-only reads without hitting server
+  const effectiveForceServer = isFirestoreReadQuotaExceeded() ? false : forceServer;
 
   try {
     // 1. Direct single-document cache-first read for primary studentId
@@ -202,7 +208,7 @@ export async function fetchStudentGradesOnDemand(
     }
   } catch (err: any) {
     if (isQuotaError(err)) {
-      markFirestoreQuotaExceeded(err);
+      markFirestoreReadQuotaExceeded(err);
     } else {
       console.warn('[StudentGrades] Notice retrieving consolidated document:', err?.message || err);
     }
@@ -227,7 +233,7 @@ export async function fetchConsolidatedStudentRecord(
     return getLocalConsolidatedRecord(cleanId, fallbackUnifiedNo);
   }
 
-  const effectiveForceServer = isFirestoreQuotaExceeded() ? false : forceServer;
+  const effectiveForceServer = isFirestoreReadQuotaExceeded() ? false : forceServer;
 
   try {
     const docRef = doc(db, 'students_grades', cleanId);
@@ -258,7 +264,7 @@ export async function fetchConsolidatedStudentRecord(
     }
   } catch (err: any) {
     if (isQuotaError(err)) {
-      markFirestoreQuotaExceeded(err);
+      markFirestoreReadQuotaExceeded(err);
     }
   }
 
@@ -362,7 +368,7 @@ async function commitConsolidatedBatchToFirestore(
     directorNotes?: string;
   }>
 ): Promise<boolean> {
-  if (!records || records.length === 0 || !db || isFirestoreQuotaExceeded()) return false;
+  if (!records || records.length === 0 || !db || isFirestoreWriteQuotaExceeded()) return false;
 
   for (let i = 0; i < records.length; i += 400) {
     const chunk = records.slice(i, i + 400);
@@ -403,14 +409,14 @@ async function commitConsolidatedBatchToFirestore(
  * Flushes any consolidated student grade batches saved while offline.
  */
 export async function flushPendingGradeBatches(): Promise<number> {
-  if (!db || isFirestoreQuotaExceeded()) return 0;
+  if (!db || isFirestoreWriteQuotaExceeded()) return 0;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return 0;
 
   let flushed = 0;
   try {
     const batches = await getPendingGradeBatches();
     for (const item of batches) {
-      if (isFirestoreQuotaExceeded()) break;
+      if (isFirestoreWriteQuotaExceeded()) break;
       try {
         const ok = await Promise.race([
           commitConsolidatedBatchToFirestore(item.records),
@@ -422,7 +428,7 @@ export async function flushPendingGradeBatches(): Promise<number> {
         }
       } catch (err: any) {
         if (isQuotaError(err)) {
-          markFirestoreQuotaExceeded(err);
+          markFirestoreWriteQuotaExceeded(err);
           break;
         }
       }
@@ -469,7 +475,7 @@ export async function batchSaveStudentsGradesConsolidated(
   const batchId = `gb_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   await enqueuePendingGradeBatch(batchId, changedRecords);
 
-  if (!db || isFirestoreQuotaExceeded()) return true;
+  if (!db || isFirestoreWriteQuotaExceeded()) return true;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
     return true;
   }
@@ -482,7 +488,7 @@ export async function batchSaveStudentsGradesConsolidated(
       })
       .catch((err: any) => {
         if (isQuotaError(err)) {
-          markFirestoreQuotaExceeded(err);
+          markFirestoreWriteQuotaExceeded(err);
         } else {
           console.warn('[BatchGrades] Notice in batch save (queued offline):', err?.message || err);
         }
@@ -497,7 +503,7 @@ export async function batchSaveStudentsGradesConsolidated(
     return true;
   } catch (err: any) {
     if (isQuotaError(err)) {
-      markFirestoreQuotaExceeded(err);
+      markFirestoreWriteQuotaExceeded(err);
     }
     return true;
   }
@@ -531,7 +537,7 @@ export async function saveSingleStudentGradesConsolidated(
     }]);
   }
 
-  if (!db || isFirestoreQuotaExceeded()) return true;
+  if (!db || isFirestoreWriteQuotaExceeded()) return true;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
     return true;
   }
@@ -554,7 +560,7 @@ export async function saveSingleStudentGradesConsolidated(
       })
       .catch((err: any) => {
         if (isQuotaError(err)) {
-          markFirestoreQuotaExceeded(err);
+          markFirestoreWriteQuotaExceeded(err);
         }
         return false;
       });
@@ -566,13 +572,39 @@ export async function saveSingleStudentGradesConsolidated(
     return true;
   } catch (err: any) {
     if (isQuotaError(err)) {
-      markFirestoreQuotaExceeded(err);
+      markFirestoreWriteQuotaExceeded(err);
     }
     return true;
   }
 }
 
+const CONSOLIDATED_SIGS_STORAGE_KEY = 'school_consolidated_synced_sigs_v1';
 const lastSyncedConsolidatedSignatures = new Map<string, string>();
+try {
+  if (typeof window !== 'undefined' && window.localStorage) {
+    const rawSigs = window.localStorage.getItem(CONSOLIDATED_SIGS_STORAGE_KEY);
+    if (rawSigs) {
+      const parsed = JSON.parse(rawSigs);
+      if (parsed && typeof parsed === 'object') {
+        Object.entries(parsed).forEach(([k, v]) => {
+          if (typeof v === 'string') lastSyncedConsolidatedSignatures.set(k, v);
+        });
+      }
+    }
+  }
+} catch {}
+
+function persistConsolidatedSignaturesToStorage(): void {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const obj: Record<string, string> = {};
+      lastSyncedConsolidatedSignatures.forEach((v, k) => {
+        obj[k] = v;
+      });
+      window.localStorage.setItem(CONSOLIDATED_SIGS_STORAGE_KEY, JSON.stringify(obj));
+    }
+  } catch {}
+}
 
 function computeSubjectsSignature(subjects: any): string {
   try {
@@ -654,7 +686,7 @@ export async function seedGradesToStudentCollection(grades: Grade[]): Promise<vo
   if (changedRecords.length > 0) {
     const batchId = `gsd_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     await enqueuePendingGradeBatch(batchId, changedRecords);
-    if (db && !isFirestoreQuotaExceeded() && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
+    if (db && !isFirestoreWriteQuotaExceeded() && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
       commitConsolidatedBatchToFirestore(changedRecords)
         .then(async (ok) => {
           if (ok) await removePendingGradeBatch(batchId);
@@ -733,6 +765,7 @@ export async function syncSentGradeSheetsToConsolidatedCollection(sheets: SentGr
   });
 
   if (records.length > 0) {
+    persistConsolidatedSignaturesToStorage();
     await batchSaveStudentsGradesConsolidated(records);
   }
 }

@@ -94,9 +94,16 @@ import {
   deleteGradeReportFromFirestore,
   fetchGradeReportsFromFirestore,
   subscribeGradeReportsRealtime,
-  extractFirestoreErrorMessage
+  extractFirestoreErrorMessage,
+  isFirestoreQuotaError
 } from '../lib/gradeReportsFirestore';
-import { isFirestoreQuotaExceeded, markFirestoreQuotaExceeded, isQuotaError } from '../lib/quotaManager';
+import {
+  isFirestoreQuotaExceeded,
+  isFirestoreReadQuotaExceeded,
+  markFirestoreQuotaExceeded,
+  markFirestoreReadQuotaExceeded,
+  isQuotaError
+} from '../lib/quotaManager';
 import { getStoredWelcomeMessages, saveWelcomeMessages, DEFAULT_WELCOME_MESSAGES, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { Bell, Activity, Info, Smartphone } from 'lucide-react';
 import { sendParentPushNotification, sendBroadcastPushNotification, getRegisteredPushDevicesCount } from '../lib/pushDispatcher';
@@ -349,7 +356,7 @@ export default function DirectorPortal({
 
   // Function to send a physical FCM Push Notification via REST API
   const sendPushNotificationViaFCM = async (parentId: string, title: string, body: string) => {
-    if (isFirestoreQuotaExceeded()) return;
+    if (isFirestoreReadQuotaExceeded()) return;
     try {
       const { doc, getDoc } = await import('firebase/firestore');
       const tokenDoc = await getDoc(doc(db, 'fcm_tokens', parentId));
@@ -410,10 +417,13 @@ export default function DirectorPortal({
     }
   };
 
-  // Real-time Firestore notification sender with offline error handling
+  const messagesRef = React.useRef<Message[]>(messages);
+  messagesRef.current = messages;
+
+  // Real-time Firestore notification sender with immediate parallel delivery to school_messages
   const addNotification = async (notificationData: Omit<Message, 'id' | 'date' | 'read' | 'senderId' | 'senderName' | 'senderRole'>) => {
     const newMsg: Message = {
-      id: 'msg_dir_' + Date.now(),
+      id: `msg_dir_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       senderId: 'director',
       senderName: 'المدير العام',
       senderRole: 'director',
@@ -423,6 +433,10 @@ export default function DirectorPortal({
       ...notificationData
     };
 
+    const nextMessages = [...(Array.isArray(messagesRef.current) ? messagesRef.current : messages), newMsg];
+    messagesRef.current = nextMessages;
+    setMessages(nextMessages);
+
     try {
       if (!navigator.onLine || isFirestoreQuotaExceeded()) {
         await queueOfflineNotification(newMsg.id, {
@@ -430,43 +444,34 @@ export default function DirectorPortal({
           status: 'unread',
           createdAtMs: Date.now()
         });
-        setMessages(prev => {
-          const updated = [...prev, newMsg];
-          persistDirectToFirestore('school_messages', updated);
-          return updated;
-        });
+        persistDirectToFirestore('school_messages', nextMessages).catch(() => {});
         return newMsg;
       }
 
-      try {
-        await Promise.race([
-          setDoc(doc(db, 'notifications', newMsg.id), {
-            ...newMsg,
-            timestamp: serverTimestamp(),
-            status: 'unread'
-          }).then(() => {
-            trackFirestoreWrite(1);
-          }),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000))
-        ]);
-      } catch (writeErr: any) {
+      const liveMessagesSyncPromise = persistDirectToFirestore('school_messages', nextMessages);
+      const notifWritePromise = Promise.race([
+        setDoc(doc(db, 'notifications', newMsg.id), {
+          ...newMsg,
+          timestamp: serverTimestamp(),
+          status: 'unread'
+        }).then(() => {
+          trackFirestoreWrite(1);
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000))
+      ]).catch(async (writeErr: any) => {
         if (isQuotaError(writeErr)) {
           markFirestoreQuotaExceeded(writeErr);
         } else {
-          console.warn("Notification write queued for offline retry:", writeErr);
+          console.warn('Notification write queued for offline retry:', writeErr);
         }
         await queueOfflineNotification(newMsg.id, {
           ...newMsg,
           status: 'unread',
           createdAtMs: Date.now()
         });
-      }
-
-      setMessages(prev => {
-        const updated = [...prev, newMsg];
-        persistDirectToFirestore('school_messages', updated);
-        return updated;
       });
+
+      await Promise.all([liveMessagesSyncPromise, notifWritePromise]);
 
       // Trigger External Push Notification to affected parents
       if (newMsg.receiverId) {
@@ -516,13 +521,7 @@ export default function DirectorPortal({
       return newMsg;
     } catch (error) {
       console.warn("Could not save notification to Firestore (Offline/Error):", error);
-      
-      setMessages(prev => {
-        const updated = [...prev, newMsg];
-        localStorage.setItem('school_messages', JSON.stringify(updated));
-        return updated;
-      });
-
+      persistDirectToFirestore('school_messages', nextMessages).catch(() => {});
       alert('⚠️ تعذر إرسال الإشعار سحابياً بسبب انقطاع الاتصال بالإنترنت، ولكن تم حفظه في الذاكرة المحلية للجهاز بنجاح.');
       return newMsg;
     }
@@ -1210,8 +1209,23 @@ export default function DirectorPortal({
     try {
       await updateGradeReportInFirestore(updatedSheet);
     } catch (error: any) {
+      if (isFirestoreQuotaError(error) || isQuotaError(error) || isFirestoreQuotaExceeded()) {
+        const syncedBatch = await persistGradeReportBatchDirect({
+          grades,
+          ...(hadAutoGradeMsgs ? { messages: cleanedMessages } : {}),
+          sentSheets: updatedSentSheets,
+          monthlyEvaluations,
+          currentMonth: sheet.month
+        });
+        if (syncedBatch) {
+          alert(`🎉 تم بنجاح اعتماد كشف (${sheet.className}) وإرساله مباشرة لبوابات المعلمين وأولياء الأمور عبر القناة الفورية للمنصة! 🚀`);
+        } else {
+          alert(`⚠️ تم حفظ اعتماد كشف (${sheet.className}) محلياً على جهازك، ولكن الحصة اليومية للكتابة في Firestore قد اكتملت لليوم (تتجدد الحصة غداً).`);
+        }
+        return;
+      }
       const errDetail = extractFirestoreErrorMessage(error);
-      alert(`❌ تعذّر اعتماد كشف الدرجات في قاعدة البيانات السحابية (Firestore):\n${errDetail}`);
+      alert(`❌ تعذّر اعتماد كشف الدرجات:\n${errDetail}`);
       return;
     }
 
@@ -2005,6 +2019,16 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
           case 'school_apk_mode':
             setApkCompatibilityMode(value === 'true' || parsed === true);
             break;
+          case 'school_evaluation_saved_months':
+          case 'school_saved_evaluation_months':
+            if (Array.isArray(parsed)) setSavedEvaluationMonths(parsed);
+            break;
+          case 'school_app_icon':
+            setSchoolAppIcon(typeof parsed === 'string' ? parsed : (value || ''));
+            break;
+          case 'school_welcome_messages':
+            setWelcomeMsgs(getStoredWelcomeMessages());
+            break;
         }
       } catch (err) {
         if (key === 'school_active_academic_year') {
@@ -2013,6 +2037,10 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
           setCurrentEvaluationMonth(value);
         } else if (key === 'school_apk_mode') {
           setApkCompatibilityMode(value === 'true');
+        } else if (key === 'school_app_icon') {
+          setSchoolAppIcon(value || '');
+        } else if (key === 'school_welcome_messages') {
+          setWelcomeMsgs(getStoredWelcomeMessages());
         } else {
           console.warn('Error parsing storage update in DirectorPortal.tsx', err);
         }
@@ -2039,6 +2067,13 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       if (savedMonth) {
         try { setCurrentEvaluationMonth(savedMonth.startsWith('"') ? JSON.parse(savedMonth) : savedMonth); } catch (e) {}
       }
+      const savedMonthsList = localStorage.getItem('school_evaluation_saved_months') || localStorage.getItem('school_saved_evaluation_months');
+      if (savedMonthsList) {
+        try {
+          const parsed = JSON.parse(savedMonthsList);
+          if (Array.isArray(parsed)) setSavedEvaluationMonths(parsed);
+        } catch (e) {}
+      }
       const savedCustom = localStorage.getItem('school_custom_subjects');
       if (savedCustom) {
         try { setCustomSubjects(JSON.parse(savedCustom)); } catch (e) {}
@@ -2055,6 +2090,11 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       if (savedApkMode) {
         setApkCompatibilityMode(savedApkMode === 'true');
       }
+      const savedIcon = localStorage.getItem('school_app_icon');
+      if (savedIcon !== null) {
+        setSchoolAppIcon(savedIcon);
+      }
+      setWelcomeMsgs(getStoredWelcomeMessages());
       const savedSent = localStorage.getItem('school_sent_grade_sheets');
       if (savedSent) {
         try { setSentGradeSheets(deduplicateGradeSheets(JSON.parse(savedSent))); } catch (e) {}
@@ -4833,7 +4873,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     const updatedSentSheets = deduplicateGradeSheets([sheetRecord, ...updatedExistingSheets]);
     setSentGradeSheets(updatedSentSheets);
 
-    // 4. Directly save approved grade report (and any approved teacher sheets) to Firestore `grade_reports`
+    // 4. Directly save approved grade report (and any approved teacher sheets) to Firestore `grade_reports` & Live Relay
     try {
       const newlyApprovedTeacherSheets = updatedExistingSheets.filter(
         s => s.month === currentEvaluationMonth && s.status === 'approved' && s.teacherId && (cohortMode || s.classId === targetClassId || s.className === scopeTitle)
@@ -4843,8 +4883,23 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
         ...newlyApprovedTeacherSheets.map(s => updateGradeReportInFirestore(s))
       ]);
     } catch (error: any) {
+      if (isFirestoreQuotaError(error) || isQuotaError(error) || isFirestoreQuotaExceeded()) {
+        const syncedBatch = await persistGradeReportBatchDirect({
+          grades,
+          ...(hadAutoGradeMsgs ? { messages: cleanedMessages } : {}),
+          sentSheets: updatedSentSheets,
+          monthlyEvaluations,
+          currentMonth: currentEvaluationMonth
+        });
+        if (syncedBatch) {
+          alert(`🎉 تم بنجاح اعتماد وإرسال كشف الدرجات لشهر (${currentEvaluationMonth}) مباشرة إلى بوابات أولياء الأمور والمعلمين عبر القناة الفورية للمنصة! ⚡`);
+        } else {
+          alert(`⚠️ تم حفظ كشف الدرجات محلياً على جهازك، ولكن الحصة اليومية للكتابة في Firestore قد اكتملت لليوم (تتجدد الحصة غداً).`);
+        }
+        return;
+      }
       const errDetail = extractFirestoreErrorMessage(error);
-      alert(`❌ تعذّر حفظ ورفع كشف الدرجات في قاعدة البيانات السحابية (Firestore):\n${errDetail}`);
+      alert(`❌ تعذّر حفظ وإرسال كشف الدرجات:\n${errDetail}`);
       return;
     }
 

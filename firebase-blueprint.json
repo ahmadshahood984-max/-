@@ -105,6 +105,29 @@
         "updatedAt": { "type": "number" }
       },
       "required": ["id", "title", "month", "classId", "status"]
+    },
+    "Notification": {
+      "title": "Portal Notification",
+      "description": "Direct notifications and broadcasts between Director, Teacher, and Parent portals",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "receiverId": { "type": "string" },
+        "senderId": { "type": "string" },
+        "content": { "type": "string" },
+        "date": { "type": "string" },
+        "read": { "type": "boolean" },
+        "status": { "type": "string" }
+      }
+    },
+    "SystemUsage": {
+      "title": "Daily System Usage",
+      "description": "Daily usage tracking record",
+      "type": "object",
+      "properties": {
+        "reads": { "type": "number" },
+        "writes": { "type": "number" }
+      }
     }
   },
   "firestore": {
@@ -127,6 +150,14 @@
     "/fcm_tokens/{parentId}": {
       "schema": "FCMToken",
       "description": "Collection for FCM device tokens"
+    },
+    "/notifications/{docId}": {
+      "schema": "Notification",
+      "description": "Direct notifications and broadcast documents"
+    },
+    "/system_usage/{dateId}": {
+      "schema": "SystemUsage",
+      "description": "Daily usage logs"
     },
     "/system_stats/{statId}": {
       "schema": "SystemConsumption",

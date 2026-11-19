@@ -8,7 +8,7 @@ import { db } from './firebase';
 import { collection, getCountFromServer } from 'firebase/firestore';
 import { SYNC_KEYS } from './firebaseSync';
 import { trackFirestoreRead } from './firestoreTracker';
-import { isFirestoreQuotaExceeded, isQuotaError, markFirestoreQuotaExceeded } from './quotaManager';
+import { isFirestoreReadQuotaExceeded, isQuotaError, markFirestoreReadQuotaExceeded } from './quotaManager';
 
 export const FIRESTORE_SPARK_STORAGE_LIMIT_BYTES = 1024 * 1024 * 1024; // 1 GiB (1,024 MB)
 export const BROWSER_LOCAL_STORAGE_LIMIT_BYTES = 5 * 1024 * 1024; // ~5 MB standard browser quota
@@ -240,7 +240,7 @@ export function calculateStorageUsageReport(
  * (counts as ~1 read per 1,000 index entries, properly logged to `trackFirestoreRead`).
  */
 export async function measureLiveCloudStorageAudit(): Promise<StorageUsageReport> {
-  if (!db || isFirestoreQuotaExceeded()) {
+  if (!db || isFirestoreReadQuotaExceeded()) {
     return calculateStorageUsageReport(null);
   }
 
@@ -290,7 +290,7 @@ export async function measureLiveCloudStorageAudit(): Promise<StorageUsageReport
     trackFirestoreRead(aggReads, 'فحص سعة التخزين السحابية');
   } catch (err: any) {
     if (isQuotaError(err)) {
-      markFirestoreQuotaExceeded(err);
+      markFirestoreReadQuotaExceeded(err);
     }
   }
 

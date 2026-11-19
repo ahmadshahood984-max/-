@@ -66,8 +66,10 @@ import {
   submitGradeReportToFirestore,
   fetchGradeReportsFromFirestore,
   subscribeGradeReportsRealtime,
-  extractFirestoreErrorMessage
+  extractFirestoreErrorMessage,
+  isFirestoreQuotaError
 } from '../lib/gradeReportsFirestore';
+import { isFirestoreQuotaExceeded, isQuotaError } from '../lib/quotaManager';
 import { printElementById } from '../lib/printUtils';
 import { GradeSheetSignatures } from './GradeSheetSignatures';
 import { GradeCellInput } from './GradeCellInput';
@@ -175,14 +177,14 @@ export default function TeacherPortal({
       } else if (key === 'school_monthly_evaluations' && value) {
         try { setMonthlyEvaluations(JSON.parse(value)); } catch (err) {}
       } else if (key === 'school_sent_grade_sheets' && value) {
-        try { setSentGradeSheets(JSON.parse(value)); } catch (err) {}
+        try { setSentGradeSheets(deduplicateGradeSheetsPreservingTeachers(JSON.parse(value))); } catch (err) {}
       } else if (key === 'school_evaluation_current_month' && value) {
         try {
           setCurrentEvaluationMonth(value.startsWith('"') ? JSON.parse(value) : value);
         } catch {
           setCurrentEvaluationMonth(value);
         }
-      } else if (key === 'school_evaluation_saved_months' && value) {
+      } else if ((key === 'school_evaluation_saved_months' || key === 'school_saved_evaluation_months') && value) {
         try { setSavedEvaluationMonths(JSON.parse(value)); } catch (err) {}
       } else if (key === 'school_custom_subjects' && value) {
         try { setCustomSubjects(JSON.parse(value)); } catch (err) {}
@@ -208,6 +210,10 @@ export default function TeacherPortal({
         if (savedMonth) setCurrentEvaluationMonth(savedMonth.startsWith('"') ? JSON.parse(savedMonth) : savedMonth);
       } catch {}
       try {
+        const savedMonthsList = localStorage.getItem('school_evaluation_saved_months') || localStorage.getItem('school_saved_evaluation_months');
+        if (savedMonthsList) setSavedEvaluationMonths(JSON.parse(savedMonthsList));
+      } catch {}
+      try {
         const savedSubjects = localStorage.getItem('school_custom_subjects');
         if (savedSubjects) setCustomSubjects(JSON.parse(savedSubjects));
       } catch {}
@@ -215,6 +221,9 @@ export default function TeacherPortal({
         const savedMax = localStorage.getItem('school_max_grade_setting');
         if (savedMax) setDirectorMaxGradeSetting(savedMax.startsWith('"') ? JSON.parse(savedMax) : savedMax);
       } catch {}
+      const savedIcon = localStorage.getItem('school_app_icon');
+      if (savedIcon !== null) setSchoolAppIcon(savedIcon);
+      setWelcomeMsgs(getStoredWelcomeMessages());
     };
 
     window.addEventListener('school_storage_update', handleStorageUpdate);
@@ -277,6 +286,8 @@ export default function TeacherPortal({
     return (
       m.receiverId === selectedTeacherId ||
       m.receiverId === 'all_teachers' ||
+      m.receiverId === 'all_everyone' ||
+      m.receiverId === 'all' ||
       m.receiverId === 'teacher' ||
       (m.receiverRole === 'teacher' && !m.receiverId)
     );
@@ -796,18 +807,54 @@ export default function TeacherPortal({
       safeDispatchStorageUpdate('school_grades', JSON.stringify(gradesResult.grades));
       safeDispatchStorageUpdate('school_monthly_evaluations', JSON.stringify(monthlyEvaluations));
 
+      const deliveredViaRelay = Boolean((savedSheet as any)?.__deliveredViaRelay);
+      const deliveryDesc = deliveredViaRelay
+        ? `🎉 تم بنجاح حفظ وإرسال كشف الدرجات مباشرة إلى بوابة المدير العام عبر القناة الفورية للمنصة!\n\n🏫 الصف: ${targetClass.name}\n📅 الشهر: ${currentEvaluationMonth}\n👨‍🎓 عدد الطلاب: ${classStudents.length} طالب\n\n✅ سيظهر الكشف فوراً في لوحة المدير العام بانتظار الاعتماد والإرسال لأولياء الأمور! 🚀`
+        : `🎉 تم بنجاح رفع وإرسال كشف الدرجات مباشرة إلى السحابة (Firestore) وإلى المدير العام!\n\n🏫 الصف: ${targetClass.name}\n📅 الشهر: ${currentEvaluationMonth}\n👨‍🎓 عدد الطلاب: ${classStudents.length} طالب\n\n✅ سيظهر الكشف فوراً في لوحة المدير العام بانتظار الاعتماد والإرسال لأولياء الأمور! 🚀`;
+
       setSheetSuccessMessage(
-        `🎉 تم بنجاح حفظ ورفع كشف درجات صف (${targetClass.name}) لشهر (${currentEvaluationMonth}) مباشرة إلى السحابة ولوحة المدير العام! 🚀`
+        deliveredViaRelay
+          ? `🎉 تم بنجاح حفظ وإرسال كشف درجات صف (${targetClass.name}) لشهر (${currentEvaluationMonth}) مباشرة إلى لوحة المدير العام عبر القناة الفورية! 🚀`
+          : `🎉 تم بنجاح حفظ ورفع كشف درجات صف (${targetClass.name}) لشهر (${currentEvaluationMonth}) مباشرة إلى السحابة ولوحة المدير العام! 🚀`
       );
       setTimeout(() => setSheetSuccessMessage(null), 6000);
-      alert(
-        `🎉 تم بنجاح رفع وإرسال كشف الدرجات مباشرة إلى السحابة (Firestore) وإلى المدير العام!\n\n🏫 الصف: ${targetClass.name}\n📅 الشهر: ${currentEvaluationMonth}\n👨‍🎓 عدد الطلاب: ${classStudents.length} طالب\n\n✅ سيظهر الكشف فوراً في لوحة المدير العام بانتظار الاعتماد والإرسال لأولياء الأمور! 🚀`
-      );
+      alert(deliveryDesc);
     } catch (error: any) {
+      if (isFirestoreQuotaError(error) || isQuotaError(error) || isFirestoreQuotaExceeded()) {
+        console.warn('Firestore daily write quota exceeded; queuing grade report locally for sync:', error?.message || error);
+        const queuedSheets = deduplicateGradeSheetsPreservingTeachers([sheetRecord, ...sentGradeSheets]);
+        setSentGradeSheets(queuedSheets);
+        try {
+          localStorage.setItem('school_sent_grade_sheets', JSON.stringify(queuedSheets));
+        } catch {}
+        safeDispatchStorageUpdate('school_sent_grade_sheets', JSON.stringify(queuedSheets));
+        const [sheetSyncRes] = await Promise.all([
+          mergeAndPersistSentGradeSheet(sheetRecord, queuedSheets),
+          mergeAndPersistGrades(latestGrades),
+          persistDirectToFirestore('school_monthly_evaluations', monthlyEvaluations, { timeoutMs: 2500 })
+        ]).catch(() => [{ syncedToCloud: false }]);
+
+        if ((sheetSyncRes as any)?.syncedToCloud) {
+          setSheetSuccessMessage(
+            `✅ تم توصيل كشف درجات صف (${targetClass.name}) مباشرة للمدير العام عبر القناة الفورية للمنصة!`
+          );
+          setTimeout(() => setSheetSuccessMessage(null), 6000);
+          alert(
+            `✅ تم توصيل كشف درجات صف (${targetClass.name}) مباشرة إلى المدير العام عبر القناة الفورية للمنصة!\n\n🔄 تم حفظ نسخة للمزامنة السحابية التلقائية مع Firestore فور تجدد الحصة اليومية.`
+          );
+          return;
+        }
+
+        alert(
+          `⚠️ تم حفظ كشف درجات (${targetClass.name}) على جهازك بنجاح، ولكن الحصة اليومية للكتابة في Firestore قد اكتملت لليوم (تتجدد الحصة تلقائياً غداً دون أي مشكلة في صلاحيات القراءة أو الكتابة).`
+        );
+        return;
+      }
+
       const errDetail = extractFirestoreErrorMessage(error);
       console.error('Failed to submit grade report to Firestore:', error);
       alert(
-        `❌ تعذّر إرسال ورفع كشف الدرجات إلى قاعدة البيانات السحابية (Firestore)!\n\nتفاصيل الخطأ:\n${errDetail}\n\nيرجى التحقق من اتصال الإنترنت أو صلاحيات Firestore (Rules) والمحاولة مجدداً.`
+        `❌ تعذّر إرسال كشف الدرجات!\n\nتفاصيل الخطأ:\n${errDetail}\n\nيرجى التحقق من اتصال الإنترنت والمحاولة مجدداً.`
       );
     } finally {
       setIsSendingSheetToDirector(false);

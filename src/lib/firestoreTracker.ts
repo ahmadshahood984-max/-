@@ -20,8 +20,10 @@ import {
   runTransaction
 } from 'firebase/firestore';
 import {
-  isFirestoreQuotaExceeded,
-  markFirestoreQuotaExceeded,
+  isFirestoreWriteQuotaExceeded,
+  isFirestoreReadQuotaExceeded,
+  markFirestoreWriteQuotaExceeded,
+  markFirestoreReadQuotaExceeded,
   isQuotaError,
   registerActiveFirestoreListener,
   resetFirestoreQuotaBreaker,
@@ -460,12 +462,9 @@ export async function flushConsumptionToFirestore(): Promise<void> {
     pendingState.realtimeReads = 0;
   }
 
-  const hasUtcPending = Object.values(pendingState.utcBuckets || {}).some(
-    (b) => (b?.reads || 0) > 0 || (b?.writes || 0) > 0 || (b?.realtimeReads || 0) > 0
-  );
-
-  if (pendingState.reads <= 0 && pendingState.writes <= 0 && !hasUtcPending) return;
-  if (!db || isFirestoreQuotaExceeded()) return;
+  // Only push a central consumption write when actual writes occurred; never burn writes to report reads!
+  if (pendingState.writes <= 0) return;
+  if (!db || isFirestoreWriteQuotaExceeded()) return;
   if (typeof navigator !== 'undefined' && !navigator.onLine) return;
 
   isFlushing = true;
@@ -605,7 +604,7 @@ export async function flushConsumptionToFirestore(): Promise<void> {
     };
     persistPendingDeltas();
     if (isQuotaError(err)) {
-      markFirestoreQuotaExceeded(err);
+      markFirestoreWriteQuotaExceeded(err);
     } else {
       console.warn('[Firestore Tracker] Notice flushing central consumption:', err?.message || err);
     }
@@ -652,21 +651,25 @@ export async function incrementFirestoreUsage(
 
   persistPendingDeltas();
 
-  if (isFirestoreQuotaExceeded()) {
+  if (isFirestoreWriteQuotaExceeded()) {
     return;
   }
 
-  if (pendingState.reads + pendingState.writes >= 10) {
+  // Only flush writes to Firestore; read tracking stays fast locally without wasting write quota
+  if (pendingState.writes <= 0) {
+    return;
+  }
+
+  if (pendingState.writes >= 10) {
     flushConsumptionToFirestore().catch(() => {});
     return;
   }
 
-  const delayMs = pendingState.writes > 0 ? 1000 : 2000;
   if (!flushTimer) {
     flushTimer = setTimeout(() => {
       flushTimer = null;
       flushConsumptionToFirestore().catch(() => {});
-    }, delayMs);
+    }, 1500);
   }
 }
 
@@ -766,11 +769,13 @@ export async function fetchCentralizedConsumptionOnce(): Promise<{
   realtimeReads: number;
   date: string;
 } | null> {
-  if (!db || isFirestoreQuotaExceeded()) return null;
+  if (!db || isFirestoreReadQuotaExceeded()) return null;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return null;
   try {
-    // First flush any pending deltas so fetched numbers include recent writes from this device
-    await flushConsumptionToFirestore().catch(() => {});
+    // Only flush if real write deltas are pending
+    if (pendingState.writes > 0 && !isFirestoreWriteQuotaExceeded()) {
+      await flushConsumptionToFirestore().catch(() => {});
+    }
 
     const consumptionRef = doc(db, CONSUMPTION_COLLECTION, CONSUMPTION_DOC_ID);
     const snap = await Promise.race([
@@ -796,7 +801,7 @@ export async function fetchCentralizedConsumptionOnce(): Promise<{
     }
   } catch (err: any) {
     if (isQuotaError(err)) {
-      markFirestoreQuotaExceeded(err);
+      markFirestoreReadQuotaExceeded(err);
     }
   }
   return null;
@@ -832,7 +837,7 @@ export function subscribeToFirebaseSystemUsage(
   window.addEventListener(METRICS_EVENT, localHandler);
 
   let unsubFirestore: (() => void) | null = null;
-  if (db && !isFirestoreQuotaExceeded()) {
+  if (db && !isFirestoreReadQuotaExceeded()) {
     try {
       const consumptionRef = doc(db, CONSUMPTION_COLLECTION, CONSUMPTION_DOC_ID);
       const rawUnsub = onSnapshot(
@@ -855,7 +860,7 @@ export function subscribeToFirebaseSystemUsage(
         },
         (error) => {
           if (isQuotaError(error)) {
-            markFirestoreQuotaExceeded(error);
+            markFirestoreReadQuotaExceeded(error);
           } else {
             console.warn('[Firestore Tracker] Notice listening to system_stats/consumption:', error);
           }
@@ -864,7 +869,7 @@ export function subscribeToFirebaseSystemUsage(
       unsubFirestore = registerActiveFirestoreListener(rawUnsub);
     } catch (err: any) {
       if (isQuotaError(err)) {
-        markFirestoreQuotaExceeded(err);
+        markFirestoreReadQuotaExceeded(err);
       }
     }
   }
@@ -968,7 +973,7 @@ export async function calibrateCentralConsumptionBaseline(params: {
   };
   saveMetrics(calibrated);
 
-  if (db && !isFirestoreQuotaExceeded() && navigator.onLine !== false) {
+  if (db && !isFirestoreWriteQuotaExceeded() && navigator.onLine !== false) {
     try {
       const consumptionRef = doc(db, CONSUMPTION_COLLECTION, CONSUMPTION_DOC_ID);
       await setDoc(
@@ -992,7 +997,7 @@ export async function calibrateCentralConsumptionBaseline(params: {
       hasVerifiedCentralDateThisSession = true;
       return true;
     } catch (err: any) {
-      if (isQuotaError(err)) markFirestoreQuotaExceeded(err);
+      if (isQuotaError(err)) markFirestoreWriteQuotaExceeded(err);
     }
   }
   return false;
@@ -1045,7 +1050,7 @@ export async function resetCentralizedFirestoreConsumption(clearHistory: boolean
   };
   saveMetrics(freshMetrics);
 
-  if (db && !isFirestoreQuotaExceeded()) {
+  if (db && !isFirestoreWriteQuotaExceeded()) {
     try {
       const consumptionRef = doc(db, CONSUMPTION_COLLECTION, CONSUMPTION_DOC_ID);
       const payload: Record<string, any> = {
@@ -1068,7 +1073,7 @@ export async function resetCentralizedFirestoreConsumption(clearHistory: boolean
       hasVerifiedCentralDateThisSession = true;
     } catch (err: any) {
       if (isQuotaError(err)) {
-        markFirestoreQuotaExceeded(err);
+        markFirestoreWriteQuotaExceeded(err);
       }
     }
   }
