@@ -60,6 +60,8 @@ export const PARENT_REALTIME_KEYS = [
   'school_sent_grade_sheets',
   'school_seal_and_signatures_config',
   'school_app_icon',
+  'school_welcome_messages',
+  'school_active_academic_year',
   'school_max_grade_setting',
   'school_custom_max_grade',
   'school_pass_grade_setting',
@@ -84,7 +86,11 @@ export const PARENT_FAST_LIVE_KEYS = [
   'school_custom_max_grade',
   'school_pass_grade_setting',
   'school_custom_pass_grade',
-  'school_blocked_grades'
+  'school_blocked_grades',
+  'school_seal_and_signatures_config',
+  'school_app_icon',
+  'school_welcome_messages',
+  'school_active_academic_year'
 ];
 
 export const FAST_LIVE_SYNC_KEYS = [
@@ -108,7 +114,14 @@ export const FAST_LIVE_SYNC_KEYS = [
   'school_custom_max_grade',
   'school_pass_grade_setting',
   'school_custom_pass_grade',
-  'school_blocked_grades'
+  'school_blocked_grades',
+  'school_exam_questions',
+  'school_director_password',
+  'school_seal_and_signatures_config',
+  'school_app_icon',
+  'school_welcome_messages',
+  'school_active_academic_year',
+  'school_whatsapp_monthly_template'
 ];
 
 export const SYNC_KEYS = [
@@ -178,6 +191,8 @@ const inFlightDirectWrites = new Map<string, string>();
 const inFlightWritePromises = new Map<string, { value: string; promise: Promise<boolean> }>();
 const lastSyncedValues = new Map<string, string>();
 const subscribedRealtimeKeys = new Set<string>();
+const debouncedCloudWriteTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const DEBOUNCED_TYPING_KEYS = new Set<string>(['school_grades', 'school_monthly_evaluations', 'school_blocked_grades']);
 
 // Keep reference to original methods
 const originalGetItem = localStorage.getItem.bind(localStorage);
@@ -192,6 +207,22 @@ export function saveLocalSeedWithoutCloudWrite(key: string, value: string): void
   isRemoteSyncing = true;
   safeSetLocalItem(key, value);
   isRemoteSyncing = false;
+}
+
+/**
+ * Updates localStorage and BroadcastChannel from a Firestore snapshot WITHOUT firing
+ * a redundant setDoc writeback to Firestore (CRITICAL QUOTA & SYNC-LOOP RULE).
+ */
+export function saveSyncedLocalOnly(key: string, value: string): void {
+  const existing = safeGetLocalItem(key);
+  if (existing === value) return;
+  isRemoteSyncing = true;
+  safeSetLocalItem(key, value);
+  isRemoteSyncing = false;
+  lastSyncedValues.set(key, value);
+  setKeySyncMeta(key, Date.now(), false);
+  saveToOfflineVault(key, value, Date.now(), false).catch(() => {});
+  broadcastLocalUpdate(key, value);
 }
 
 function safeGetLocalItem(key: string): string | null {
@@ -713,6 +744,13 @@ export async function persistDirectToFirestore(
       ]);
     }
 
+    // Cancel any pending debounced keystroke write for this key since we are writing directly right now
+    const pendingTimer = debouncedCloudWriteTimers.get(key);
+    if (pendingTimer !== undefined) {
+      clearTimeout(pendingTimer);
+      debouncedCloudWriteTimers.delete(key);
+    }
+
     const docRef = doc(db, 'school_live_data', key);
     const cloudPayload = prepareFirestorePayload(key, data);
     inFlightDirectWrites.set(key, valueString);
@@ -995,7 +1033,7 @@ export async function fetchStudentsOnlyDirectly(forceServer: boolean = false): P
     const docRef = doc(db, 'school_live_data', 'school_students');
     const { snap, fromCache } = await getDocCacheFirst(docRef, {
       forceServer: effectiveForceServer,
-      timeoutMs: 1500
+      timeoutMs: effectiveForceServer ? 3500 : 1500
     });
     if (snap && !fromCache) {
       trackFirestoreRead(1, 'جلب قائمة الطلاب');
@@ -1078,13 +1116,13 @@ export async function forceRefreshDataFromFirestore(options?: { forceServer?: bo
   const effectiveForceServer = (isOffline || isFirestoreQuotaExceeded()) ? false : forceServer;
 
   try {
-    const refreshTasks = targetKeys.map(async (key) => {
+    const refreshSingleKey = async (key: string) => {
       if (effectiveForceServer && isFirestoreQuotaExceeded()) return;
       try {
         const docRef = doc(db, 'school_live_data', key);
         const { snap, fromCache } = await getDocCacheFirst(docRef, {
           forceServer: effectiveForceServer,
-          timeoutMs: 5000
+          timeoutMs: effectiveForceServer ? 10000 : 2500
         });
         if (snap && !fromCache) {
           trackFirestoreRead(1, `مزامنة بيانات (${key})`);
@@ -1259,9 +1297,13 @@ export async function forceRefreshDataFromFirestore(options?: { forceServer?: bo
           console.warn(`[Fast Sync] Error refreshing key ${key}:`, keyErr?.message || keyErr);
         }
       }
-    });
+    };
 
-    await Promise.all(refreshTasks);
+    const CHUNK_SIZE = 6;
+    for (let i = 0; i < targetKeys.length; i += CHUNK_SIZE) {
+      const batch = targetKeys.slice(i, i + CHUNK_SIZE);
+      await Promise.all(batch.map((k) => refreshSingleKey(k)));
+    }
     return true;
   } catch (err: any) {
     if (isQuotaError(err)) {
@@ -1337,7 +1379,8 @@ function attachRealtimeListenersForKeys(keysToListen: string[]) {
 
             // If local edits are genuinely pending offline sync:
             // - For mergeable keys (messages, grade sheets, grades, evaluations), merge remote additions WITHOUT losing local pending items!
-            // - For non-mergeable scalar keys, protect local pending state until flushed.
+            // - For non-mergeable keys, allow newer server updates (`remoteUpdatedAt > localMeta.updatedAt + 1500`) or empty local values through,
+            //   while protecting genuinely newer local pending edits until flushed.
             if (localMeta.pendingSync && localVal) {
               if (isMergeableKey) {
                 try {
@@ -1348,8 +1391,12 @@ function attachRealtimeListenersForKeys(keysToListen: string[]) {
                   return;
                 }
               } else {
-                initialLoadCompletedKeys.add(key);
-                return;
+                const isLocalEmpty = localVal === '[]' || localVal === '{}' || localVal.trim() === '';
+                const serverIsClearlyNewer = !fromCache && remoteUpdatedAt > (localMeta.updatedAt + 1500);
+                if (!isLocalEmpty && !serverIsClearlyNewer) {
+                  initialLoadCompletedKeys.add(key);
+                  return;
+                }
               }
             }
 
@@ -1542,7 +1589,17 @@ export function setupFirebaseSync(options?: { deferNetwork?: boolean }) {
     });
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible' && navigator.onLine !== false) {
-        syncLivePortalDataFromServer({ minIntervalMs: 10000 }).catch(() => {});
+        syncLivePortalDataFromServer({ minIntervalMs: 1500 }).catch(() => {});
+      }
+    });
+    window.addEventListener('focus', () => {
+      if (navigator.onLine !== false) {
+        syncLivePortalDataFromServer({ minIntervalMs: 2500 }).catch(() => {});
+      }
+    });
+    window.addEventListener('pageshow', () => {
+      if (navigator.onLine !== false) {
+        syncLivePortalDataFromServer({ minIntervalMs: 2500 }).catch(() => {});
       }
     });
   }
@@ -1587,58 +1644,78 @@ export function setupFirebaseSync(options?: { deferNetwork?: boolean }) {
         return;
       }
 
-      // Sync immediately and silently to Firestore with merge: true and updatedAt timestamp
-      try {
-        let parsedData;
+      // Sync to Firestore with merge: true and updatedAt timestamp
+      // Rapid keystroke keys (`school_grades`, `school_monthly_evaluations`) use a 700ms debounce to avoid write storms
+      const dispatchCloudWrite = (targetValue: string, ts: number) => {
         try {
-          parsedData = JSON.parse(value);
-        } catch {
-          parsedData = value;
-        }
+          if (safeGetLocalItem(key) !== targetValue) return;
+          let parsedData;
+          try {
+            parsedData = JSON.parse(targetValue);
+          } catch {
+            parsedData = targetValue;
+          }
 
-        if (db && !isFirestoreQuotaExceeded()) {
-          const docRef = doc(db, 'school_live_data', key);
-          const cloudPayload = prepareFirestorePayload(key, parsedData);
-          inFlightDirectWrites.set(key, value);
-          const interceptorPromise = setDoc(docRef, { data: cloudPayload, updatedAt: now }, { merge: true }).then(() => {
-            if (inFlightDirectWrites.get(key) === value) {
-              inFlightDirectWrites.delete(key);
-            }
-            if (inFlightWritePromises.get(key)?.promise === interceptorPromise) {
-              inFlightWritePromises.delete(key);
-            }
-            lastSyncedValues.set(key, value);
-            const latestMeta = getKeySyncMeta(key);
-            if (latestMeta.updatedAt <= now || safeGetLocalItem(key) === value) {
-              setKeySyncMeta(key, now, false);
-            }
-            markVaultKeySynced(key, now).catch(() => {});
-            trackFirestoreWrite(1, `تحديث تلقائي (${key})`);
-            initialLoadCompletedKeys.add(key);
-            return true;
-          }).catch(err => {
-            if (inFlightDirectWrites.get(key) === value) {
-              inFlightDirectWrites.delete(key);
-            }
-            if (inFlightWritePromises.get(key)?.promise === interceptorPromise) {
-              inFlightWritePromises.delete(key);
-            }
-            if (isQuotaError(err)) {
-              markFirestoreQuotaExceeded(err);
-            } else {
-              console.warn(`Notice writing key ${key} to Firestore (protected locally):`, err?.message || err);
-            }
-            setKeySyncMeta(key, now, true);
-            saveToOfflineVault(key, value, now, true).catch(() => {});
-            return false;
-          });
-          inFlightWritePromises.set(key, { value, promise: interceptorPromise });
+          if (db && !isFirestoreQuotaExceeded()) {
+            const docRef = doc(db, 'school_live_data', key);
+            const cloudPayload = prepareFirestorePayload(key, parsedData);
+            inFlightDirectWrites.set(key, targetValue);
+            const interceptorPromise = setDoc(docRef, { data: cloudPayload, updatedAt: ts }, { merge: true }).then(() => {
+              if (inFlightDirectWrites.get(key) === targetValue) {
+                inFlightDirectWrites.delete(key);
+              }
+              if (inFlightWritePromises.get(key)?.promise === interceptorPromise) {
+                inFlightWritePromises.delete(key);
+              }
+              lastSyncedValues.set(key, targetValue);
+              const latestMeta = getKeySyncMeta(key);
+              if (latestMeta.updatedAt <= ts || safeGetLocalItem(key) === targetValue) {
+                setKeySyncMeta(key, ts, false);
+              }
+              markVaultKeySynced(key, ts).catch(() => {});
+              trackFirestoreWrite(1, `تحديث تلقائي (${key})`);
+              initialLoadCompletedKeys.add(key);
+              return true;
+            }).catch(err => {
+              if (inFlightDirectWrites.get(key) === targetValue) {
+                inFlightDirectWrites.delete(key);
+              }
+              if (inFlightWritePromises.get(key)?.promise === interceptorPromise) {
+                inFlightWritePromises.delete(key);
+              }
+              if (isQuotaError(err)) {
+                markFirestoreQuotaExceeded(err);
+              } else {
+                console.warn(`Notice writing key ${key} to Firestore (protected locally):`, err?.message || err);
+              }
+              setKeySyncMeta(key, ts, true);
+              saveToOfflineVault(key, targetValue, ts, true).catch(() => {});
+              return false;
+            });
+            inFlightWritePromises.set(key, { value: targetValue, promise: interceptorPromise });
+          }
+        } catch (err) {
+          console.warn(`Notice preparing write for key ${key}:`, err);
         }
+      };
 
-        // Broadcast to other tabs on the same device immediately
-        broadcastLocalUpdate(key, value);
-      } catch (err) {
-        console.warn(`Notice preparing write for key ${key}:`, err);
+      // Broadcast to other tabs on the same device immediately
+      broadcastLocalUpdate(key, value);
+
+      const existingTimer = debouncedCloudWriteTimers.get(key);
+      if (existingTimer !== undefined) {
+        clearTimeout(existingTimer);
+        debouncedCloudWriteTimers.delete(key);
+      }
+
+      if (DEBOUNCED_TYPING_KEYS.has(key)) {
+        const timer = setTimeout(() => {
+          debouncedCloudWriteTimers.delete(key);
+          dispatchCloudWrite(value, now);
+        }, 700);
+        debouncedCloudWriteTimers.set(key, timer);
+      } else {
+        dispatchCloudWrite(value, now);
       }
     }
   };

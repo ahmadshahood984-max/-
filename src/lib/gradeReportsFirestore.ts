@@ -8,6 +8,7 @@ import {
   deleteDoc,
   doc,
   getDocs,
+  getDocsFromCache,
   getDocsFromServer,
   onSnapshot,
   setDoc,
@@ -21,9 +22,35 @@ import {
 } from './firebase';
 import { SentGradeSheet } from '../types';
 import { trackFirestoreRead, trackFirestoreWrite } from './firestoreTracker';
-import { isQuotaError, markFirestoreQuotaExceeded, registerActiveFirestoreListener } from './quotaManager';
+import {
+  isFirestoreQuotaExceeded,
+  isQuotaError,
+  markFirestoreQuotaExceeded,
+  registerActiveFirestoreListener
+} from './quotaManager';
 
 export const GRADE_REPORTS_COLLECTION = 'grade_reports';
+
+const FIRESTORE_WRITE_TIMEOUT_MS = 15000;
+const FIRESTORE_READ_TIMEOUT_MS = 15000;
+
+async function withFirestoreTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`Firestore operation timed out after ${timeoutMs}ms (${label})`));
+        }, timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
 
 /**
  * Recursively strips `undefined` values so Firestore setDoc never rejects
@@ -53,7 +80,7 @@ function sanitizeForFirestore<T>(input: T): T {
 /**
  * Strictly writes a submitted or approved grade report directly to Firestore
  * at `grade_reports/{sheet.id}`. Rejects with structured error details if Firestore
- * denies or fails the write (never silently falls back to localStorage-only success).
+ * denies, times out, or fails the write (never silently falls back to localStorage-only success).
  */
 export async function submitGradeReportToFirestore(sheet: SentGradeSheet): Promise<SentGradeSheet> {
   if (!db) {
@@ -61,6 +88,10 @@ export async function submitGradeReportToFirestore(sheet: SentGradeSheet): Promi
   }
   const reportId = String(sheet.id || `gs_teacher_${Date.now()}`).trim();
   const reportPath = `${GRADE_REPORTS_COLLECTION}/${reportId}`;
+  if (isFirestoreQuotaExceeded()) {
+    handleFirestoreError(new Error('resource-exhausted: Firestore daily quota exceeded'), OperationType.WRITE, reportPath);
+  }
+
   const payload = sanitizeForFirestore({
     ...sheet,
     id: reportId,
@@ -68,7 +99,11 @@ export async function submitGradeReportToFirestore(sheet: SentGradeSheet): Promi
   });
 
   try {
-    await setDoc(doc(db, GRADE_REPORTS_COLLECTION, reportId), payload);
+    await withFirestoreTimeout(
+      setDoc(doc(db, GRADE_REPORTS_COLLECTION, reportId), payload),
+      FIRESTORE_WRITE_TIMEOUT_MS,
+      reportPath
+    );
     trackFirestoreWrite(1, `رفع كشف درجات (${sheet.className || reportId})`);
     return payload as SentGradeSheet;
   } catch (error) {
@@ -91,6 +126,10 @@ export async function updateGradeReportInFirestore(sheet: SentGradeSheet): Promi
     throw new Error('معرّف كشف الدرجات مفقود.');
   }
   const reportPath = `${GRADE_REPORTS_COLLECTION}/${reportId}`;
+  if (isFirestoreQuotaExceeded()) {
+    handleFirestoreError(new Error('resource-exhausted: Firestore daily quota exceeded'), OperationType.WRITE, reportPath);
+  }
+
   const payload = sanitizeForFirestore({
     ...sheet,
     id: reportId,
@@ -98,7 +137,11 @@ export async function updateGradeReportInFirestore(sheet: SentGradeSheet): Promi
   });
 
   try {
-    await setDoc(doc(db, GRADE_REPORTS_COLLECTION, reportId), payload, { merge: true });
+    await withFirestoreTimeout(
+      setDoc(doc(db, GRADE_REPORTS_COLLECTION, reportId), payload, { merge: true }),
+      FIRESTORE_WRITE_TIMEOUT_MS,
+      reportPath
+    );
     trackFirestoreWrite(1, `اعتماد/تحديث كشف درجات (${sheet.className || reportId})`);
     return payload as SentGradeSheet;
   } catch (error) {
@@ -115,8 +158,16 @@ export async function updateGradeReportInFirestore(sheet: SentGradeSheet): Promi
 export async function deleteGradeReportFromFirestore(reportId: string): Promise<void> {
   if (!db || !reportId) return;
   const reportPath = `${GRADE_REPORTS_COLLECTION}/${reportId}`;
+  if (isFirestoreQuotaExceeded()) {
+    handleFirestoreError(new Error('resource-exhausted: Firestore daily quota exceeded'), OperationType.DELETE, reportPath);
+  }
+
   try {
-    await deleteDoc(doc(db, GRADE_REPORTS_COLLECTION, reportId));
+    await withFirestoreTimeout(
+      deleteDoc(doc(db, GRADE_REPORTS_COLLECTION, reportId)),
+      FIRESTORE_WRITE_TIMEOUT_MS,
+      reportPath
+    );
     trackFirestoreWrite(1, `حذف كشف درجات (${reportId})`);
   } catch (error) {
     if (isQuotaError(error)) {
@@ -149,13 +200,62 @@ function mapSnapshotToGradeReports(snap: QuerySnapshot): SentGradeSheet[] {
 export async function fetchGradeReportsFromFirestore(): Promise<SentGradeSheet[]> {
   if (!db) return [];
   const colRef = collection(db, GRADE_REPORTS_COLLECTION);
+  const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
+
+  const readCacheFallback = async (): Promise<SentGradeSheet[]> => {
+    try {
+      const cacheSnap = await getDocsFromCache(colRef);
+      return mapSnapshotToGradeReports(cacheSnap);
+    } catch {
+      return [];
+    }
+  };
+
+  if (isOffline || isFirestoreQuotaExceeded()) {
+    return readCacheFallback();
+  }
+
   try {
-    const snap = await getDocsFromServer(colRef);
+    const snap = await withFirestoreTimeout(
+      getDocsFromServer(colRef),
+      FIRESTORE_READ_TIMEOUT_MS,
+      GRADE_REPORTS_COLLECTION
+    );
     trackFirestoreRead(Math.max(1, snap.size), 'جلب كشوفات الدرجات من السحابة');
     return mapSnapshotToGradeReports(snap);
-  } catch (serverErr) {
+  } catch (serverErr: any) {
+    if (isQuotaError(serverErr)) {
+      markFirestoreQuotaExceeded(serverErr);
+      return readCacheFallback();
+    }
+
+    const msg = String(serverErr?.message || serverErr || '').toLowerCase();
+    const isPermissionErr = msg.includes('permission') || msg.includes('missing or insufficient');
+    if (isPermissionErr) {
+      handleFirestoreError(serverErr, OperationType.GET, GRADE_REPORTS_COLLECTION);
+    }
+
+    const isTransientTimeoutOrOffline =
+      msg.includes('timed out') ||
+      msg.includes('timeout') ||
+      msg.includes('offline') ||
+      msg.includes('unavailable') ||
+      msg.includes('network');
+
+    const cached = await readCacheFallback();
+    if (cached.length > 0 || isTransientTimeoutOrOffline) {
+      if (isTransientTimeoutOrOffline) {
+        console.warn(`[Firestore Sync] Transient read timeout for ${GRADE_REPORTS_COLLECTION}; using cached/realtime data.`);
+      }
+      return cached;
+    }
+
     try {
-      const fallbackSnap = await getDocs(colRef);
+      const fallbackSnap = await withFirestoreTimeout(
+        getDocs(colRef),
+        FIRESTORE_READ_TIMEOUT_MS,
+        GRADE_REPORTS_COLLECTION
+      );
       if (!fallbackSnap.metadata?.fromCache) {
         trackFirestoreRead(Math.max(1, fallbackSnap.size), 'جلب كشوفات الدرجات');
       }
@@ -163,6 +263,12 @@ export async function fetchGradeReportsFromFirestore(): Promise<SentGradeSheet[]
     } catch (error) {
       if (isQuotaError(error)) {
         markFirestoreQuotaExceeded(error);
+        return readCacheFallback();
+      }
+      const errMsg = String((error as any)?.message || error || '').toLowerCase();
+      if (errMsg.includes('timed out') || errMsg.includes('timeout') || errMsg.includes('offline') || errMsg.includes('unavailable')) {
+        console.warn(`[Firestore Sync] ${GRADE_REPORTS_COLLECTION} read deferred to realtime listener.`);
+        return [];
       }
       handleFirestoreError(error, OperationType.GET, GRADE_REPORTS_COLLECTION);
     }
@@ -177,7 +283,7 @@ export function subscribeGradeReportsRealtime(
   onReports: (reports: SentGradeSheet[]) => void,
   onError?: (err: unknown) => void
 ): () => void {
-  if (!db) return () => {};
+  if (!db || isFirestoreQuotaExceeded()) return () => {};
   const colRef = collection(db, GRADE_REPORTS_COLLECTION);
   const unsub = onSnapshot(
     colRef,

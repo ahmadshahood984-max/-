@@ -58,7 +58,7 @@ import { safeShowNotification, dismissNotification, dismissAllNotifications } fr
 import { getStoredWelcomeMessages, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { motion, AnimatePresence } from 'motion/react';
 import { trackActivityOperation } from '../lib/firestoreTracker';
-import { fetchStudentsOnlyDirectly, ensureParentRealtimeListeners, deduplicateGradeSheetsPreservingTeachers, syncLivePortalDataFromServer, PARENT_FAST_LIVE_KEYS } from '../lib/firebaseSync';
+import { fetchStudentsOnlyDirectly, ensureParentRealtimeListeners, deduplicateGradeSheetsPreservingTeachers, syncLivePortalDataFromServer, saveSyncedLocalOnly, PARENT_FAST_LIVE_KEYS } from '../lib/firebaseSync';
 import { fetchGradeReportsFromFirestore, subscribeGradeReportsRealtime } from '../lib/gradeReportsFirestore';
 import { fetchCertifiedGradeSheetsByParent } from '../lib/supabase';
 import { 
@@ -221,9 +221,8 @@ export default function ParentPortal({
     }
   });
 
-  // Active student strictly matching the logged in student ID or unified number across all sources
-  const activeStudentObj: Student | undefined = 
-    activeDirectStudent || 
+  // Active student strictly matching the logged in student ID or unified number across live synced sources first
+  const liveMatchedStudent: Student | undefined =
     findStudentByUnifiedInput(loggedInStudentId, students) ||
     (() => {
       try {
@@ -237,11 +236,25 @@ export default function ParentPortal({
       } catch {}
       return undefined;
     })() ||
-    students.find(s => 
-      (s && s.id && s.id === loggedInStudentId) || 
+    students.find(s =>
+      (s && s.id && s.id === loggedInStudentId) ||
       (s && s.unifiedNo && String(s.unifiedNo).trim() === loggedInStudentId.trim()) ||
       (s && s.rollNo && String(s.rollNo).trim() === loggedInStudentId.trim())
     );
+
+  const activeStudentObj: Student | undefined = liveMatchedStudent || activeDirectStudent || undefined;
+
+  // Keep local cached profile fresh whenever cloud student list updates (never triggers cloud write)
+  React.useEffect(() => {
+    if (!liveMatchedStudent) return;
+    try {
+      const nextJson = JSON.stringify(liveMatchedStudent);
+      if (localStorage.getItem('parent_portal_active_student_obj') !== nextJson) {
+        localStorage.setItem('parent_portal_active_student_obj', nextJson);
+        setActiveDirectStudent(liveMatchedStudent);
+      }
+    } catch {}
+  }, [liveMatchedStudent]);
 
   const selectedParentId = activeStudentObj ? activeStudentObj.parentId : '';
   const activeParent = parents.find(p => p.id === selectedParentId) || 
@@ -501,11 +514,17 @@ export default function ParentPortal({
       if (sentSnap && sentSnap.exists()) {
         const sheetsData = sentSnap.data()?.data;
         if (Array.isArray(sheetsData) && sheetsData.length > 0) {
-          setSentGradeSheets(prev => {
-            const merged = deduplicateGradeSheets([...prev, ...sheetsData]);
-            localStorage.setItem('school_sent_grade_sheets', JSON.stringify(merged));
-            return merged;
-          });
+          let existingLocalSheets: SentGradeSheet[] = [];
+          try {
+            const raw = localStorage.getItem('school_sent_grade_sheets');
+            if (raw) {
+              const parsed = JSON.parse(raw);
+              if (Array.isArray(parsed)) existingLocalSheets = parsed;
+            }
+          } catch {}
+          const mergedSheets = deduplicateGradeSheets([...existingLocalSheets, ...sheetsData]);
+          saveSyncedLocalOnly('school_sent_grade_sheets', JSON.stringify(mergedSheets));
+          setSentGradeSheets(prev => deduplicateGradeSheets([...prev, ...sheetsData]));
         }
       }
 
@@ -522,15 +541,21 @@ export default function ParentPortal({
             });
             return Array.from(map.values());
           };
-          setDirectMessages(prev => mergeMsgList(prev));
+          let localMsgs: Message[] = Array.isArray(messages) ? [...messages] : [];
+          try {
+            const raw = localStorage.getItem('school_messages');
+            if (raw) {
+              const parsed = JSON.parse(raw);
+              if (Array.isArray(parsed) && parsed.length > localMsgs.length) {
+                localMsgs = parsed;
+              }
+            }
+          } catch {}
+          const mergedMsgs = mergeMsgList(localMsgs);
+          saveSyncedLocalOnly('school_messages', JSON.stringify(mergedMsgs));
+          setDirectMessages(mergedMsgs);
           if (setMessages) {
-            setMessages(prev => {
-              const merged = mergeMsgList(prev);
-              localStorage.setItem('school_messages', JSON.stringify(merged));
-              return merged;
-            });
-          } else {
-            localStorage.setItem('school_messages', JSON.stringify(data));
+            setMessages(mergedMsgs);
           }
         }
       }
@@ -538,16 +563,16 @@ export default function ParentPortal({
       if (evalSnap && evalSnap.exists()) {
         const data = evalSnap.data()?.data;
         if (data && typeof data === 'object') {
+          saveSyncedLocalOnly('school_monthly_evaluations', JSON.stringify(data));
           setMonthlyEvaluations(data);
-          localStorage.setItem('school_monthly_evaluations', JSON.stringify(data));
         }
       }
 
       if (monthSnap && monthSnap.exists()) {
         const data = monthSnap.data()?.data;
         if (data && typeof data === 'string') {
+          saveSyncedLocalOnly('school_evaluation_current_month', data);
           setCurrentEvaluationMonth(data);
-          localStorage.setItem('school_evaluation_current_month', data);
         }
       }
 
@@ -571,12 +596,28 @@ export default function ParentPortal({
   };
 
   React.useEffect(() => {
-    const handleStorageUpdate = (e?: any) => {
+    const applyApprovedDirectReports = (directReports: SentGradeSheet[]) => {
+      if (!Array.isArray(directReports) || directReports.length === 0) return;
+      const approvedOnly = directReports.filter(isApprovedSentSheet);
+      if (approvedOnly.length === 0) return;
+      setSentGradeSheets(prev => deduplicateGradeSheets([...approvedOnly, ...prev]));
+    };
+
+    const handleStorageUpdate = (_e?: any) => {
       const savedIcon = localStorage.getItem('school_app_icon');
       if (savedIcon !== null) {
         setSchoolAppIcon(savedIcon);
       }
       setWelcomeMsgs(getStoredWelcomeMessages());
+
+      const maxChoice = localStorage.getItem('school_parent_max_grade_choice') || localStorage.getItem('school_max_grade_setting');
+      if (maxChoice) setMaxGradeChoice(maxChoice.startsWith('"') ? (() => { try { return JSON.parse(maxChoice); } catch { return maxChoice; } })() : maxChoice);
+      const customMax = localStorage.getItem('school_parent_custom_max_grade') || localStorage.getItem('school_custom_max_grade');
+      if (customMax) setCustomMaxGrade(customMax.startsWith('"') ? (() => { try { return JSON.parse(customMax); } catch { return customMax; } })() : customMax);
+      const passChoice = localStorage.getItem('school_parent_pass_grade_choice') || localStorage.getItem('school_pass_grade_setting');
+      if (passChoice) setPassGradeChoice(passChoice.startsWith('"') ? (() => { try { return JSON.parse(passChoice); } catch { return passChoice; } })() : passChoice);
+      const customPass = localStorage.getItem('school_parent_custom_pass_grade') || localStorage.getItem('school_custom_pass_grade');
+      if (customPass) setCustomPassGrade(customPass.startsWith('"') ? (() => { try { return JSON.parse(customPass); } catch { return customPass; } })() : customPass);
 
       const savedSent = localStorage.getItem('school_sent_grade_sheets');
       if (savedSent) {
@@ -605,9 +646,29 @@ export default function ParentPortal({
           setCurrentEvaluationMonth(savedMonth.startsWith('"') ? JSON.parse(savedMonth) : savedMonth);
         } catch {}
       }
+
+      const savedTuitions = localStorage.getItem('school_tuitions');
+      if (savedTuitions) {
+        try {
+          setTuitions(JSON.parse(savedTuitions));
+        } catch {}
+      }
+
+      const savedBlocked = localStorage.getItem('school_blocked_grades');
+      if (savedBlocked) {
+        try {
+          setBlockedGrades(JSON.parse(savedBlocked));
+        } catch {}
+      }
     };
+
+    const handleLiveSyncCompleted = () => {
+      handleStorageUpdate();
+      fetchGradeReportsFromFirestore().then(applyApprovedDirectReports).catch(() => {});
+    };
+
     window.addEventListener('school_storage_update', handleStorageUpdate);
-    window.addEventListener('school_live_sync_completed', handleStorageUpdate);
+    window.addEventListener('school_live_sync_completed', handleLiveSyncCompleted);
 
     // Ensure real-time Firestore listeners are active for parent keys regardless of portal entry path
     ensureParentRealtimeListeners();
@@ -618,25 +679,12 @@ export default function ParentPortal({
       .then(() => handleStorageUpdate())
       .catch(() => {});
 
-    const applyApprovedDirectReports = (directReports: SentGradeSheet[]) => {
-      if (!Array.isArray(directReports) || directReports.length === 0) return;
-      const approvedOnly = directReports.filter(isApprovedSentSheet);
-      if (approvedOnly.length === 0) return;
-      setSentGradeSheets(prev => {
-        const merged = deduplicateGradeSheets([...approvedOnly, ...prev]);
-        try {
-          localStorage.setItem('school_sent_grade_sheets', JSON.stringify(merged));
-        } catch {}
-        return merged;
-      });
-    };
-
     const unsubApprovedReports = subscribeGradeReportsRealtime(applyApprovedDirectReports);
     fetchGradeReportsFromFirestore().then(applyApprovedDirectReports).catch(() => {});
 
     return () => {
       window.removeEventListener('school_storage_update', handleStorageUpdate);
-      window.removeEventListener('school_live_sync_completed', handleStorageUpdate);
+      window.removeEventListener('school_live_sync_completed', handleLiveSyncCompleted);
       unsubApprovedReports();
     };
   }, []);
@@ -872,7 +920,7 @@ ${url}
       return;
     }
 
-    // D. If not found in localStorage, check IndexedDB persistent cache first before hitting server
+    // D. If not found in localStorage, fetch directly from Firestore server so newly added students work on any phone
     (async () => {
       try {
         const { doc } = await import('firebase/firestore');
@@ -881,12 +929,13 @@ ${url}
         if (db) {
           const { snap, fromCache } = await getDocCacheFirst(
             doc(db, 'school_live_data', 'school_students'),
-            { forceServer: false, timeoutMs: 2500 }
+            { forceServer: !isFirestoreQuotaExceeded(), timeoutMs: 3500 }
           );
           if (snap && !fromCache) trackFirestoreRead(1, 'التحقق من رقم الطالب الموحد');
           if (snap && snap.exists()) {
             const allSt = snap.data()?.data;
             if (Array.isArray(allSt)) {
+              saveSyncedLocalOnly('school_students', JSON.stringify(allSt));
               const remoteMatch = findStudentByUnifiedInput(targetInput, allSt);
               if (remoteMatch) {
                 setActiveDirectStudent(remoteMatch);
@@ -896,10 +945,6 @@ ${url}
                 localStorage.setItem('parent_portal_active_student_obj', JSON.stringify(remoteMatch));
                 localStorage.setItem('parent_portal_saved_login_input', targetInput);
                 localStorage.setItem('parent_portal_auto_login', 'true');
-                localStorage.setItem('school_students', JSON.stringify(allSt));
-                window.dispatchEvent(new CustomEvent('school_storage_update', {
-                  detail: { key: 'school_students', value: JSON.stringify(allSt) }
-                }));
               }
             }
           }
@@ -1601,12 +1646,12 @@ ${url}
         } catch {}
       }
 
-      // 4. Fast single-doc fetch from Firestore with short 1.2s timeout only if not found locally
+      // 4. Direct server fetch from Firestore when not found locally (ensures newly added students work on any phone)
       if (!foundStudent) {
         try {
           const directList = await Promise.race([
-            fetchStudentsOnlyDirectly(),
-            new Promise<any[]>((resolve) => setTimeout(() => resolve([]), 1200))
+            fetchStudentsOnlyDirectly(true),
+            new Promise<any[]>((resolve) => setTimeout(() => resolve([]), 3500))
           ]);
           if (Array.isArray(directList) && directList.length > 0) {
             foundStudent = findStudentByUnifiedInput(cleanInput, directList);
@@ -2016,10 +2061,30 @@ ${url}
           case 'school_sent_grade_sheets':
             setSentGradeSheets(deduplicateGradeSheets(parsed));
             break;
+          case 'school_max_grade_setting':
+            setMaxGradeChoice(String(parsed));
+            break;
+          case 'school_custom_max_grade':
+            setCustomMaxGrade(String(parsed));
+            break;
+          case 'school_pass_grade_setting':
+            setPassGradeChoice(String(parsed));
+            break;
+          case 'school_custom_pass_grade':
+            setCustomPassGrade(String(parsed));
+            break;
         }
       } catch (err) {
         if (key === 'school_evaluation_current_month') {
           setCurrentEvaluationMonth(value);
+        } else if (key === 'school_max_grade_setting') {
+          setMaxGradeChoice(value);
+        } else if (key === 'school_custom_max_grade') {
+          setCustomMaxGrade(value);
+        } else if (key === 'school_pass_grade_setting') {
+          setPassGradeChoice(value);
+        } else if (key === 'school_custom_pass_grade') {
+          setCustomPassGrade(value);
         } else {
           console.warn('Error parsing storage update in ParentPortal.tsx', err);
         }

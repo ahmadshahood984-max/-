@@ -55,6 +55,7 @@ import { getStoredWelcomeMessages, WelcomeMessagesConfig } from '../lib/welcomeM
 import {
   persistDirectToFirestore,
   safeDispatchStorageUpdate,
+  saveSyncedLocalOnly,
   deduplicateGradeSheetsPreservingTeachers,
   mergeAndPersistSentGradeSheet,
   mergeAndPersistGrades,
@@ -217,21 +218,32 @@ export default function TeacherPortal({
     };
 
     window.addEventListener('school_storage_update', handleStorageUpdate);
-    window.addEventListener('school_live_sync_completed', reloadTeacherSyncedData);
     syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS, minIntervalMs: 3000 })
       .then(() => reloadTeacherSyncedData())
       .catch(() => {});
 
     const mergeDirectReports = (directReports: SentGradeSheet[]) => {
       if (!Array.isArray(directReports) || directReports.length === 0) return;
-      setSentGradeSheets(prev => {
-        const merged = deduplicateGradeSheetsPreservingTeachers([...directReports, ...prev]);
-        try {
-          localStorage.setItem('school_sent_grade_sheets', JSON.stringify(merged));
-        } catch {}
-        return merged;
-      });
+      let existingLocal: SentGradeSheet[] = [];
+      try {
+        const raw = localStorage.getItem('school_sent_grade_sheets');
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) existingLocal = parsed;
+        }
+      } catch {}
+      const mergedLocal = deduplicateGradeSheetsPreservingTeachers([...directReports, ...existingLocal]);
+      saveSyncedLocalOnly('school_sent_grade_sheets', JSON.stringify(mergedLocal));
+      setSentGradeSheets(prev => deduplicateGradeSheetsPreservingTeachers([...directReports, ...prev]));
     };
+
+    const handleLiveSyncCompleted = () => {
+      reloadTeacherSyncedData();
+      fetchGradeReportsFromFirestore()
+        .then((reports) => mergeDirectReports(reports))
+        .catch(() => {});
+    };
+    window.addEventListener('school_live_sync_completed', handleLiveSyncCompleted);
 
     const unsubGradeReports = subscribeGradeReportsRealtime((reports) => {
       mergeDirectReports(reports);
@@ -242,7 +254,7 @@ export default function TeacherPortal({
 
     return () => {
       window.removeEventListener('school_storage_update', handleStorageUpdate);
-      window.removeEventListener('school_live_sync_completed', reloadTeacherSyncedData);
+      window.removeEventListener('school_live_sync_completed', handleLiveSyncCompleted);
       unsubGradeReports();
     };
   }, []);

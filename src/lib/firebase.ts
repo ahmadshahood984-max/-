@@ -48,12 +48,12 @@ try {
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 
-// Initialize Cloud Firestore with forced long polling and unlimited IndexedDB persistent cache
+// Initialize Cloud Firestore with auto-detected streaming/long-polling and unlimited IndexedDB persistent cache
 // Student grades and school data are cached locally in the browser across sessions (0 server reads on reopen)
 let firestoreInstance: Firestore;
 try {
   firestoreInstance = initializeFirestore(app, {
-    experimentalForceLongPolling: true,
+    experimentalAutoDetectLongPolling: true,
     localCache: persistentLocalCache({
       cacheSizeBytes: CACHE_SIZE_UNLIMITED,
       tabManager: persistentMultipleTabManager()
@@ -62,7 +62,7 @@ try {
 } catch (cacheErr) {
   console.warn('[Firestore] IndexedDB persistentLocalCache unavailable, falling back to memoryLocalCache:', cacheErr);
   firestoreInstance = initializeFirestore(app, {
-    experimentalForceLongPolling: true,
+    experimentalAutoDetectLongPolling: true,
     localCache: memoryLocalCache()
   }, databaseId);
 }
@@ -125,15 +125,26 @@ export function handleFirestoreError(
 
 export function extractFirestoreErrorMessage(error: unknown): string {
   const rawMsg = error instanceof Error ? error.message : String(error || 'Unknown error');
+  let detail = rawMsg;
   try {
     const parsed = JSON.parse(rawMsg);
     if (parsed && typeof parsed.error === 'string') {
-      return parsed.error;
+      detail = parsed.error;
     }
   } catch {
     // not JSON
   }
-  return rawMsg;
+  const lower = detail.toLowerCase();
+  if (lower.includes('permission') || lower.includes('missing or insufficient')) {
+    return `Missing or insufficient permissions (${detail})`;
+  }
+  if (lower.includes('resource-exhausted') || lower.includes('quota')) {
+    return `تم تجاوز الحد اليومي لحصة Firestore المجانية (${detail})`;
+  }
+  if (lower.includes('timeout') || lower.includes('timed out')) {
+    return `انتهت مهلة الاتصال بسحابة Firestore — يرجى التحقق من الإنترنت (${detail})`;
+  }
+  return detail;
 }
 
 async function testConnection() {

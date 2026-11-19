@@ -68,7 +68,8 @@ import {
   Laptop,
   Monitor,
   Download,
-  CheckCircle2
+  CheckCircle2,
+  RefreshCw
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -282,7 +283,23 @@ export default function App() {
   // Help modal for configuring and testing notifications
   const [showNotificationHelper, setShowNotificationHelper] = useState<boolean>(false);
 
-  const reloadFromLocalStorageRef = React.useRef<(() => void) | null>(null);
+  const [isManualSyncing, setIsManualSyncing] = useState(false);
+
+  const handleManualCrossDeviceSync = async () => {
+    if (isManualSyncing) return;
+    setIsManualSyncing(true);
+    try {
+      const targetKeys = activePortal === 'parent' ? PARENT_FAST_LIVE_KEYS : FAST_LIVE_SYNC_KEYS;
+      await syncLivePortalDataFromServer({ keys: targetKeys, minIntervalMs: 0 });
+      reloadFromLocalStorageRef.current?.();
+    } catch (err) {
+      console.warn('Manual cross-device sync notice:', err);
+    } finally {
+      setIsManualSyncing(false);
+    }
+  };
+
+  const reloadFromLocalStorageRef = React.useRef<((allowSeedFallback?: boolean) => void) | null>(null);
   const isFirstPortalEffectRef = React.useRef(true);
   useEffect(() => {
     saveLocalSeedWithoutCloudWrite('school_active_portal', activePortal);
@@ -292,13 +309,13 @@ export default function App() {
     }
     if (activePortal === 'director' || activePortal === 'teacher') {
       ensureAllRealtimeListeners();
-      syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS, minIntervalMs: 2500 })
-        .then(() => reloadFromLocalStorageRef.current?.())
+      syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS, minIntervalMs: 500 })
+        .then(() => reloadFromLocalStorageRef.current?.(false))
         .catch(() => {});
     } else if (activePortal === 'parent') {
       ensureParentRealtimeListeners();
-      syncLivePortalDataFromServer({ keys: PARENT_FAST_LIVE_KEYS, minIntervalMs: 2500 })
-        .then(() => reloadFromLocalStorageRef.current?.())
+      syncLivePortalDataFromServer({ keys: PARENT_FAST_LIVE_KEYS, minIntervalMs: 500 })
+        .then(() => reloadFromLocalStorageRef.current?.(false))
         .catch(() => {});
     }
   }, [activePortal]);
@@ -365,7 +382,7 @@ export default function App() {
     window.addEventListener('school_storage_update', handleStorageUpdate);
 
     // Reload from localStorage helper (used after async hydration/cache sync finishes)
-    const reloadFromLocalStorage = async () => {
+    const reloadFromLocalStorage = async (allowSeedFallback: boolean = false) => {
       const savedTeachers = safeParseStorageArray<Teacher>('school_teachers');
       const savedClasses = safeParseStorageArray<Class>('school_classes');
       const savedParents = safeParseStorageArray<Parent>('school_parents');
@@ -397,7 +414,7 @@ export default function App() {
       const savedIcon = localStorage.getItem('school_app_icon');
       if (savedIcon !== null) setAppIcon(savedIcon);
 
-      // Deduplicate sent grade sheets cleanly if present
+      // Deduplicate sent grade sheets cleanly locally without triggering spurious cloud writes on passive reads
       const savedSheetsRaw = localStorage.getItem('school_sent_grade_sheets');
       if (savedSheetsRaw) {
         try {
@@ -405,47 +422,56 @@ export default function App() {
           if (Array.isArray(parsedSheets) && parsedSheets.length > 0) {
             const deduped = deduplicateGradeSheetsPreservingTeachers(parsedSheets);
             if (deduped.length !== parsedSheets.length) {
-              persistDirectToFirestore('school_sent_grade_sheets', deduped);
+              saveLocalSeedWithoutCloudWrite('school_sent_grade_sheets', JSON.stringify(deduped));
             }
           }
         } catch {}
       }
 
-      // Lazy-load default exam samples ONLY if none exist locally
-      if (savedExams.length === 0) {
+      // Lazy-load default exam samples ONLY if none exist locally after cloud sync
+      if (allowSeedFallback && savedExams.length === 0) {
         import('./lib/defaultExamSamples')
           .then(({ getDefaultExamSamples }) => {
-            setExamQuestions((prev) => (prev.length === 0 ? getDefaultExamSamples() : prev));
+            const samples = getDefaultExamSamples();
+            saveLocalSeedWithoutCloudWrite('school_exam_questions', JSON.stringify(samples));
+            setExamQuestions((prev) => (prev.length === 0 ? samples : prev));
           })
           .catch(() => {});
       }
 
-      // Lazy-load seed bundles ONLY on first-ever run or when core tables are empty
-      const needsCoreSeed =
-        savedTeachers.length === 0 ||
-        savedClasses.length === 0 ||
-        savedStudents.length === 0 ||
-        savedParents.length === 0 ||
-        localStorage.getItem('school_seed_applied_v1') !== '1';
+      // If real cloud data is already present on this browser, mark seed as satisfied and NEVER merge old static demo rows!
+      const allCorePopulated =
+        savedTeachers.length > 0 &&
+        savedClasses.length > 0 &&
+        savedStudents.length > 0 &&
+        savedParents.length > 0;
 
-      if (needsCoreSeed) {
+      if (allCorePopulated) {
+        try {
+          localStorage.setItem('school_seed_applied_v1', '1');
+        } catch {}
+      } else if (allowSeedFallback) {
         try {
           const seed = await loadInitialSeedBundle();
-          if (seed.teachers.length > 0) {
+          if (savedTeachers.length === 0 && seed.teachers.length > 0) {
             const merged = mergeTeachersWithSeed(savedTeachers, seed.teachers);
+            saveLocalSeedWithoutCloudWrite('school_teachers', JSON.stringify(merged));
             setTeachers(merged);
           }
-          if (seed.classes.length > 0) {
+          if (savedClasses.length === 0 && seed.classes.length > 0) {
             const merged = mergeClassesWithSeed(savedClasses, seed.classes);
+            saveLocalSeedWithoutCloudWrite('school_classes', JSON.stringify(merged));
             setClasses(merged);
           }
-          if (seed.parents.length > 0) {
+          if (savedParents.length === 0 && seed.parents.length > 0) {
             const merged = mergeParentsWithSeed(savedParents, seed.parents);
+            saveLocalSeedWithoutCloudWrite('school_parents', JSON.stringify(merged));
             setParents(merged);
           }
-          if (seed.students.length > 0) {
+          if (savedStudents.length === 0 && seed.students.length > 0) {
             const merged = mergeStudentsWithSeed(savedStudents, seed.students);
             const cleaned = sanitizeAndDeduplicateStudents(merged).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
+            saveLocalSeedWithoutCloudWrite('school_students', JSON.stringify(cleaned));
             setStudents(cleaned);
           }
           try {
@@ -454,8 +480,8 @@ export default function App() {
         } catch {}
       }
 
-      if (savedGrades.length === 0) {
-        // First try reconstructing from saved sent sheets, else lazy-load backup JSON
+      if (allowSeedFallback && savedGrades.length === 0) {
+        // First try reconstructing from saved sent sheets, else lazy-load backup JSON strictly locally
         let reconstructed = false;
         if (savedSheetsRaw) {
           try {
@@ -486,8 +512,8 @@ export default function App() {
                 }
               }
               if (reconstructedGrades.length > 0) {
+                saveLocalSeedWithoutCloudWrite('school_grades', JSON.stringify(reconstructedGrades));
                 setGrades(reconstructedGrades);
-                try { localStorage.setItem('school_grades', JSON.stringify(reconstructedGrades)); } catch {}
                 reconstructed = true;
               }
             }
@@ -497,6 +523,7 @@ export default function App() {
           loadFirestoreBackupBundle()
             .then((backup) => {
               if (Array.isArray(backup.grades) && backup.grades.length > 0) {
+                saveLocalSeedWithoutCloudWrite('school_grades', JSON.stringify(backup.grades));
                 setGrades((prev) => (prev.length === 0 ? backup.grades : prev));
               }
             })
@@ -505,12 +532,12 @@ export default function App() {
       }
     };
 
-    reloadFromLocalStorageRef.current = () => {
-      reloadFromLocalStorage().catch(() => {});
+    reloadFromLocalStorageRef.current = (allowSeedFallback: boolean = false) => {
+      reloadFromLocalStorage(allowSeedFallback).catch(() => {});
     };
 
     const handleLiveSyncCompleted = () => {
-      reloadFromLocalStorage().catch(() => {});
+      reloadFromLocalStorage(false).catch(() => {});
     };
     window.addEventListener('school_live_sync_completed', handleLiveSyncCompleted);
 
@@ -518,16 +545,17 @@ export default function App() {
     const startupTimer = setTimeout(() => {
       hydrateFromOfflineVault()
         .then((restored) => {
-          if (restored) reloadFromLocalStorage();
+          if (restored) reloadFromLocalStorage(false);
         })
         .catch(() => {});
 
       syncLivePortalDataFromServer({ minIntervalMs: 0 })
         .then(() => {
-          reloadFromLocalStorage();
+          reloadFromLocalStorage(true);
         })
         .catch((err) => {
           console.warn('Startup Firestore live sync notice:', err);
+          reloadFromLocalStorage(true);
         });
     }, 50);
 
@@ -1063,7 +1091,7 @@ export default function App() {
 
   // 3. Director or Teacher publishes Announcement
   const addAnnouncement = (announceData: Omit<Announcement, 'id' | 'date'> & { authorName?: string; authorRole?: 'director' | 'teacher'; shift?: 'morning' | 'evening'; skipPushNotification?: boolean }) => {
-    const id = 'a' + (announcements.length + 1);
+    const id = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const date = new Date().toISOString().split('T')[0];
     const newAnn: Announcement = {
       target: announceData.target,
@@ -1164,7 +1192,7 @@ export default function App() {
           copy[index] = { ...copy[index], status: item.status, notes: item.notes };
         } else {
           copy.push({
-            id: 'att' + (copy.length + 1),
+            id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
             studentId: item.studentId,
             date: item.date,
             status: item.status,
@@ -1257,7 +1285,7 @@ export default function App() {
 
   // 8. Parent submits Excuse
   const submitExcuse = (excuseData: Omit<AbsenceExcuse, 'id' | 'status' | 'parentName'>) => {
-    const id = 'e' + (excuses.length + 1);
+    const id = `e_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const parent = parents.find(p => p.id === excuseData.parentId);
     const newExc: AbsenceExcuse = {
       ...excuseData,
@@ -1276,7 +1304,7 @@ export default function App() {
 
   // 9. Parent sends message
   const sendMessageFromParent = (msgData: Omit<Message, 'id' | 'date' | 'read'>) => {
-    const id = 'm' + (messages.length + 1);
+    const id = `m_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const date = new Date().toISOString();
     const newMsg: Message = { ...msgData, id, date, read: false };
 
@@ -1398,33 +1426,46 @@ export default function App() {
             </div>
           ) : null}
 
-          {/* Sync Status Badge and Notification Button - Desktop ONLY */}
-          {activePortal === 'director' && (
-            <div className="hidden md:flex items-center gap-3">
-              <button
-                type="button"
-                onClick={requestNotificationPermission}
-                className={`text-[11px] px-3 py-1.5 rounded-full font-bold transition flex items-center gap-1.5 cursor-pointer border ${
-                  notificationPermission === 'granted'
-                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200 shadow-xs'
-                    : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border-indigo-200'
-                }`}
-              >
-                <span>🔔</span>
-                <span>{notificationPermission === 'granted' ? 'إشعارات الهاتف مفعّلة' : 'تفعيل إشعارات الهاتف'}</span>
-              </button>
-            </div>
-          )}
+          {/* Cross-Device Instant Sync & Notification Actions */}
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleManualCrossDeviceSync}
+              disabled={isManualSyncing}
+              className="text-[11px] px-3 py-1.5 rounded-full font-bold transition flex items-center gap-1.5 cursor-pointer border bg-sky-50 text-sky-700 hover:bg-sky-100 border-sky-200 disabled:opacity-60"
+              title="مزامنة وتحديث البيانات فوراً بين الكمبيوتر والهاتف وأجهزة أولياء الأمور"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isManualSyncing ? 'animate-spin' : ''}`} />
+              <span>{isManualSyncing ? 'جاري المزامنة...' : 'مزامنة الآن'}</span>
+            </button>
 
-          {/* Hamburger Menu Toggle Button - Mobile ONLY */}
-          <button
-            type="button"
-            onClick={() => setIsPortalSelectorOpen(!isPortalSelectorOpen)}
-            className="md:hidden p-2 text-slate-600 hover:text-slate-950 hover:bg-slate-100 rounded-lg transition cursor-pointer"
-            aria-label="القائمة الرئيسية"
-          >
-            {isPortalSelectorOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
-          </button>
+            {activePortal === 'director' && (
+              <div className="hidden md:flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={requestNotificationPermission}
+                  className={`text-[11px] px-3 py-1.5 rounded-full font-bold transition flex items-center gap-1.5 cursor-pointer border ${
+                    notificationPermission === 'granted'
+                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200 shadow-xs'
+                      : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border-indigo-200'
+                  }`}
+                >
+                  <span>🔔</span>
+                  <span>{notificationPermission === 'granted' ? 'إشعارات الهاتف مفعّلة' : 'تفعيل إشعارات الهاتف'}</span>
+                </button>
+              </div>
+            )}
+
+            {/* Hamburger Menu Toggle Button - Mobile ONLY */}
+            <button
+              type="button"
+              onClick={() => setIsPortalSelectorOpen(!isPortalSelectorOpen)}
+              className="md:hidden p-2 text-slate-600 hover:text-slate-950 hover:bg-slate-100 rounded-lg transition cursor-pointer"
+              aria-label="القائمة الرئيسية"
+            >
+              {isPortalSelectorOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
+            </button>
+          </div>
         </div>
 
         {/* Mobile Expandable Hamburger Menu Dropdown */}

@@ -87,7 +87,7 @@ import { db } from '../lib/firebase';
 import { collection, addDoc, setDoc, deleteDoc, doc, serverTimestamp, writeBatch, getDocs } from 'firebase/firestore';
 import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead, checkDailyRollover, fetchCentralizedConsumptionOnce, resetCentralizedFirestoreConsumption, calibrateCentralConsumptionBaseline, getRecentUtcDates, getTimeUntilFirebaseQuotaReset, SPARK_DAILY_READ_LIMIT, SPARK_DAILY_WRITE_LIMIT, FIREBASE_PROJECT_ID, FIREBASE_DATABASE_ID } from '../lib/firestoreTracker';
 import { calculateStorageUsageReport, measureLiveCloudStorageAudit, StorageUsageReport } from '../lib/storageUsage';
-import { persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate, recordDeletedStudentIds, queueOfflineNotification, deduplicateGradeSheetsPreservingTeachers, syncLivePortalDataFromServer, FAST_LIVE_SYNC_KEYS } from '../lib/firebaseSync';
+import { persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate, saveSyncedLocalOnly, recordDeletedStudentIds, queueOfflineNotification, deduplicateGradeSheetsPreservingTeachers, syncLivePortalDataFromServer, FAST_LIVE_SYNC_KEYS } from '../lib/firebaseSync';
 import {
   submitGradeReportToFirestore,
   updateGradeReportInFirestore,
@@ -2065,7 +2065,6 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       }
     };
     reloadFromLocalStorage();
-    window.addEventListener('school_live_sync_completed', reloadFromLocalStorage);
     syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS, minIntervalMs: 3000 })
       .then(() => reloadFromLocalStorage())
       .catch(() => {});
@@ -2073,14 +2072,71 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     // Directly subscribe & fetch all grade reports (including pending 'submitted' reports) from Firestore `grade_reports`
     const applyDirectGradeReports = (directReports: SentGradeSheet[]) => {
       if (!Array.isArray(directReports) || directReports.length === 0) return;
-      setSentGradeSheets(prev => {
-        const merged = deduplicateGradeSheetsPreservingTeachers([...directReports, ...prev]);
-        try {
-          localStorage.setItem('school_sent_grade_sheets', JSON.stringify(merged));
-        } catch {}
-        return merged;
-      });
+
+      let existingLocalSheets: SentGradeSheet[] = [];
+      try {
+        const raw = localStorage.getItem('school_sent_grade_sheets');
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) existingLocalSheets = parsed;
+        }
+      } catch {}
+      const mergedLocalSheets = deduplicateGradeSheetsPreservingTeachers([...directReports, ...existingLocalSheets]);
+      saveSyncedLocalOnly('school_sent_grade_sheets', JSON.stringify(mergedLocalSheets));
+      setSentGradeSheets(prev => deduplicateGradeSheetsPreservingTeachers([...directReports, ...prev]));
+
+      // Hydrate any missing student+subject+month scores from submitted/approved reports into local `grades`
+      // strictly without triggering a redundant cloud writeback
+      try {
+        const rawGrades = localStorage.getItem('school_grades');
+        const currentGrades: Grade[] = rawGrades ? JSON.parse(rawGrades) : [];
+        if (Array.isArray(currentGrades)) {
+          const existingKeys = new Set(
+            currentGrades.map(g => `${String(g.studentId || '').trim()}__${String(g.subject || '').trim()}__${String(g.examName || '').trim()}`)
+          );
+          const additions: Grade[] = [];
+          directReports.forEach(report => {
+            const month = String(report.month || '').trim();
+            if (!month || !Array.isArray(report.studentsSummary)) return;
+            report.studentsSummary.forEach(st => {
+              const sId = String(st.studentId || '').trim();
+              if (!sId || !Array.isArray(st.scores)) return;
+              st.scores.forEach(sc => {
+                const sub = String(sc.subject || '').trim();
+                if (!sub || sc.score === null || sc.score === undefined || Number.isNaN(Number(sc.score))) return;
+                const k = `${sId}__${sub}__${month}`;
+                if (!existingKeys.has(k)) {
+                  existingKeys.add(k);
+                  additions.push({
+                    id: `g_rep_${report.id}_${sId}_${sub}`,
+                    studentId: sId,
+                    subject: sub,
+                    examName: month,
+                    score: Number(sc.score),
+                    maxScore: Number(sc.maxScore || 100),
+                    date: report.dateSent || new Date().toISOString(),
+                    teacherId: report.teacherId || 'teacher'
+                  });
+                }
+              });
+            });
+          });
+          if (additions.length > 0) {
+            const hydratedGrades = [...currentGrades, ...additions];
+            saveSyncedLocalOnly('school_grades', JSON.stringify(hydratedGrades));
+            setGrades(hydratedGrades);
+          }
+        }
+      } catch {}
     };
+
+    const handleLiveSyncCompleted = () => {
+      reloadFromLocalStorage();
+      fetchGradeReportsFromFirestore()
+        .then((reports) => applyDirectGradeReports(reports))
+        .catch(() => {});
+    };
+    window.addEventListener('school_live_sync_completed', handleLiveSyncCompleted);
 
     const unsubGradeReports = subscribeGradeReportsRealtime(
       (reports) => applyDirectGradeReports(reports),
@@ -2094,7 +2150,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
 
     return () => {
       window.removeEventListener('school_storage_update', handleStorageUpdate);
-      window.removeEventListener('school_live_sync_completed', reloadFromLocalStorage);
+      window.removeEventListener('school_live_sync_completed', handleLiveSyncCompleted);
       unsubGradeReports();
     };
   }, []);
