@@ -116,7 +116,16 @@ export default function TeacherPortal({
   deleteExamQuestionPaper
 }: TeacherPortalProps) {
   // Simulator: active logged in teacher
-  const [selectedTeacherId, setSelectedTeacherId] = useState<string>(teachers[0]?.id || 't1');
+  const [selectedTeacherId, setSelectedTeacherId] = useState<string>(() => {
+    try {
+      return localStorage.getItem('school_teacher_logged_in_id') ||
+             localStorage.getItem('school_active_teacher_id') ||
+             teachers[0]?.id ||
+             't1';
+    } catch {
+      return teachers[0]?.id || 't1';
+    }
+  });
   const activeTeacher = teachers.find(t => t.id === selectedTeacherId);
 
   const [showWelcomeModal, setShowWelcomeModal] = useState<boolean>(() => {
@@ -227,7 +236,7 @@ export default function TeacherPortal({
     };
 
     window.addEventListener('school_storage_update', handleStorageUpdate);
-    syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS, minIntervalMs: 3000 })
+    syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS, minIntervalMs: 1500 })
       .then(() => reloadTeacherSyncedData())
       .catch(() => {});
 
@@ -248,18 +257,12 @@ export default function TeacherPortal({
 
     const handleLiveSyncCompleted = () => {
       reloadTeacherSyncedData();
-      fetchGradeReportsFromFirestore()
-        .then((reports) => mergeDirectReports(reports))
-        .catch(() => {});
     };
     window.addEventListener('school_live_sync_completed', handleLiveSyncCompleted);
 
     const unsubGradeReports = subscribeGradeReportsRealtime((reports) => {
       mergeDirectReports(reports);
     });
-    fetchGradeReportsFromFirestore()
-      .then((reports) => mergeDirectReports(reports))
-      .catch(() => {});
 
     return () => {
       window.removeEventListener('school_storage_update', handleStorageUpdate);
@@ -348,7 +351,8 @@ export default function TeacherPortal({
     if (setGrades) {
       setGrades(prev => {
         const updated = prev.filter(g => g.id !== gradeToDelete);
-        localStorage.setItem('school_grades', JSON.stringify(updated));
+        persistDirectToFirestore('school_grades', updated).catch(() => {});
+        safeDispatchStorageUpdate('school_grades', JSON.stringify(updated));
         return updated;
       });
     }
@@ -366,7 +370,8 @@ export default function TeacherPortal({
     if (setGrades) {
       setGrades(prev => {
         const updated = prev.map(g => g.id === gradeToEdit.id ? { ...g, score: newScore } : g);
-        localStorage.setItem('school_grades', JSON.stringify(updated));
+        persistDirectToFirestore('school_grades', updated).catch(() => {});
+        safeDispatchStorageUpdate('school_grades', JSON.stringify(updated));
         return updated;
       });
 
@@ -383,6 +388,7 @@ export default function TeacherPortal({
   });
   const [teacherPasswordInput, setTeacherPasswordInput] = useState<string>('');
   const [teacherLoginError, setTeacherLoginError] = useState<string>('');
+  const [isTeacherLoggingIn, setIsTeacherLoggingIn] = useState<boolean>(false);
 
   // Auto-restore teacher ID if logged in
   useEffect(() => {
@@ -565,17 +571,22 @@ export default function TeacherPortal({
     setAllGradesScores({});
   };
 
-  // Selected class (for active teacher)
-  const teacherClasses = classes.filter(c => activeTeacher?.classes.includes(c.id));
+  // Selected class (for active teacher) - reactively hydrates when teachers/classes load asynchronously on any device
+  const teacherClasses = classes.filter(c =>
+    (activeTeacher?.classes || []).includes(c.id) ||
+    (activeTeacher?.id && c.teacherId === activeTeacher.id)
+  );
   const [selectedClassId, setSelectedClassId] = useState<string>('');
 
   useEffect(() => {
     if (teacherClasses.length > 0) {
-      setSelectedClassId(teacherClasses[0].id);
+      setSelectedClassId(prev =>
+        prev && teacherClasses.some(c => c.id === prev) ? prev : teacherClasses[0].id
+      );
     } else {
       setSelectedClassId('');
     }
-  }, [selectedTeacherId]);
+  }, [selectedTeacherId, teachers, classes]);
 
   // Students in selected class
   const classStudents = sanitizeAndDeduplicateStudents([...students.filter(s => s.classId === selectedClassId)]).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
@@ -631,23 +642,11 @@ export default function TeacherPortal({
     if (hasGeneralTeacher || subjectsSet.size === 0) {
       const defaultSubjects = ['الرياضيات', 'العلوم', 'اللغة العربية', 'التربية الإسلامية', 'اللغة الإنجليزية', 'الاجتماعيات'];
       defaultSubjects.forEach(s => subjectsSet.add(s));
-      
-      // Also fetch custom subjects defined in the school settings
-      const saved = localStorage.getItem('school_custom_subjects');
-      if (saved) {
-        try {
-          const parsed = JSON.parse(saved);
-          if (Array.isArray(parsed)) {
-            parsed.forEach((s: string) => subjectsSet.add(s));
-          }
-        } catch (e) {
-          // ignore
-        }
-      }
+      (customSubjects || []).forEach((s: string) => subjectsSet.add(s));
     }
     
     return Array.from(subjectsSet);
-  }, [selectedClassId, teachers]);
+  }, [selectedClassId, teachers, customSubjects]);
 
   // Get subjects assigned to the active teacher for this class
   const teacherClassSubjects = React.useMemo(() => {
@@ -787,16 +786,14 @@ export default function TeacherPortal({
       // Update local state & localStorage immediately after Firestore confirmation
       const nextSheets = deduplicateGradeSheetsPreservingTeachers([savedSheet, ...sentGradeSheets]);
       setSentGradeSheets(nextSheets);
-      try {
-        localStorage.setItem('school_sent_grade_sheets', JSON.stringify(nextSheets));
-      } catch {}
+      saveSyncedLocalOnly('school_sent_grade_sheets', JSON.stringify(nextSheets));
       safeDispatchStorageUpdate('school_sent_grade_sheets', JSON.stringify(nextSheets));
 
       // Also sync consolidated keys (`school_sent_grade_sheets`, `school_grades`, `school_monthly_evaluations`)
       const [sheetResult, gradesResult] = await Promise.all([
         mergeAndPersistSentGradeSheet(savedSheet, nextSheets),
         mergeAndPersistGrades(latestGrades),
-        persistDirectToFirestore('school_monthly_evaluations', monthlyEvaluations, { timeoutMs: 8000 })
+        persistDirectToFirestore('school_monthly_evaluations', monthlyEvaluations, { timeoutMs: 3000 })
       ]);
 
       setSentGradeSheets(sheetResult.sheets);
@@ -824,9 +821,7 @@ export default function TeacherPortal({
         console.warn('Firestore daily write quota exceeded; queuing grade report locally for sync:', error?.message || error);
         const queuedSheets = deduplicateGradeSheetsPreservingTeachers([sheetRecord, ...sentGradeSheets]);
         setSentGradeSheets(queuedSheets);
-        try {
-          localStorage.setItem('school_sent_grade_sheets', JSON.stringify(queuedSheets));
-        } catch {}
+        saveSyncedLocalOnly('school_sent_grade_sheets', JSON.stringify(queuedSheets));
         safeDispatchStorageUpdate('school_sent_grade_sheets', JSON.stringify(queuedSheets));
         const [sheetSyncRes] = await Promise.all([
           mergeAndPersistSentGradeSheet(sheetRecord, queuedSheets),
@@ -1255,20 +1250,61 @@ export default function TeacherPortal({
         <h2 className="text-xl font-bold text-slate-800 text-center">المدرسة الدولية</h2>
         <p className="text-xs text-slate-400 text-center mt-1">حلب - مدينة مارع (بوابة الكادر التعليمي)</p>
         
-        <form onSubmit={(e) => {
+        <form onSubmit={async (e) => {
           e.preventDefault();
           const enteredVal = teacherPasswordInput.trim();
           if (!enteredVal) {
             setTeacherLoginError('الرجاء إدخال الرقم الخاص بك.');
             return;
           }
-          // Find teacher whose phone matches, OR whose ID matches, OR whose password matches
-          const targetTeacher = teachers.find(t => 
-            t.phone === enteredVal || 
-            t.id === enteredVal || 
-            (t.phone && t.phone.replace(/[\s-]/g, '') === enteredVal.replace(/[\s-]/g, '')) ||
-            (t.password && t.password === enteredVal)
-          );
+
+          const normalizeDigits = (val: string) =>
+            val
+              .replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d).toString())
+              .replace(/[\s\-+]/g, '')
+              .trim();
+
+          const normEntered = normalizeDigits(enteredVal);
+          const findMatchingTeacher = (list: Teacher[]): Teacher | undefined =>
+            list.find(t => {
+              if (!t) return false;
+              if (t.phone === enteredVal || t.id === enteredVal || (t.password && t.password === enteredVal)) return true;
+              if (t.email && t.email.trim().toLowerCase() === enteredVal.toLowerCase()) return true;
+              const normPhone = t.phone ? normalizeDigits(t.phone) : '';
+              if (normEntered && normPhone && (normPhone === normEntered || normPhone.endsWith(normEntered) || normEntered.endsWith(normPhone))) return true;
+              const normPass = t.password ? normalizeDigits(t.password) : '';
+              if (normEntered && normPass && normPass === normEntered) return true;
+              return false;
+            });
+
+          let targetTeacher = findMatchingTeacher(teachers);
+          if (!targetTeacher) {
+            try {
+              const rawTeachers = localStorage.getItem('school_teachers');
+              if (rawTeachers) {
+                const parsed = JSON.parse(rawTeachers);
+                if (Array.isArray(parsed)) targetTeacher = findMatchingTeacher(parsed);
+              }
+            } catch {}
+          }
+
+          if (!targetTeacher) {
+            setIsTeacherLoggingIn(true);
+            setTeacherLoginError('');
+            try {
+              await Promise.race([
+                syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS, minIntervalMs: 0 }),
+                new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 4000))
+              ]);
+              const syncedRaw = localStorage.getItem('school_teachers');
+              if (syncedRaw) {
+                const parsed = JSON.parse(syncedRaw);
+                if (Array.isArray(parsed)) targetTeacher = findMatchingTeacher(parsed);
+              }
+            } catch {} finally {
+              setIsTeacherLoggingIn(false);
+            }
+          }
 
           if (targetTeacher) {
             setSelectedTeacherId(targetTeacher.id);
@@ -1276,8 +1312,12 @@ export default function TeacherPortal({
             localStorage.setItem('school_teacher_is_logged_in', 'true');
             localStorage.setItem('school_teacher_logged_in_id', targetTeacher.id);
             localStorage.setItem('school_active_teacher_id', targetTeacher.id);
+            localStorage.setItem('school_active_portal', 'teacher');
+            safeDispatchStorageUpdate('school_active_teacher_id', targetTeacher.id);
             setTeacherLoginError('');
             setTeacherPasswordInput('');
+            syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS, minIntervalMs: 0 }).catch(() => {});
+            fetchGradeReportsFromFirestore().catch(() => {});
           } else {
             setTeacherLoginError('رقم الهاتف أو المعرف المدخل غير مسجل لدينا، يرجى مراجعة إدارة المدرسة.');
           }
@@ -1307,9 +1347,10 @@ export default function TeacherPortal({
 
           <button
             type="submit"
-            className="w-full bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold py-3 px-4 rounded-xl transition shadow-sm cursor-pointer"
+            disabled={isTeacherLoggingIn}
+            className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white text-xs font-bold py-3 px-4 rounded-xl transition shadow-sm cursor-pointer"
           >
-            فتح البوابة التعليمية 🚀
+            {isTeacherLoggingIn ? 'جاري التحقق والمزامنة... ⏳' : 'فتح البوابة التعليمية 🚀'}
           </button>
           
           <div className="mt-4 p-3 bg-slate-50 border border-slate-100 rounded-xl text-right">

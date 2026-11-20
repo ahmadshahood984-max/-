@@ -9,6 +9,7 @@ export interface LiveRelayKeyUpdate {
   key: string;
   value: string;
   updatedAt: number;
+  fromLiveSse?: boolean;
 }
 
 export interface LiveRelaySnapshot {
@@ -152,14 +153,19 @@ export async function fetchLiveRelaySnapshot(): Promise<LiveRelaySnapshot | null
   }
 }
 
-export async function pushLiveRelayKey(key: string, value: string, updatedAt: number): Promise<boolean> {
+export async function pushLiveRelayKey(
+  key: string,
+  value: string,
+  updatedAt: number,
+  options?: { allowEmpty?: boolean }
+): Promise<boolean> {
   if (typeof window === 'undefined' || relayAvailable === false) return false;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return false;
   try {
     const res = await fetch('/api/live-relay/key', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key, value, updatedAt }),
+      body: JSON.stringify({ key, value, updatedAt, allowEmpty: !!options?.allowEmpty }),
       keepalive: true
     });
     const contentType = res.headers.get('content-type') || '';
@@ -238,14 +244,13 @@ export function subscribeLiveRelayGradeReports(listener: GradeReportListener): (
   };
 }
 
-export function startLiveRelayClient(onKeyUpdate: KeyUpdateCallback): void {
-  keyUpdateHandler = onKeyUpdate;
-  if (typeof window === 'undefined' || relayAvailable === false) return;
+let relayLifecycleListenersAttached = false;
+let relayReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-  // Always pull current snapshot once right away
-  fetchLiveRelaySnapshot().catch(() => {});
-
-  if (eventSource || typeof EventSource === 'undefined') return;
+function openRelayEventSource(): void {
+  if (typeof window === 'undefined' || relayAvailable === false || typeof EventSource === 'undefined') return;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+  if (eventSource && eventSource.readyState !== EventSource.CLOSED) return;
 
   try {
     const es = new EventSource('/api/live-relay/stream');
@@ -263,7 +268,8 @@ export function startLiveRelayClient(onKeyUpdate: KeyUpdateCallback): void {
           keyUpdateHandler({
             key: payload.key,
             value: payload.value,
-            updatedAt: Number(payload.updatedAt) || Date.now()
+            updatedAt: Number(payload.updatedAt) || Date.now(),
+            fromLiveSse: true
           });
         }
       } catch {}
@@ -304,13 +310,57 @@ export function startLiveRelayClient(onKeyUpdate: KeyUpdateCallback): void {
     });
 
     es.onerror = () => {
-      // If server endpoint is missing on a static host, avoid infinite reconnect errors
       if (relayAvailable === false) {
         es.close();
-        eventSource = null;
+        if (eventSource === es) eventSource = null;
+        return;
+      }
+      if (es.readyState === EventSource.CLOSED) {
+        if (eventSource === es) eventSource = null;
+        if (!relayReconnectTimer) {
+          relayReconnectTimer = setTimeout(() => {
+            relayReconnectTimer = null;
+            openRelayEventSource();
+          }, 2000);
+        }
       }
     };
   } catch {
     // Graceful fallback if EventSource cannot initialize
+  }
+}
+
+export function reconnectLiveRelayIfNeeded(): void {
+  if (typeof window === 'undefined' || relayAvailable === false) return;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+  if (!eventSource || eventSource.readyState === EventSource.CLOSED) {
+    openRelayEventSource();
+  }
+}
+
+export function startLiveRelayClient(onKeyUpdate: KeyUpdateCallback): void {
+  keyUpdateHandler = onKeyUpdate;
+  if (typeof window === 'undefined' || relayAvailable === false) return;
+
+  // Always pull current snapshot once right away
+  fetchLiveRelaySnapshot().catch(() => {});
+  openRelayEventSource();
+
+  if (!relayLifecycleListenersAttached) {
+    relayLifecycleListenersAttached = true;
+    window.addEventListener('online', () => {
+      reconnectLiveRelayIfNeeded();
+      fetchLiveRelaySnapshot().catch(() => {});
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        reconnectLiveRelayIfNeeded();
+        fetchLiveRelaySnapshot().catch(() => {});
+      }
+    });
+    window.addEventListener('pageshow', () => {
+      reconnectLiveRelayIfNeeded();
+      fetchLiveRelaySnapshot().catch(() => {});
+    });
   }
 }

@@ -294,7 +294,7 @@ export default function App() {
         resetFirestoreQuotaBreaker();
       }
       const targetKeys = activePortal === 'parent' ? PARENT_FAST_LIVE_KEYS : FAST_LIVE_SYNC_KEYS;
-      await syncLivePortalDataFromServer({ keys: targetKeys, minIntervalMs: 0 });
+      await syncLivePortalDataFromServer({ keys: targetKeys, bypassCache: true, forceServer: true });
       reloadFromLocalStorageRef.current?.();
     } catch (err) {
       console.warn('Manual cross-device sync notice:', err);
@@ -313,15 +313,10 @@ export default function App() {
     }
     if (activePortal === 'director' || activePortal === 'teacher') {
       ensureAllRealtimeListeners();
-      syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS, minIntervalMs: 500 })
-        .then(() => reloadFromLocalStorageRef.current?.(false))
-        .catch(() => {});
     } else if (activePortal === 'parent') {
       ensureParentRealtimeListeners();
-      syncLivePortalDataFromServer({ keys: PARENT_FAST_LIVE_KEYS, minIntervalMs: 500 })
-        .then(() => reloadFromLocalStorageRef.current?.(false))
-        .catch(() => {});
     }
+    reloadFromLocalStorageRef.current?.(false);
   }, [activePortal]);
 
   // Listen to remote changes via Firebase Sync and update React states in real-time
@@ -398,22 +393,30 @@ export default function App() {
       const savedExc = safeParseStorageArray<AbsenceExcuse>('school_excuses');
       const savedExams = safeParseStorageArray<ExamQuestionPaper>('school_exam_questions');
 
-      if (savedTeachers.length > 0) setTeachers(savedTeachers);
-      if (savedClasses.length > 0) setClasses(savedClasses);
-      if (savedParents.length > 0) setParents(savedParents);
+      if (savedTeachers.length > 0 || (!allowSeedFallback && localStorage.getItem('school_teachers') === '[]')) setTeachers(savedTeachers);
+      if (savedClasses.length > 0 || (!allowSeedFallback && localStorage.getItem('school_classes') === '[]')) setClasses(savedClasses);
+      if (savedParents.length > 0 || (!allowSeedFallback && localStorage.getItem('school_parents') === '[]')) setParents(savedParents);
       if (savedStudents.length > 0) {
         const cleanList = sanitizeAndDeduplicateStudents(savedStudents);
         setStudents(cleanList.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar')));
+      } else if (!allowSeedFallback && localStorage.getItem('school_students') === '[]') {
+        setStudents([]);
       }
-      if (savedAtt.length > 0) setAttendance(savedAtt);
-      if (savedGrades.length > 0) setGrades(savedGrades);
-      if (savedAnn.length > 0) setAnnouncements(savedAnn);
-      if (savedMsgs.length > 0) setMessages(savedMsgs);
-      if (savedExc.length > 0) setExcuses(savedExc);
-      if (savedExams.length > 0) setExamQuestions(savedExams);
+      if (savedAtt.length > 0 || (!allowSeedFallback && localStorage.getItem('school_attendance') === '[]')) setAttendance(savedAtt);
+      if (savedGrades.length > 0 || (!allowSeedFallback && localStorage.getItem('school_grades') === '[]')) setGrades(savedGrades);
+      if (savedAnn.length > 0 || (!allowSeedFallback && localStorage.getItem('school_announcements') === '[]')) setAnnouncements(savedAnn);
+      if (savedMsgs.length > 0 || (!allowSeedFallback && localStorage.getItem('school_messages') === '[]')) setMessages(savedMsgs);
+      if (savedExc.length > 0 || (!allowSeedFallback && localStorage.getItem('school_excuses') === '[]')) setExcuses(savedExc);
+      if (savedExams.length > 0 || (!allowSeedFallback && localStorage.getItem('school_exam_questions') === '[]')) setExamQuestions(savedExams);
 
       const savedPwd = localStorage.getItem('school_director_password');
-      if (savedPwd) setDirectorPassword(savedPwd);
+      if (savedPwd) {
+        try {
+          setDirectorPassword(savedPwd.startsWith('"') ? JSON.parse(savedPwd) : savedPwd);
+        } catch {
+          setDirectorPassword(savedPwd);
+        }
+      }
 
       const savedIcon = localStorage.getItem('school_app_icon');
       if (savedIcon !== null) setAppIcon(savedIcon);
@@ -553,7 +556,7 @@ export default function App() {
         })
         .catch(() => {});
 
-      syncLivePortalDataFromServer({ minIntervalMs: 0 })
+      syncLivePortalDataFromServer()
         .then(() => {
           reloadFromLocalStorage(true);
         })
@@ -572,10 +575,14 @@ export default function App() {
 
   // Save to localStorage whenever state changes with anti-wipe protection
   // If `saved === null` on a fresh browser, seed locally WITHOUT triggering a cloud write before real remote data arrives.
+  const prevStateNonEmptyRef = React.useRef<Record<string, boolean>>({});
+
   useEffect(() => {
     const saved = localStorage.getItem('school_teachers');
     const currentStr = JSON.stringify(teachers);
-    if (teachers.length === 0 && saved && saved !== '[]') return;
+    const hadItems = !!prevStateNonEmptyRef.current['school_teachers'];
+    prevStateNonEmptyRef.current['school_teachers'] = teachers.length > 0;
+    if (teachers.length === 0 && saved && saved !== '[]' && !hadItems) return;
     if (saved === null) {
       saveLocalSeedWithoutCloudWrite('school_teachers', currentStr);
       return;
@@ -588,7 +595,9 @@ export default function App() {
   useEffect(() => {
     const saved = localStorage.getItem('school_classes');
     const currentStr = JSON.stringify(classes);
-    if (classes.length === 0 && saved && saved !== '[]') return;
+    const hadItems = !!prevStateNonEmptyRef.current['school_classes'];
+    prevStateNonEmptyRef.current['school_classes'] = classes.length > 0;
+    if (classes.length === 0 && saved && saved !== '[]' && !hadItems) return;
     if (saved === null) {
       saveLocalSeedWithoutCloudWrite('school_classes', currentStr);
       return;
@@ -601,7 +610,9 @@ export default function App() {
   useEffect(() => {
     const saved = localStorage.getItem('school_parents');
     const currentStr = JSON.stringify(parents);
-    if (parents.length === 0 && saved && saved !== '[]') return;
+    const hadItems = !!prevStateNonEmptyRef.current['school_parents'];
+    prevStateNonEmptyRef.current['school_parents'] = parents.length > 0;
+    if (parents.length === 0 && saved && saved !== '[]' && !hadItems) return;
     if (saved === null) {
       saveLocalSeedWithoutCloudWrite('school_parents', currentStr);
       return;
@@ -614,7 +625,9 @@ export default function App() {
   useEffect(() => {
     const saved = localStorage.getItem('school_students');
     const currentStr = JSON.stringify(students);
-    if (students.length === 0 && saved && saved !== '[]') return;
+    const hadItems = !!prevStateNonEmptyRef.current['school_students'];
+    prevStateNonEmptyRef.current['school_students'] = students.length > 0;
+    if (students.length === 0 && saved && saved !== '[]' && !hadItems) return;
     if (saved === null) {
       saveLocalSeedWithoutCloudWrite('school_students', currentStr);
       return;
@@ -627,7 +640,9 @@ export default function App() {
   useEffect(() => {
     const saved = localStorage.getItem('school_attendance');
     const currentStr = JSON.stringify(attendance);
-    if (attendance.length === 0 && saved && saved !== '[]') return;
+    const hadItems = !!prevStateNonEmptyRef.current['school_attendance'];
+    prevStateNonEmptyRef.current['school_attendance'] = attendance.length > 0;
+    if (attendance.length === 0 && saved && saved !== '[]' && !hadItems) return;
     if (saved === null) {
       saveLocalSeedWithoutCloudWrite('school_attendance', currentStr);
       return;
@@ -640,7 +655,9 @@ export default function App() {
   useEffect(() => {
     const saved = localStorage.getItem('school_grades');
     const currentStr = JSON.stringify(grades);
-    if (grades.length === 0 && saved && saved !== '[]') return;
+    const hadItems = !!prevStateNonEmptyRef.current['school_grades'];
+    prevStateNonEmptyRef.current['school_grades'] = grades.length > 0;
+    if (grades.length === 0 && saved && saved !== '[]' && !hadItems) return;
     if (saved === null) {
       saveLocalSeedWithoutCloudWrite('school_grades', currentStr);
       return;
@@ -653,7 +670,9 @@ export default function App() {
   useEffect(() => {
     const saved = localStorage.getItem('school_announcements');
     const currentStr = JSON.stringify(announcements);
-    if (announcements.length === 0 && saved && saved !== '[]') return;
+    const hadItems = !!prevStateNonEmptyRef.current['school_announcements'];
+    prevStateNonEmptyRef.current['school_announcements'] = announcements.length > 0;
+    if (announcements.length === 0 && saved && saved !== '[]' && !hadItems) return;
     if (saved === null) {
       saveLocalSeedWithoutCloudWrite('school_announcements', currentStr);
       return;
@@ -666,7 +685,9 @@ export default function App() {
   useEffect(() => {
     const saved = localStorage.getItem('school_messages');
     const currentStr = JSON.stringify(messages);
-    if (messages.length === 0 && saved && saved !== '[]') return;
+    const hadItems = !!prevStateNonEmptyRef.current['school_messages'];
+    prevStateNonEmptyRef.current['school_messages'] = messages.length > 0;
+    if (messages.length === 0 && saved && saved !== '[]' && !hadItems) return;
     if (saved === null) {
       saveLocalSeedWithoutCloudWrite('school_messages', currentStr);
       return;
@@ -679,7 +700,9 @@ export default function App() {
   useEffect(() => {
     const saved = localStorage.getItem('school_excuses');
     const currentStr = JSON.stringify(excuses);
-    if (excuses.length === 0 && saved && saved !== '[]') return;
+    const hadItems = !!prevStateNonEmptyRef.current['school_excuses'];
+    prevStateNonEmptyRef.current['school_excuses'] = excuses.length > 0;
+    if (excuses.length === 0 && saved && saved !== '[]' && !hadItems) return;
     if (saved === null) {
       saveLocalSeedWithoutCloudWrite('school_excuses', currentStr);
       return;
@@ -829,6 +852,7 @@ export default function App() {
   // --- Active Teacher and Parent tracking for accurate recipient counters ---
   const [activeTeacherId, setActiveTeacherId] = useState<string>(() => localStorage.getItem('school_active_teacher_id') || '');
   const [activeParentId, setActiveParentId] = useState<string>('');
+  const [activeParentStudentId, setActiveParentStudentId] = useState<string>(() => localStorage.getItem('parent_portal_student_id') || '');
 
   useEffect(() => {
     const updateActiveIds = () => {
@@ -836,9 +860,21 @@ export default function App() {
       setActiveTeacherId(prev => (prev !== tId ? tId : prev));
 
       const sId = localStorage.getItem('parent_portal_student_id') || '';
+      setActiveParentStudentId(prev => (prev !== sId ? sId : prev));
       if (sId) {
-        const student = students.find(s => s.id === sId || s.rollNo === sId);
-        const newParentId = student ? student.parentId : '';
+        let student = students.find(s => s.id === sId || s.unifiedNo === sId || s.rollNo === sId);
+        if (!student) {
+          try {
+            const rawObj = localStorage.getItem('parent_portal_active_student_obj');
+            if (rawObj) {
+              const parsed = JSON.parse(rawObj);
+              if (parsed && (parsed.id === sId || parsed.unifiedNo === sId || parsed.rollNo === sId)) {
+                student = parsed;
+              }
+            }
+          } catch {}
+        }
+        const newParentId = student?.parentId || '';
         setActiveParentId(prev => (prev !== newParentId ? newParentId : prev));
       } else {
         setActiveParentId(prev => (prev !== '' ? '' : prev));
@@ -873,13 +909,17 @@ export default function App() {
   };
 
   const getParentUnreadCount = () => {
-    if (!activeParentId) return 0;
+    if (!activeParentId && !activeParentStudentId) return 0;
     return messages.filter(
-      m => (m.receiverId === activeParentId || m.receiverId === 'all' || m.receiverId === 'all_cohort_parents' || m.receiverId === 'all_everyone') &&
-           !m.read && 
-           !m.content.includes('سلوك') && 
-           !m.content.includes('تنبيه سلوكي') && 
-           !m.content.includes('تصنيف الإشعار: سلوك') && 
+      m => ((activeParentId && m.receiverId === activeParentId) ||
+            (activeParentStudentId && (m.receiverId === activeParentStudentId || m.studentId === activeParentStudentId)) ||
+            m.receiverId === 'all' ||
+            m.receiverId === 'all_cohort_parents' ||
+            m.receiverId === 'all_everyone') &&
+           !m.read &&
+           !m.content.includes('سلوك') &&
+           !m.content.includes('تنبيه سلوكي') &&
+           !m.content.includes('تصنيف الإشعار: سلوك') &&
            !m.content.includes('تقييم')
     ).length;
   };

@@ -58,8 +58,9 @@ import { safeShowNotification, dismissNotification, dismissAllNotifications } fr
 import { getStoredWelcomeMessages, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { motion, AnimatePresence } from 'motion/react';
 import { trackActivityOperation } from '../lib/firestoreTracker';
-import { fetchStudentsOnlyDirectly, ensureParentRealtimeListeners, deduplicateGradeSheetsPreservingTeachers, syncLivePortalDataFromServer, saveSyncedLocalOnly, PARENT_FAST_LIVE_KEYS } from '../lib/firebaseSync';
+import { fetchStudentsOnlyDirectly, ensureParentRealtimeListeners, deduplicateGradeSheetsPreservingTeachers, syncLivePortalDataFromServer, saveSyncedLocalOnly, safeDispatchStorageUpdate, persistDirectToFirestore, PARENT_FAST_LIVE_KEYS } from '../lib/firebaseSync';
 import { fetchGradeReportsFromFirestore, subscribeGradeReportsRealtime } from '../lib/gradeReportsFirestore';
+import { fetchConsolidatedStudentRecord } from '../lib/studentGradesQuery';
 import { fetchCertifiedGradeSheetsByParent } from '../lib/supabase';
 import {
   isFirestoreQuotaExceeded,
@@ -289,24 +290,34 @@ export default function ParentPortal({
 
   // Grade ceiling / passing settings: '100' | 'unspecified' | '50' | '20' | 'custom'
   const [maxGradeChoice, setMaxGradeChoice] = useState<string>(() => {
-    return localStorage.getItem('school_parent_max_grade_choice') || 
-           localStorage.getItem('school_max_grade_setting') || 
+    return localStorage.getItem('school_max_grade_setting') ||
+           localStorage.getItem('school_parent_max_grade_choice') ||
            '100';
   });
   const [customMaxGrade, setCustomMaxGrade] = useState<string>(() => {
-    return localStorage.getItem('school_parent_custom_max_grade') || 
-           localStorage.getItem('school_custom_max_grade') || 
+    return localStorage.getItem('school_custom_max_grade') ||
+           localStorage.getItem('school_parent_custom_max_grade') ||
            '100';
   });
   const [passGradeChoice, setPassGradeChoice] = useState<string>(() => {
-    return localStorage.getItem('school_parent_pass_grade_choice') || 
-           localStorage.getItem('school_pass_grade_setting') || 
+    return localStorage.getItem('school_pass_grade_setting') ||
+           localStorage.getItem('school_parent_pass_grade_choice') ||
            '50';
   });
   const [customPassGrade, setCustomPassGrade] = useState<string>(() => {
-    return localStorage.getItem('school_parent_custom_pass_grade') || 
-           localStorage.getItem('school_custom_pass_grade') || 
+    return localStorage.getItem('school_custom_pass_grade') ||
+           localStorage.getItem('school_parent_custom_pass_grade') ||
            '50';
+  });
+  const [customSubjects, setCustomSubjects] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('school_custom_subjects');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {}
+    return ['الرياضيات', 'العلوم', 'اللغة العربية', 'التربية الإسلامية', 'اللغة الإنجليزية', 'الاجتماعيات'];
   });
 
   const displayMaxGrade = maxGradeChoice === 'unspecified' 
@@ -426,7 +437,7 @@ export default function ParentPortal({
     approvedSheets.forEach(sheet => {
       const month = sheet.month || '';
       (sheet.studentsSummary || []).forEach(st => {
-        const sId = String(st.studentId || '').trim();
+        const sId = String(st.studentId || st.unifiedNo || st.rollNo || '').trim();
         if (!sId || !Array.isArray(st.scores)) return;
         st.scores.forEach(sc => {
           if (sc && sc.subject && sc.score !== null && sc.score !== undefined) {
@@ -441,7 +452,12 @@ export default function ParentPortal({
               date: sheet.dateSent || new Date().toISOString().split('T')[0],
               teacherId: 'director',
               examType: 'monthly',
-              classId: sheet.classId
+              classId: sheet.classId,
+              ...({
+                __summaryUnifiedNo: st.unifiedNo ? String(st.unifiedNo).trim() : '',
+                __summaryRollNo: st.rollNo ? String(st.rollNo).trim() : '',
+                __summaryStudentName: st.studentName ? String(st.studentName).trim() : ''
+              } as any)
             });
           }
         });
@@ -477,7 +493,10 @@ export default function ParentPortal({
   // Complete cache-first fetch function from Firestore:
   // On reopen (forceServer = false), serves IndexedDB persistentLocalCache first (0 server reads!).
   // Pass forceServer = true on manual user refresh to fetch latest updates from server.
-  const fetchAllParentDataFromFirestore = async (forceServer: boolean = false) => {
+  const fetchAllParentDataFromFirestore = async (
+    forceServer: boolean = false,
+    studentOverride?: { studentId?: string; unifiedNo?: string; rollNo?: string; classId?: string; name?: string }
+  ) => {
     try {
       const { doc } = await import('firebase/firestore');
       const { db, getDocCacheFirst } = await import('../lib/firebase');
@@ -486,7 +505,7 @@ export default function ParentPortal({
 
       const effectiveForceServer = isFirestoreReadQuotaExceeded() ? false : forceServer;
 
-      const fetchDocCacheOrServer = async (docRef: any, ms = 1200): Promise<any> => {
+      const fetchDocCacheOrServer = async (docRef: any, ms = 5000): Promise<any> => {
         try {
           const { snap, fromCache } = await getDocCacheFirst(docRef, {
             forceServer: effectiveForceServer,
@@ -505,31 +524,100 @@ export default function ParentPortal({
       };
 
       // Run parallel cache-first fetches scoped to this student
-      const targetStudentId = activeChild?.id || loggedInStudentId;
-      const targetUnifiedNo = activeChild?.unifiedNo || activeChild?.rollNo;
+      const targetStudentId = studentOverride?.studentId || activeChild?.id || loggedInStudentId;
+      const targetUnifiedNo = studentOverride?.unifiedNo || activeChild?.unifiedNo || activeChild?.rollNo;
 
-      const [sentSnap, msgsSnap, evalSnap, monthSnap] = await Promise.all([
+      const [sentSnap, msgsSnap, evalSnap, monthSnap, directReports, consolidatedRec] = await Promise.all([
         fetchDocCacheOrServer(doc(db, 'school_live_data', 'school_sent_grade_sheets')),
         fetchDocCacheOrServer(doc(db, 'school_live_data', 'school_messages')),
         fetchDocCacheOrServer(doc(db, 'school_live_data', 'school_monthly_evaluations')),
-        fetchDocCacheOrServer(doc(db, 'school_live_data', 'school_evaluation_current_month'))
+        fetchDocCacheOrServer(doc(db, 'school_live_data', 'school_evaluation_current_month')),
+        fetchGradeReportsFromFirestore().catch(() => [] as SentGradeSheet[]),
+        targetStudentId
+          ? fetchConsolidatedStudentRecord(targetStudentId, targetUnifiedNo, effectiveForceServer).catch(() => null)
+          : Promise.resolve(null)
       ]);
+
+      let mergedSheetsAcc: SentGradeSheet[] = [];
+      try {
+        const raw = localStorage.getItem('school_sent_grade_sheets');
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) mergedSheetsAcc = parsed;
+        }
+      } catch {}
 
       if (sentSnap && sentSnap.exists()) {
         const sheetsData = sentSnap.data()?.data;
         if (Array.isArray(sheetsData) && sheetsData.length > 0) {
-          let existingLocalSheets: SentGradeSheet[] = [];
-          try {
-            const raw = localStorage.getItem('school_sent_grade_sheets');
-            if (raw) {
-              const parsed = JSON.parse(raw);
-              if (Array.isArray(parsed)) existingLocalSheets = parsed;
-            }
-          } catch {}
-          const mergedSheets = deduplicateGradeSheets([...existingLocalSheets, ...sheetsData]);
-          saveSyncedLocalOnly('school_sent_grade_sheets', JSON.stringify(mergedSheets));
-          setSentGradeSheets(prev => deduplicateGradeSheets([...prev, ...sheetsData]));
+          mergedSheetsAcc = deduplicateGradeSheets([...mergedSheetsAcc, ...sheetsData]);
         }
+      }
+
+      if (Array.isArray(directReports) && directReports.length > 0) {
+        const approvedReports = directReports.filter(isApprovedSentSheet);
+        if (approvedReports.length > 0) {
+          mergedSheetsAcc = deduplicateGradeSheets([...approvedReports, ...mergedSheetsAcc]);
+        }
+      }
+
+      if (consolidatedRec && consolidatedRec.subjects && Object.keys(consolidatedRec.subjects).length > 0) {
+        const subjectEntries = Object.entries(consolidatedRec.subjects) as Array<[
+          string,
+          { score?: number | null; maxScore?: number } | undefined
+        ]>;
+        const hasScoredSub = subjectEntries.some(
+          ([, sub]) => sub && sub.score !== null && sub.score !== undefined
+        );
+        if (hasScoredSub) {
+          const recMonth = consolidatedRec.evaluationMonth || consolidatedRec.term || currentEvaluationMonth || DEFAULT_EVALUATION_MONTH;
+          const alreadyHasStudentMonth = mergedSheetsAcc.some(
+            sh => isApprovedSentSheet(sh) &&
+              sh.month === recMonth &&
+              Array.isArray(sh.studentsSummary) &&
+              sh.studentsSummary.some(s =>
+                String(s.studentId || '').trim() === String(consolidatedRec.studentId || '').trim() ||
+                (consolidatedRec.unifiedNo && String(s.unifiedNo || '').trim() === String(consolidatedRec.unifiedNo).trim())
+              )
+          );
+          if (!alreadyHasStudentMonth) {
+            const syntheticSheet: SentGradeSheet = {
+              id: `consolidated_${consolidatedRec.studentId}_${recMonth}`,
+              title: `كشف درجات ${consolidatedRec.className || 'الطالب'} - شهر ${recMonth}`,
+              month: recMonth,
+              classId: consolidatedRec.classId || studentOverride?.classId || activeChild?.classId || '',
+              className: consolidatedRec.className || '',
+              dateSent: new Date(consolidatedRec.updatedAt || Date.now()).toISOString(),
+              sentBy: 'المدير العام (إدارة المدرسة)',
+              status: 'approved',
+              studentCount: 1,
+              studentsSummary: [{
+                studentId: consolidatedRec.studentId,
+                studentName: consolidatedRec.studentName || studentOverride?.name || activeChild?.name || '',
+                unifiedNo: consolidatedRec.unifiedNo || studentOverride?.unifiedNo || activeChild?.unifiedNo || '',
+                rollNo: consolidatedRec.rollNo || studentOverride?.rollNo || activeChild?.rollNo || '',
+                parentId: selectedParentId || 'parent',
+                parentName: activeParent?.name || 'ولي الأمر',
+                average: consolidatedRec.percentage ? `${consolidatedRec.percentage}%` : '---',
+                estimation: consolidatedRec.estimation || '---',
+                scores: subjectEntries.map(([subject, detail]) => ({
+                  subject,
+                  score: detail?.score !== null && detail?.score !== undefined ? Number(detail.score) : null,
+                  maxScore: Number(detail?.maxScore) || 100
+                })),
+                teacherNotes: consolidatedRec.teacherNotes || '',
+                directorNotes: consolidatedRec.directorNotes || ''
+              }]
+            };
+            mergedSheetsAcc = deduplicateGradeSheets([...mergedSheetsAcc, syntheticSheet]);
+          }
+        }
+      }
+
+      if (mergedSheetsAcc.length > 0) {
+        const deduped = deduplicateGradeSheets(mergedSheetsAcc);
+        saveSyncedLocalOnly('school_sent_grade_sheets', JSON.stringify(deduped));
+        setSentGradeSheets(prev => deduplicateGradeSheets([...prev, ...deduped]));
       }
 
       if (msgsSnap && msgsSnap.exists()) {
@@ -604,29 +692,44 @@ export default function ParentPortal({
       if (!Array.isArray(directReports) || directReports.length === 0) return;
       const approvedOnly = directReports.filter(isApprovedSentSheet);
       if (approvedOnly.length === 0) return;
-      setSentGradeSheets(prev => deduplicateGradeSheets([...approvedOnly, ...prev]));
+      setSentGradeSheets(prev => {
+        const merged = deduplicateGradeSheets([...approvedOnly, ...prev]);
+        try {
+          const savedRaw = localStorage.getItem('school_sent_grade_sheets');
+          const savedArr = savedRaw ? JSON.parse(savedRaw) : [];
+          const fullMerged = deduplicateGradeSheets([
+            ...(Array.isArray(savedArr) ? savedArr : []),
+            ...merged
+          ]);
+          saveSyncedLocalOnly('school_sent_grade_sheets', JSON.stringify(fullMerged));
+        } catch {}
+        return merged;
+      });
     };
 
-    const handleStorageUpdate = (_e?: any) => {
+    const reloadAllParentSyncedKeys = () => {
       const savedIcon = localStorage.getItem('school_app_icon');
       if (savedIcon !== null) {
         setSchoolAppIcon(savedIcon);
       }
       setWelcomeMsgs(getStoredWelcomeMessages());
 
-      const maxChoice = localStorage.getItem('school_parent_max_grade_choice') || localStorage.getItem('school_max_grade_setting');
+      const maxChoice = localStorage.getItem('school_max_grade_setting') || localStorage.getItem('school_parent_max_grade_choice');
       if (maxChoice) setMaxGradeChoice(maxChoice.startsWith('"') ? (() => { try { return JSON.parse(maxChoice); } catch { return maxChoice; } })() : maxChoice);
-      const customMax = localStorage.getItem('school_parent_custom_max_grade') || localStorage.getItem('school_custom_max_grade');
+      const customMax = localStorage.getItem('school_custom_max_grade') || localStorage.getItem('school_parent_custom_max_grade');
       if (customMax) setCustomMaxGrade(customMax.startsWith('"') ? (() => { try { return JSON.parse(customMax); } catch { return customMax; } })() : customMax);
-      const passChoice = localStorage.getItem('school_parent_pass_grade_choice') || localStorage.getItem('school_pass_grade_setting');
+      const passChoice = localStorage.getItem('school_pass_grade_setting') || localStorage.getItem('school_parent_pass_grade_choice');
       if (passChoice) setPassGradeChoice(passChoice.startsWith('"') ? (() => { try { return JSON.parse(passChoice); } catch { return passChoice; } })() : passChoice);
-      const customPass = localStorage.getItem('school_parent_custom_pass_grade') || localStorage.getItem('school_custom_pass_grade');
+      const customPass = localStorage.getItem('school_custom_pass_grade') || localStorage.getItem('school_parent_custom_pass_grade');
       if (customPass) setCustomPassGrade(customPass.startsWith('"') ? (() => { try { return JSON.parse(customPass); } catch { return customPass; } })() : customPass);
 
       const savedSent = localStorage.getItem('school_sent_grade_sheets');
       if (savedSent) {
         try {
-          setSentGradeSheets(deduplicateGradeSheets(JSON.parse(savedSent)));
+          const parsedSent = JSON.parse(savedSent);
+          if (Array.isArray(parsedSent)) {
+            setSentGradeSheets(prev => deduplicateGradeSheets([...prev.filter(isApprovedSentSheet), ...parsedSent]));
+          }
         } catch {}
       }
 
@@ -664,31 +767,98 @@ export default function ParentPortal({
           setBlockedGrades(JSON.parse(savedBlocked));
         } catch {}
       }
+
+      const savedSubjects = localStorage.getItem('school_custom_subjects');
+      if (savedSubjects) {
+        try {
+          const parsedSubs = JSON.parse(savedSubjects);
+          if (Array.isArray(parsedSubs) && parsedSubs.length > 0) {
+            setCustomSubjects(parsedSubs);
+          }
+        } catch {}
+      }
+    };
+
+    const handleStorageUpdate = (e?: Event) => {
+      const detail = (e as CustomEvent<{ key?: string; value?: string }> | undefined)?.detail;
+      const key = detail?.key;
+      const value = detail?.value;
+
+      if (!key || key === 'manual_refresh') {
+        reloadAllParentSyncedKeys();
+        return;
+      }
+
+      if (key === 'school_app_icon') {
+        setSchoolAppIcon(value || '');
+      } else if (key === 'school_welcome_messages') {
+        setWelcomeMsgs(getStoredWelcomeMessages());
+      } else if (key === 'school_messages' && typeof value === 'string') {
+        try { setDirectMessages(JSON.parse(value)); } catch {}
+      } else if (key === 'school_custom_subjects' && typeof value === 'string') {
+        try {
+          const parsedSubs = JSON.parse(value);
+          if (Array.isArray(parsedSubs) && parsedSubs.length > 0) setCustomSubjects(parsedSubs);
+        } catch {}
+      } else if (key === 'school_sent_grade_sheets' && typeof value === 'string') {
+        try {
+          const parsed = JSON.parse(value);
+          if (Array.isArray(parsed)) {
+            setSentGradeSheets(prev => deduplicateGradeSheets([...prev.filter(isApprovedSentSheet), ...parsed]));
+          }
+        } catch {}
+      } else if (key === 'school_monthly_evaluations' && typeof value === 'string') {
+        try { setMonthlyEvaluations(JSON.parse(value)); } catch {}
+      } else if (key === 'school_evaluation_current_month' && typeof value === 'string') {
+        try { setCurrentEvaluationMonth(value.startsWith('"') ? JSON.parse(value) : value); } catch {}
+      } else if (key === 'school_blocked_grades' && typeof value === 'string') {
+        try { setBlockedGrades(JSON.parse(value)); } catch {}
+      }
     };
 
     const handleLiveSyncCompleted = () => {
-      handleStorageUpdate();
-      fetchGradeReportsFromFirestore().then(applyApprovedDirectReports).catch(() => {});
+      reloadAllParentSyncedKeys();
+    };
+
+    let lastForegroundRefreshAt = Date.now();
+    const refreshOnForeground = () => {
+      if (document.visibilityState === 'visible' && navigator.onLine !== false) {
+        const now = Date.now();
+        if (now - lastForegroundRefreshAt < 45000) return;
+        lastForegroundRefreshAt = now;
+        syncLivePortalDataFromServer({ keys: PARENT_FAST_LIVE_KEYS, minIntervalMs: 30000 })
+          .then(() => reloadAllParentSyncedKeys())
+          .catch(() => {});
+      }
     };
 
     window.addEventListener('school_storage_update', handleStorageUpdate);
     window.addEventListener('school_live_sync_completed', handleLiveSyncCompleted);
+    document.addEventListener('visibilitychange', refreshOnForeground);
+    window.addEventListener('focus', refreshOnForeground);
 
     // Ensure real-time Firestore listeners are active for parent keys regardless of portal entry path
     ensureParentRealtimeListeners();
 
-    // Non-blocking fresh server sync on mount so parents immediately see Director-approved grade sheets
+    // Single non-blocking fresh server sync on mount + real-time stream (avoids duplicate grade_reports reads)
     fetchAllParentDataFromFirestore(true);
-    syncLivePortalDataFromServer({ keys: PARENT_FAST_LIVE_KEYS, minIntervalMs: 3000 })
-      .then(() => handleStorageUpdate())
-      .catch(() => {});
-
     const unsubApprovedReports = subscribeGradeReportsRealtime(applyApprovedDirectReports);
-    fetchGradeReportsFromFirestore().then(applyApprovedDirectReports).catch(() => {});
+
+    // Gentle 3-minute foreground safety sync for mobile browsers waking from extended sleep
+    const pollTimer = setInterval(() => {
+      if (document.visibilityState === 'visible' && navigator.onLine !== false) {
+        syncLivePortalDataFromServer({ keys: PARENT_FAST_LIVE_KEYS, minIntervalMs: 120000 })
+          .then(() => reloadAllParentSyncedKeys())
+          .catch(() => {});
+      }
+    }, 180000);
 
     return () => {
+      clearInterval(pollTimer);
       window.removeEventListener('school_storage_update', handleStorageUpdate);
       window.removeEventListener('school_live_sync_completed', handleLiveSyncCompleted);
+      document.removeEventListener('visibilitychange', refreshOnForeground);
+      window.removeEventListener('focus', refreshOnForeground);
       unsubApprovedReports();
     };
   }, []);
@@ -921,47 +1091,83 @@ ${url}
       localStorage.setItem('parent_portal_active_student_obj', JSON.stringify(match));
       localStorage.setItem('parent_portal_saved_login_input', targetInput);
       localStorage.setItem('parent_portal_auto_login', 'true');
+      safeDispatchStorageUpdate('parent_portal_student_id', match.id);
       return;
     }
 
-    // D. If not found in localStorage, fetch directly from Firestore server so newly added students work on any phone
+    // D. If not found locally yet, sync live data (Firestore + Live Relay) so newly added students open seamlessly on any device
     (async () => {
       try {
-        const { doc } = await import('firebase/firestore');
-        const { db, getDocCacheFirst } = await import('../lib/firebase');
-        const { trackFirestoreRead } = await import('../lib/firestoreTracker');
-        if (db) {
-          const { snap, fromCache } = await getDocCacheFirst(
-            doc(db, 'school_live_data', 'school_students'),
-            { forceServer: !isFirestoreReadQuotaExceeded(), timeoutMs: 3500 }
-          );
-          if (snap && !fromCache) trackFirestoreRead(1, 'التحقق من رقم الطالب الموحد');
-          if (snap && snap.exists()) {
-            const allSt = snap.data()?.data;
-            if (Array.isArray(allSt)) {
-              saveSyncedLocalOnly('school_students', JSON.stringify(allSt));
-              const remoteMatch = findStudentByUnifiedInput(targetInput, allSt);
-              if (remoteMatch) {
-                setActiveDirectStudent(remoteMatch);
-                setLoggedInStudentId(remoteMatch.id);
-                localStorage.setItem('parent_portal_student_id', remoteMatch.id);
-                localStorage.setItem('parent_portal_unified_no', remoteMatch.unifiedNo || remoteMatch.rollNo || '');
-                localStorage.setItem('parent_portal_active_student_obj', JSON.stringify(remoteMatch));
+        await Promise.race([
+          syncLivePortalDataFromServer({ keys: PARENT_FAST_LIVE_KEYS, minIntervalMs: 0 }),
+          new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 3500))
+        ]);
+        try {
+          const syncedRaw = localStorage.getItem('school_students');
+          if (syncedRaw) {
+            const syncedList = JSON.parse(syncedRaw);
+            if (Array.isArray(syncedList)) {
+              const relayOrLiveMatch = findStudentByUnifiedInput(targetInput, syncedList);
+              if (relayOrLiveMatch) {
+                setActiveDirectStudent(relayOrLiveMatch);
+                setLoggedInStudentId(relayOrLiveMatch.id);
+                localStorage.setItem('parent_portal_student_id', relayOrLiveMatch.id);
+                localStorage.setItem('parent_portal_unified_no', relayOrLiveMatch.unifiedNo || relayOrLiveMatch.rollNo || '');
+                localStorage.setItem('parent_portal_active_student_obj', JSON.stringify(relayOrLiveMatch));
                 localStorage.setItem('parent_portal_saved_login_input', targetInput);
                 localStorage.setItem('parent_portal_auto_login', 'true');
+                safeDispatchStorageUpdate('parent_portal_student_id', relayOrLiveMatch.id);
+                return;
               }
             }
+          }
+        } catch {}
+
+        const directList = await Promise.race([
+          fetchStudentsOnlyDirectly(true),
+          new Promise<any[]>((resolve) => setTimeout(() => resolve([]), 3500))
+        ]);
+        if (Array.isArray(directList) && directList.length > 0) {
+          const remoteMatch = findStudentByUnifiedInput(targetInput, directList);
+          if (remoteMatch) {
+            setActiveDirectStudent(remoteMatch);
+            setLoggedInStudentId(remoteMatch.id);
+            localStorage.setItem('parent_portal_student_id', remoteMatch.id);
+            localStorage.setItem('parent_portal_unified_no', remoteMatch.unifiedNo || remoteMatch.rollNo || '');
+            localStorage.setItem('parent_portal_active_student_obj', JSON.stringify(remoteMatch));
+            localStorage.setItem('parent_portal_saved_login_input', targetInput);
+            localStorage.setItem('parent_portal_auto_login', 'true');
+            safeDispatchStorageUpdate('parent_portal_student_id', remoteMatch.id);
           }
         }
       } catch (err: any) {
         if (isQuotaError(err)) {
           markFirestoreReadQuotaExceeded(err);
         } else {
-          console.warn('Auto URL student resolve from Firestore error:', err);
+          console.warn('Auto URL student resolve error:', err);
         }
       }
     })();
   }, [students, loggedInStudentId]);
+
+  // Whenever an active child profile becomes logged in, hydrate ALL school data (grades, evaluations, attendance, excuses, announcements, messages, settings) immediately
+  React.useEffect(() => {
+    if (!activeChild?.id) return;
+    ensureParentRealtimeListeners();
+    safeDispatchStorageUpdate('parent_portal_student_id', activeChild.id);
+    syncLivePortalDataFromServer({ keys: PARENT_FAST_LIVE_KEYS, minIntervalMs: 0 }).catch(() => {});
+    fetchAllParentDataFromFirestore(true).catch(() => {});
+    fetchGradeReportsFromFirestore()
+      .then((reports) => {
+        if (Array.isArray(reports) && reports.length > 0) {
+          const approvedOnly = reports.filter(isApprovedSentSheet);
+          if (approvedOnly.length > 0) {
+            setSentGradeSheets(prev => deduplicateGradeSheets([...approvedOnly, ...prev]));
+          }
+        }
+      })
+      .catch(() => {});
+  }, [activeChild?.id]);
 
   // --- Web Audio Synthesized Chime (Professional Smartphone Ringtone) ---
   const playCustomNotificationSound = () => {
@@ -1433,7 +1639,7 @@ ${url}
 
     // ON-DEMAND FETCH: Switched from continuous onSnapshot to on-demand getDocs
     // This closes persistent connection streams from students and eliminates quota drain.
-    const fetchNotificationsOnDemand = async () => {
+    const fetchNotificationsOnDemand = async (forceServer: boolean = false) => {
       if (isFirestoreReadQuotaExceeded()) {
         setIsFirebaseLive(false);
         setFirebaseErrorMsg('');
@@ -1450,11 +1656,12 @@ ${url}
           return;
         }
 
-        // Fetch cache-first scoped specifically to notifications for this parent/student
+        // Fetch scoped specifically to notifications for this parent/student/class/broadcasts
         const notificationReceivers = Array.from(new Set([
           selectedParentId,
           activeChild?.id,
           activeChild?.unifiedNo,
+          activeChild?.rollNo,
           activeChild?.classId ? `all_class_${activeChild.classId}` : '',
           'all',
           'all_cohort_parents',
@@ -1473,7 +1680,7 @@ ${url}
             );
 
         const { snap: snapshot, fromCache } = await getDocsCacheFirst(q, {
-          forceServer: false,
+          forceServer,
           timeoutMs: 2500
         });
         if (snapshot && !fromCache) {
@@ -1523,13 +1730,19 @@ ${url}
       }
     };
 
-    fetchNotificationsOnDemand();
+    const handleLiveNotificationRefresh = () => {
+      fetchNotificationsOnDemand(true);
+    };
+
+    fetchNotificationsOnDemand(Boolean(activeChild?.id));
+    window.addEventListener('school_live_sync_completed', handleLiveNotificationRefresh);
 
     return () => {
       window.removeEventListener('online', updateOnlineStatus);
       window.removeEventListener('offline', updateOnlineStatus);
+      window.removeEventListener('school_live_sync_completed', handleLiveNotificationRefresh);
     };
-  }, [setMessages, selectedParentId]);
+  }, [setMessages, selectedParentId, activeChild?.id, activeChild?.unifiedNo, activeChild?.classId]);
 
   // Handle opening message from external notification click or service worker message
   React.useEffect(() => {
@@ -1653,15 +1866,66 @@ ${url}
         } catch {}
       }
 
-      // 4. Direct server fetch from Firestore when not found locally (ensures newly added students work on any phone)
+      // 4. Live Relay + Firestore sync when not found locally (ensures newly added students work on any fresh phone/browser)
       if (!foundStudent) {
         try {
-          const directList = await Promise.race([
-            fetchStudentsOnlyDirectly(true),
-            new Promise<any[]>((resolve) => setTimeout(() => resolve([]), 3500))
+          await Promise.race([
+            syncLivePortalDataFromServer({ keys: PARENT_FAST_LIVE_KEYS, minIntervalMs: 0 }),
+            new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 3500))
           ]);
-          if (Array.isArray(directList) && directList.length > 0) {
-            foundStudent = findStudentByUnifiedInput(cleanInput, directList);
+          const syncedStudentsRaw = localStorage.getItem('school_students');
+          if (syncedStudentsRaw) {
+            try {
+              const parsed = JSON.parse(syncedStudentsRaw);
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                foundStudent = findStudentByUnifiedInput(cleanInput, parsed);
+              }
+            } catch {}
+          }
+          if (!foundStudent) {
+            const directList = await Promise.race([
+              fetchStudentsOnlyDirectly(true),
+              new Promise<any[]>((resolve) => setTimeout(() => resolve([]), 3500))
+            ]);
+            if (Array.isArray(directList) && directList.length > 0) {
+              foundStudent = findStudentByUnifiedInput(cleanInput, directList);
+            }
+          }
+          // Re-check sent grade sheets after live sync as an additional fallback
+          if (!foundStudent) {
+            const syncedSheetsRaw = localStorage.getItem('school_sent_grade_sheets');
+            if (syncedSheetsRaw) {
+              try {
+                const parsedSheets = JSON.parse(syncedSheetsRaw);
+                if (Array.isArray(parsedSheets)) {
+                  for (const sh of parsedSheets) {
+                    if (Array.isArray(sh.studentsSummary)) {
+                      const normInputDigits = normalizeNumberDigits(cleanInput);
+                      const match = sh.studentsSummary.find((sum: any) =>
+                        (sum.unifiedNo && (String(sum.unifiedNo).trim() === cleanInput || (normInputDigits && normalizeNumberDigits(String(sum.unifiedNo)) === normInputDigits))) ||
+                        (sum.rollNo && (String(sum.rollNo).trim() === cleanInput || (normInputDigits && normalizeNumberDigits(String(sum.rollNo)) === normInputDigits))) ||
+                        (sum.studentName && sum.studentName.trim().toLowerCase() === cleanInput.toLowerCase())
+                      );
+                      if (match) {
+                        foundStudent = {
+                          id: match.studentId || ('s_' + (match.unifiedNo || cleanInput)),
+                          name: match.studentName,
+                          classId: sh.classId || 'class-auto',
+                          parentId: match.parentId || ('p_' + (match.studentId || cleanInput)),
+                          rollNo: match.rollNo || match.unifiedNo || cleanInput,
+                          unifiedNo: match.unifiedNo || match.rollNo || cleanInput,
+                          gender: 'male',
+                          dob: '2015-01-01',
+                          parentName: match.parentName || `ولي أمر ${match.studentName}`,
+                          parentPhone: match.parentPhone || ''
+                        };
+                        break;
+                      }
+                    }
+                  }
+                }
+              } catch {}
+            }
           }
         } catch {
           // ignore network or quota limits
@@ -1676,9 +1940,19 @@ ${url}
         localStorage.setItem('parent_portal_unified_no', foundStudent.unifiedNo || foundStudent.rollNo || '');
         localStorage.setItem('parent_portal_saved_login_input', cleanInput);
         localStorage.setItem('parent_portal_auto_login', rememberMe ? 'true' : 'false');
+        localStorage.setItem('school_active_portal', 'parent');
+        safeDispatchStorageUpdate('parent_portal_student_id', foundStudent.id);
         setLoginError('');
 
-        fetchAllParentDataFromFirestore(true).catch(() => {});
+        ensureParentRealtimeListeners();
+        syncLivePortalDataFromServer({ keys: PARENT_FAST_LIVE_KEYS, minIntervalMs: 0 }).catch(() => {});
+        fetchAllParentDataFromFirestore(true, {
+          studentId: foundStudent.id,
+          unifiedNo: foundStudent.unifiedNo || foundStudent.rollNo || cleanInput,
+          rollNo: foundStudent.rollNo || foundStudent.unifiedNo || cleanInput,
+          classId: foundStudent.classId,
+          name: foundStudent.name
+        }).catch(() => {});
       } else {
         if (!isAuto) {
           setLoginError(
@@ -2066,7 +2340,10 @@ ${url}
             setCurrentEvaluationMonth(value.startsWith('"') ? parsed : value);
             break;
           case 'school_sent_grade_sheets':
-            setSentGradeSheets(deduplicateGradeSheets(parsed));
+            setSentGradeSheets(prev => deduplicateGradeSheets([...prev.filter(isApprovedSentSheet), ...(Array.isArray(parsed) ? parsed : [])]));
+            break;
+          case 'school_custom_subjects':
+            if (Array.isArray(parsed) && parsed.length > 0) setCustomSubjects(parsed);
             break;
           case 'school_max_grade_setting':
             setMaxGradeChoice(String(parsed));
@@ -2270,18 +2547,20 @@ ${url}
         if (setMessages) {
           setMessages(prev => {
             const updated = prev.map(m => {
-              const isChildBehavior = m.receiverId === selectedParentId && 
-                                      m.studentId === selectedChildId && 
-                                      (m.content.includes('سلوك') || 
-                                       m.content.includes('تنبيه سلوكي') || 
+              const isChildBehavior = isMessageForThisStudent(m) &&
+                                      (m.senderRole === 'teacher' || m.senderRole === 'director' || !m.senderRole) &&
+                                      (m.category === 'behavior' ||
+                                       m.content.includes('سلوك') ||
+                                       m.content.includes('تنبيه سلوكي') ||
                                        m.content.includes('تصنيف الإشعار: سلوك') ||
+                                       m.content.includes('ملاحظة سلوكية') ||
                                        m.content.includes('تقييم'));
               if (isChildBehavior && !m.read) {
                 return { ...m, read: true };
               }
               return m;
             });
-            localStorage.setItem('school_messages', JSON.stringify(updated));
+            persistDirectToFirestore('school_messages', updated).catch(() => {});
             return updated;
           });
         }
@@ -2297,7 +2576,10 @@ ${url}
   }, [activeTab, selectedParentId, selectedChildId, childBehaviorMessages, monthlyEvaluations, setMessages]);
 
   React.useEffect(() => {
-    const savedMonth = localStorage.getItem('school_evaluation_current_month') || DEFAULT_EVALUATION_MONTH;
+    const rawMonth = localStorage.getItem('school_evaluation_current_month');
+    const savedMonth = rawMonth
+      ? (rawMonth.startsWith('"') ? (() => { try { return JSON.parse(rawMonth); } catch { return rawMonth; } })() : rawMonth)
+      : DEFAULT_EVALUATION_MONTH;
     setCurrentEvaluationMonth(savedMonth);
     const savedEval = localStorage.getItem('school_monthly_evaluations');
     if (savedEval) {
@@ -2728,12 +3010,21 @@ ${url}
   const isGradeForActiveChild = React.useCallback((g: Grade): boolean => {
     if (!activeChild) return false;
     const sid = String(g.studentId || '').trim();
-    if (!sid) return false;
+    const gUnif = String((g as any).__summaryUnifiedNo || '').trim();
+    const gRoll = String((g as any).__summaryRollNo || '').trim();
+    const gName = String((g as any).__summaryStudentName || '').trim().toLowerCase().replace(/\s+/g, ' ');
     const cId = String(activeChild.id || '').trim();
     const cUnif = String(activeChild.unifiedNo || '').trim();
     const cRoll = String(activeChild.rollNo || '').trim();
     const cNat = String(activeChild.nationalId || '').trim();
-    return sid === cId || (cUnif && sid === cUnif) || (cRoll && sid === cRoll) || (cNat && sid === cNat);
+    const cName = String(activeChild.name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    if (sid && (sid === cId || (cUnif && sid === cUnif) || (cRoll && sid === cRoll) || (cNat && sid === cNat))) return true;
+    if (cUnif && gUnif && cUnif === gUnif) return true;
+    if (cRoll && gRoll && cRoll === gRoll) return true;
+    if (cUnif && gRoll && cUnif === gRoll) return true;
+    if (cRoll && gUnif && cRoll === gUnif) return true;
+    if (cName && gName && cName === gName) return true;
+    return false;
   }, [activeChild]);
 
   const isAttendanceForActiveChild = React.useCallback((a: Attendance): boolean => {
@@ -3617,10 +3908,8 @@ ${url}
                     <>
                       {/* Official Enhanced Monthly Grade Report Card */}
                       {(() => {
-                        const savedSubjects = localStorage.getItem('school_custom_subjects');
-                        const parsedSubjects = savedSubjects ? JSON.parse(savedSubjects) : [];
-                        const activeSubjects = parsedSubjects.length > 0 
-                          ? parsedSubjects 
+                        const activeSubjects = customSubjects.length > 0
+                          ? customSubjects
                           : ['الرياضيات', 'العلوم', 'اللغة العربية', 'التربية الإسلامية', 'اللغة الإنجليزية', 'الاجتماعيات'];
 
                         // Flexible student matching helper for sent grade sheets
@@ -4649,9 +4938,23 @@ ${url}
                         </div>
                         
                         <div className="space-y-3 max-h-[500px] overflow-y-auto pr-1">
-                          {excuses
-                            .filter(e => e.studentId === selectedChildId)
-                            .map(exc => (
+                          {(() => {
+                            const childExcuses = excuses.filter(e => {
+                              const eSid = String(e.studentId || '').trim();
+                              return (
+                                eSid === String(selectedChildId || '').trim() ||
+                                (activeChild?.unifiedNo && eSid === String(activeChild.unifiedNo).trim()) ||
+                                (activeChild?.rollNo && eSid === String(activeChild.rollNo).trim())
+                              );
+                            });
+                            if (childExcuses.length === 0) {
+                              return (
+                                <div className="text-center p-8 text-slate-400 text-xs italic bg-white rounded-xl border border-dashed border-slate-200">
+                                  لا توجد طلبات سابقة لهذا الطالب.
+                                </div>
+                              );
+                            }
+                            return childExcuses.map(exc => (
                               <div key={exc.id} className="bg-white p-4 rounded-xl border border-slate-100 shadow-sm text-xs space-y-2">
                                 <div className="flex justify-between items-center">
                                   <span className="font-mono text-[10px] text-slate-400">{exc.date}</span>
@@ -4672,13 +4975,8 @@ ${url}
                                   </p>
                                 )}
                               </div>
-                            ))}
-
-                          {excuses.filter(e => e.studentId === selectedChildId).length === 0 && (
-                            <div className="text-center p-8 text-slate-400 text-xs italic bg-white rounded-xl border border-dashed border-slate-200">
-                              لا توجد طلبات سابقة لهذا الطالب.
-                            </div>
-                          )}
+                            ));
+                          })()}
                         </div>
                       </div>
                     </div>
@@ -4784,22 +5082,46 @@ ${url}
 
                   {/* Dedicated Student Behavior View */}
                   <div className="space-y-6">
-                    {/* A. Monthly Evaluation/Behavior Card (ONLY shown if Director approved & sent that month's sheet) */}
+                    {/* A. Monthly Evaluation/Behavior Card (shown if Director approved & sent that month's or latest approved sheet) */}
                     {(() => {
-                      const latestApprovedSheet = sentGradeSheets.find(sheet =>
+                      const matchesSummary = (s: any) => {
+                        if (!s || !activeChild) return false;
+                        const cId = String(activeChild.id || '').trim();
+                        const cUnif = String(activeChild.unifiedNo || '').trim();
+                        const cRoll = String(activeChild.rollNo || '').trim();
+                        const cName = String(activeChild.name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+                        const sId = String(s.studentId || '').trim();
+                        const sUnif = String(s.unifiedNo || '').trim();
+                        const sRoll = String(s.rollNo || '').trim();
+                        const sName = String(s.studentName || '').trim().toLowerCase().replace(/\s+/g, ' ');
+                        return (
+                          (cId && sId === cId) ||
+                          (cUnif && (sUnif === cUnif || sRoll === cUnif)) ||
+                          (cRoll && (sRoll === cRoll || sUnif === cRoll)) ||
+                          (cName && sName && cName === sName)
+                        );
+                      };
+
+                      const matchingSheets = sentGradeSheets.filter(sheet =>
                         isApprovedSentSheet(sheet) &&
-                        sheet.month === currentEvaluationMonth &&
                         Array.isArray(sheet.studentsSummary) &&
-                        sheet.studentsSummary.some(s => String(s.studentId || '').trim() === String(selectedChildId).trim() || (activeChild?.unifiedNo && String(s.unifiedNo || '').trim() === String(activeChild.unifiedNo).trim()))
+                        sheet.studentsSummary.some(matchesSummary)
                       );
+                      const latestApprovedSheet =
+                        matchingSheets.find(sheet => sheet.month === currentEvaluationMonth) ||
+                        matchingSheets[0];
                       if (!latestApprovedSheet) return null;
 
-                      const evalObj = monthlyEvaluations[`${selectedChildId}_${currentEvaluationMonth}`] || 
-                        monthlyEvaluations[`${activeChild?.unifiedNo}_${currentEvaluationMonth}`] ||
-                        (monthlyEvaluations[selectedChildId]?.month === currentEvaluationMonth ? monthlyEvaluations[selectedChildId] : null);
+                      const evalMonth = latestApprovedSheet.month || currentEvaluationMonth;
+                      const sheetSummary = latestApprovedSheet.studentsSummary.find(matchesSummary);
+                      const evalObj =
+                        monthlyEvaluations[`${selectedChildId}_${evalMonth}`] ||
+                        monthlyEvaluations[`${activeChild?.unifiedNo}_${evalMonth}`] ||
+                        monthlyEvaluations[`${activeChild?.rollNo}_${evalMonth}`] ||
+                        (monthlyEvaluations[selectedChildId]?.month === evalMonth ? monthlyEvaluations[selectedChildId] : null);
 
-                      const tText = evalObj?.teacherText !== undefined ? evalObj.teacherText : (evalObj?.text || '');
-                      const dText = evalObj?.directorText || '';
+                      const tText = (evalObj?.teacherText !== undefined ? evalObj.teacherText : (evalObj?.text || '')) || sheetSummary?.teacherNotes || '';
+                      const dText = (evalObj?.directorText || '') || sheetSummary?.directorNotes || '';
 
                       if (!tText.trim() && !dText.trim()) return null;
 
@@ -4812,7 +5134,7 @@ ${url}
                               </span>
                             </div>
                             <span className="text-[11px] font-black text-slate-600">
-                              توجيهات شهر {evalObj?.month || currentEvaluationMonth}
+                              توجيهات شهر {evalObj?.month || evalMonth}
                             </span>
                           </div>
                           <div className="space-y-2.5 text-right">
@@ -4896,7 +5218,7 @@ ${url}
                         );
                       })}
 
-                      {childBehaviorMessages.length === 0 && !monthlyEvaluations[selectedChildId] && (
+                      {childBehaviorMessages.length === 0 && !monthlyEvaluations[`${selectedChildId}_${currentEvaluationMonth}`] && !monthlyEvaluations[selectedChildId] && (
                         <div className="bg-white p-12 rounded-2xl border border-slate-100 shadow-2xs text-center space-y-3">
                           <div className="w-12 h-12 bg-emerald-50 text-emerald-600 rounded-full flex items-center justify-center mx-auto text-lg">
                             🎉

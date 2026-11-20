@@ -85,7 +85,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { loadXlsx } from '../lib/xlsxLoader';
 import { db } from '../lib/firebase';
 import { collection, addDoc, setDoc, deleteDoc, doc, serverTimestamp, writeBatch, getDocs } from 'firebase/firestore';
-import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead, checkDailyRollover, fetchCentralizedConsumptionOnce, resetCentralizedFirestoreConsumption, calibrateCentralConsumptionBaseline, getRecentUtcDates, getTimeUntilFirebaseQuotaReset, SPARK_DAILY_READ_LIMIT, SPARK_DAILY_WRITE_LIMIT, FIREBASE_PROJECT_ID, FIREBASE_DATABASE_ID } from '../lib/firestoreTracker';
+import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead, checkDailyRollover, fetchCentralizedConsumptionOnce, resetCentralizedFirestoreConsumption, calibrateCentralConsumptionBaseline, getTimeUntilFirebaseQuotaReset, SPARK_DAILY_READ_LIMIT, SPARK_DAILY_WRITE_LIMIT, SPARK_STORAGE_LIMIT_MB, QUOTA_WARNING_RATIO, FIREBASE_PROJECT_ID, FIREBASE_DATABASE_ID } from '../lib/firestoreTracker';
 import { calculateStorageUsageReport, measureLiveCloudStorageAudit, StorageUsageReport } from '../lib/storageUsage';
 import { persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate, saveSyncedLocalOnly, recordDeletedStudentIds, queueOfflineNotification, deduplicateGradeSheetsPreservingTeachers, syncLivePortalDataFromServer, FAST_LIVE_SYNC_KEYS } from '../lib/firebaseSync';
 import {
@@ -99,6 +99,7 @@ import {
 } from '../lib/gradeReportsFirestore';
 import {
   isFirestoreQuotaExceeded,
+  isFirestoreWriteQuotaExceeded,
   isFirestoreReadQuotaExceeded,
   markFirestoreQuotaExceeded,
   markFirestoreReadQuotaExceeded,
@@ -267,10 +268,27 @@ export default function DirectorPortal({
   const [calibTodayReads, setCalibTodayReads] = useState('');
   const [calibTodayWrites, setCalibTodayWrites] = useState('');
   const [calibTodayRealtime, setCalibTodayRealtime] = useState('');
-  const [calibWeekReads, setCalibWeekReads] = useState('');
-  const [calibWeekWrites, setCalibWeekWrites] = useState('');
-  const [calibWeekRealtime, setCalibWeekRealtime] = useState('');
   const [isCalibrating, setIsCalibrating] = useState(false);
+  const [isRefreshingMetrics, setIsRefreshingMetrics] = useState(false);
+  const [metricsRefreshNotice, setMetricsRefreshNotice] = useState<string>('');
+
+  const handleRefreshMetricsFromCloud = async () => {
+    setIsRefreshingMetrics(true);
+    setMetricsRefreshNotice('');
+    try {
+      checkDailyRollover();
+      const res = await fetchCentralizedConsumptionOnce(true);
+      if (res) {
+        setMetricsRefreshNotice(
+          `✅ تم جلب أحدث أرقام ${res.date} من السحابة (${res.dbId}) — قراءات: ${res.reads.toLocaleString()} | كتابات: ${res.writes.toLocaleString()}`
+        );
+      } else {
+        setMetricsRefreshNotice('⚠️ تعذّر الاتصال المباشر بالسحابة حالياً أو اكتملت حصة القراءة — يتم عرض آخر قراءة محفوظة.');
+      }
+    } finally {
+      setIsRefreshingMetrics(false);
+    }
+  };
 
   const handleRunCloudStorageAudit = async () => {
     setIsAuditingStorage(true);
@@ -345,7 +363,14 @@ export default function DirectorPortal({
   React.useEffect(() => {
     return subscribeToFirestoreMetrics((data) => {
       setFirestoreMetrics(data);
-    }, { syncCentral: true, realtimeCentral: isMetricsModalOpen });
+    }, { syncCentral: true, realtimeCentral: false });
+  }, []);
+
+  React.useEffect(() => {
+    if (!isMetricsModalOpen) return;
+    return subscribeToFirestoreMetrics((data) => {
+      setFirestoreMetrics(data);
+    }, { syncCentral: false, realtimeCentral: true });
   }, [isMetricsModalOpen]);
 
   React.useEffect(() => {
@@ -360,7 +385,9 @@ export default function DirectorPortal({
     try {
       const { doc, getDoc } = await import('firebase/firestore');
       const tokenDoc = await getDoc(doc(db, 'fcm_tokens', parentId));
-      trackFirestoreRead(1);
+      if (!tokenDoc.metadata?.fromCache) {
+        trackFirestoreRead(1, 'قراءة توكن FCM');
+      }
       if (tokenDoc.exists()) {
         const fcmTokenData = tokenDoc.data();
         if (fcmTokenData && fcmTokenData.token) {
@@ -457,7 +484,7 @@ export default function DirectorPortal({
         }).then(() => {
           trackFirestoreWrite(1);
         }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000))
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1200))
       ]).catch(async (writeErr: any) => {
         if (isQuotaError(writeErr)) {
           markFirestoreQuotaExceeded(writeErr);
@@ -471,9 +498,10 @@ export default function DirectorPortal({
         });
       });
 
-      await Promise.all([liveMessagesSyncPromise, notifWritePromise]);
+      await liveMessagesSyncPromise;
+      void notifWritePromise;
 
-      // Trigger External Push Notification to affected parents
+      // Trigger External Push Notification in background so UI confirms instantaneously
       if (newMsg.receiverId) {
         if (newMsg.receiverId.startsWith('all_class_')) {
           const targetClassId = newMsg.receiverId.replace('all_class_', '');
@@ -484,7 +512,7 @@ export default function DirectorPortal({
               return p?.id;
             }).filter(Boolean) as string[]
           ));
-          sendBroadcastPushNotification(classParentIds, {
+          void sendBroadcastPushNotification(classParentIds, {
             title: newMsg.senderName || '📢 تعميم مدرسي',
             body: newMsg.content.slice(0, 150),
             category: 'announcement',
@@ -499,7 +527,7 @@ export default function DirectorPortal({
               return p?.id;
             }).filter(Boolean) as string[]
           ));
-          sendBroadcastPushNotification(cohortParentIds, {
+          void sendBroadcastPushNotification(cohortParentIds, {
             title: newMsg.senderName || '📢 تعميم مدرسي رسمي',
             body: newMsg.content.slice(0, 150),
             category: 'announcement',
@@ -508,7 +536,7 @@ export default function DirectorPortal({
             targetReceiverId: newMsg.receiverId
           });
         } else {
-          sendParentPushNotification(newMsg.receiverId, {
+          void sendParentPushNotification(newMsg.receiverId, {
             title: newMsg.senderName || '📩 رسالة من الإدارة',
             body: newMsg.content.slice(0, 150),
             category: 'direct',
@@ -1206,8 +1234,21 @@ export default function DirectorPortal({
       setMessages(cleanedMessages);
     }
 
+    let reportResult: any = null;
+    let batchSyncedOk = false;
     try {
-      await updateGradeReportInFirestore(updatedSheet);
+      const [resReport, resBatch] = await Promise.all([
+        updateGradeReportInFirestore(updatedSheet),
+        persistGradeReportBatchDirect({
+          grades,
+          ...(hadAutoGradeMsgs ? { messages: cleanedMessages } : {}),
+          sentSheets: updatedSentSheets,
+          monthlyEvaluations,
+          currentMonth: sheet.month
+        })
+      ]);
+      reportResult = resReport;
+      batchSyncedOk = resBatch;
     } catch (error: any) {
       if (isFirestoreQuotaError(error) || isQuotaError(error) || isFirestoreQuotaExceeded()) {
         const syncedBatch = await persistGradeReportBatchDirect({
@@ -1218,9 +1259,9 @@ export default function DirectorPortal({
           currentMonth: sheet.month
         });
         if (syncedBatch) {
-          alert(`🎉 تم بنجاح اعتماد كشف (${sheet.className}) وإرساله مباشرة لبوابات المعلمين وأولياء الأمور عبر القناة الفورية للمنصة! 🚀`);
+          alert(`⚠️ تم حفظ اعتماد كشف (${sheet.className}) وإرساله عبر القناة الفورية للمتصفح الحالي، لكن الحصة اليومية المجانية للكتابة في Firebase قد اكتملت لليوم.\n\nملاحظة: لكي تظهر الدرجات على المتصفحات والأجهزة الخارجية، تتجدد الحصة المجانية تلقائياً غداً أو يمكنك الترقية في Firebase.`);
         } else {
-          alert(`⚠️ تم حفظ اعتماد كشف (${sheet.className}) محلياً على جهازك، ولكن الحصة اليومية للكتابة في Firestore قد اكتملت لليوم (تتجدد الحصة غداً).`);
+          alert(`⚠️ تم حفظ اعتماد كشف (${sheet.className}) محلياً على جهازك فقط، لأن الحصة اليومية للكتابة في Firestore قد اكتملت لليوم (تتجدد الحصة غداً).`);
         }
         return;
       }
@@ -1229,16 +1270,12 @@ export default function DirectorPortal({
       return;
     }
 
-    // Persist grade sheet & consolidated scores without generating notification/message clutter
-    await persistGradeReportBatchDirect({
-      grades,
-      ...(hadAutoGradeMsgs ? { messages: cleanedMessages } : {}),
-      sentSheets: updatedSentSheets,
-      monthlyEvaluations,
-      currentMonth: sheet.month
-    });
+    if (reportResult?.__deliveredViaRelay || !batchSyncedOk || isFirestoreWriteQuotaExceeded()) {
+      alert(`⚠️ تم اعتماد كشف (${sheet.className}) وحفظه محلياً وعبر القناة الفورية، ولكن لم يكتمل الرفع السحابي إلى Firestore بسبب بلوغ الحصة اليومية للكتابة (تتجدد الحصة تلقائياً غداً).\n\nملاحظة: لن يظهر هذا التعديل في المتصفحات الخارجية حتى يتوفر رصيد كتابة في Firestore.`);
+      return;
+    }
 
-    alert(`🎉 تم بنجاح اعتماد كشف درجات المعلم وإتاحته لأولياء الأمور!\n\n🏫 الصف: ${sheet.className}\n📅 الشهر: ${sheet.month}\n👨‍🎓 عدد الطلاب: ${sheet.studentCount} طالب وطالبة\n\n✅ تم اعتماد الكشف وإظهاره في بوابات أولياء الأمور مباشرة دون تراكم إشعارات أو رسائل! 🚀`);
+    alert(`🎉 تم بنجاح اعتماد كشف درجات المعلم وإتاحته لأولياء الأمور على جميع الأجهزة والمتصفحات!\n\n🏫 الصف: ${sheet.className}\n📅 الشهر: ${sheet.month}\n👨‍🎓 عدد الطلاب: ${sheet.studentCount} طالب وطالبة\n\n✅ تم التثبيت في السحابة (Firestore) وإظهاره في بوابات أولياء الأمور مباشرة! 🚀`);
   };
 
   const handleSendMonthlyWhatsApp = (
@@ -2029,6 +2066,18 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
           case 'school_welcome_messages':
             setWelcomeMsgs(getStoredWelcomeMessages());
             break;
+          case 'school_max_grade_setting':
+            setDirectorMaxGradeType(typeof parsed === 'string' ? parsed : String(parsed || '100'));
+            break;
+          case 'school_custom_max_grade':
+            setDirectorCustomMaxGrade(typeof parsed === 'string' ? parsed : String(parsed || '100'));
+            break;
+          case 'school_pass_grade_setting':
+            setDirectorPassGradeType(typeof parsed === 'string' ? parsed : String(parsed || '50'));
+            break;
+          case 'school_custom_pass_grade':
+            setDirectorCustomPassGrade(typeof parsed === 'string' ? parsed : String(parsed || '50'));
+            break;
         }
       } catch (err) {
         if (key === 'school_active_academic_year') {
@@ -2041,6 +2090,14 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
           setSchoolAppIcon(value || '');
         } else if (key === 'school_welcome_messages') {
           setWelcomeMsgs(getStoredWelcomeMessages());
+        } else if (key === 'school_max_grade_setting') {
+          setDirectorMaxGradeType(value || '100');
+        } else if (key === 'school_custom_max_grade') {
+          setDirectorCustomMaxGrade(value || '100');
+        } else if (key === 'school_pass_grade_setting') {
+          setDirectorPassGradeType(value || '50');
+        } else if (key === 'school_custom_pass_grade') {
+          setDirectorCustomPassGrade(value || '50');
         } else {
           console.warn('Error parsing storage update in DirectorPortal.tsx', err);
         }
@@ -2086,6 +2143,22 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       if (savedActiveYear) {
         try { setActiveAcademicYear(savedActiveYear.startsWith('"') ? JSON.parse(savedActiveYear) : savedActiveYear); } catch (e) {}
       }
+      const savedMaxType = localStorage.getItem('school_max_grade_setting');
+      if (savedMaxType) {
+        try { setDirectorMaxGradeType(savedMaxType.startsWith('"') ? JSON.parse(savedMaxType) : savedMaxType); } catch { setDirectorMaxGradeType(savedMaxType); }
+      }
+      const savedCustomMax = localStorage.getItem('school_custom_max_grade');
+      if (savedCustomMax) {
+        try { setDirectorCustomMaxGrade(savedCustomMax.startsWith('"') ? JSON.parse(savedCustomMax) : savedCustomMax); } catch { setDirectorCustomMaxGrade(savedCustomMax); }
+      }
+      const savedPassType = localStorage.getItem('school_pass_grade_setting');
+      if (savedPassType) {
+        try { setDirectorPassGradeType(savedPassType.startsWith('"') ? JSON.parse(savedPassType) : savedPassType); } catch { setDirectorPassGradeType(savedPassType); }
+      }
+      const savedCustomPass = localStorage.getItem('school_custom_pass_grade');
+      if (savedCustomPass) {
+        try { setDirectorCustomPassGrade(savedCustomPass.startsWith('"') ? JSON.parse(savedCustomPass) : savedCustomPass); } catch { setDirectorCustomPassGrade(savedCustomPass); }
+      }
       const savedApkMode = localStorage.getItem('school_apk_mode');
       if (savedApkMode) {
         setApkCompatibilityMode(savedApkMode === 'true');
@@ -2105,7 +2178,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       }
     };
     reloadFromLocalStorage();
-    syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS, minIntervalMs: 3000 })
+    syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS, minIntervalMs: 1500 })
       .then(() => reloadFromLocalStorage())
       .catch(() => {});
 
@@ -2172,9 +2245,6 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
 
     const handleLiveSyncCompleted = () => {
       reloadFromLocalStorage();
-      fetchGradeReportsFromFirestore()
-        .then((reports) => applyDirectGradeReports(reports))
-        .catch(() => {});
     };
     window.addEventListener('school_live_sync_completed', handleLiveSyncCompleted);
 
@@ -2184,9 +2254,6 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
         console.warn('Grade reports real-time listener error:', extractFirestoreErrorMessage(err));
       }
     );
-    fetchGradeReportsFromFirestore()
-      .then((reports) => applyDirectGradeReports(reports))
-      .catch(() => {});
 
     return () => {
       window.removeEventListener('school_storage_update', handleStorageUpdate);
@@ -4873,15 +4940,26 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     const updatedSentSheets = deduplicateGradeSheets([sheetRecord, ...updatedExistingSheets]);
     setSentGradeSheets(updatedSentSheets);
 
-    // 4. Directly save approved grade report (and any approved teacher sheets) to Firestore `grade_reports` & Live Relay
+    // 4. Simultaneously save approved grade report (and any approved teacher sheets) + consolidated keys across devices
+    let mainReportResult: any = null;
+    let batchSyncedOk = false;
     try {
       const newlyApprovedTeacherSheets = updatedExistingSheets.filter(
         s => s.month === currentEvaluationMonth && s.status === 'approved' && s.teacherId && (cohortMode || s.classId === targetClassId || s.className === scopeTitle)
       );
-      await Promise.all([
+      const [resMain, ...restResults] = await Promise.all([
         submitGradeReportToFirestore(sheetRecord),
-        ...newlyApprovedTeacherSheets.map(s => updateGradeReportInFirestore(s))
+        ...newlyApprovedTeacherSheets.map(s => updateGradeReportInFirestore(s)),
+        persistGradeReportBatchDirect({
+          grades,
+          ...(hadAutoGradeMsgs ? { messages: cleanedMessages } : {}),
+          sentSheets: updatedSentSheets,
+          monthlyEvaluations,
+          currentMonth: currentEvaluationMonth
+        })
       ]);
+      mainReportResult = resMain;
+      batchSyncedOk = Boolean(restResults[restResults.length - 1]);
     } catch (error: any) {
       if (isFirestoreQuotaError(error) || isQuotaError(error) || isFirestoreQuotaExceeded()) {
         const syncedBatch = await persistGradeReportBatchDirect({
@@ -4892,9 +4970,9 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
           currentMonth: currentEvaluationMonth
         });
         if (syncedBatch) {
-          alert(`🎉 تم بنجاح اعتماد وإرسال كشف الدرجات لشهر (${currentEvaluationMonth}) مباشرة إلى بوابات أولياء الأمور والمعلمين عبر القناة الفورية للمنصة! ⚡`);
+          alert(`⚠️ تم حفظ كشف الدرجات لشهر (${currentEvaluationMonth}) محلياً وبثه عبر القناة الفورية للخادم الحالي، لكن الحصة اليومية المجانية للكتابة في Firebase قد اكتملت لليوم.\n\nملاحظة: المتصفحات الخارجية على هواتف أولياء الأمور تحتاج رصيد كتابة في Firebase لتستقبل التحديث (تتجدد الحصة غداً).`);
         } else {
-          alert(`⚠️ تم حفظ كشف الدرجات محلياً على جهازك، ولكن الحصة اليومية للكتابة في Firestore قد اكتملت لليوم (تتجدد الحصة غداً).`);
+          alert(`⚠️ تم حفظ كشف الدرجات محلياً على جهازك فقط، لأن الحصة اليومية للكتابة في Firestore قد اكتملت لليوم (تتجدد الحصة غداً).`);
         }
         return;
       }
@@ -4903,16 +4981,12 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       return;
     }
 
-    // 5. Persist consolidated keys across PC, mobile, and parent devices
-    await persistGradeReportBatchDirect({
-      grades,
-      ...(hadAutoGradeMsgs ? { messages: cleanedMessages } : {}),
-      sentSheets: updatedSentSheets,
-      monthlyEvaluations,
-      currentMonth: currentEvaluationMonth
-    });
+    if (mainReportResult?.__deliveredViaRelay || !batchSyncedOk || isFirestoreWriteQuotaExceeded()) {
+      alert(`⚠️ تم حفظ كشف الدرجات لشهر (${currentEvaluationMonth}) محلياً، ولكن لم يكتمل رفعه إلى سحابة Firestore بسبب اكتمال الحصة اليومية للكتابة أو انقطاع الشبكة (تتجدد الحصة غداً).\n\nملاحظة: قد لا تظهر الدرجات في متصفحات أخرى خارج هذا الخادم حتى يتم الرفع السحابي.`);
+      return;
+    }
 
-    alert(`🎉 تم بنجاح حفظ واعتماد وإرسال كشف الدرجات لشهر (${currentEvaluationMonth}) إلى أولياء الأمور!\n\n📊 إجمالي الطلاب المستلمين: ${targetStudents.length} طالب وطالبة\n🏫 النطاق: ${scopeTitle}\n\n✅ تم المزامنة السريعة وإظهار الدرجات في بوابات أولياء الأمور مباشرة دون تراكم إشعارات أو رسائل! ⚡`);
+    alert(`🎉 تم بنجاح حفظ واعتماد وإرسال كشف الدرجات لشهر (${currentEvaluationMonth}) إلى أولياء الأمور على جميع الأجهزة والمتصفحات!\n\n📊 إجمالي الطلاب المستلمين: ${targetStudents.length} طالب وطالبة\n🏫 النطاق: ${scopeTitle}\n\n✅ تم التثبيت السحابي في Firestore وإظهار الدرجات في بوابات أولياء الأمور مباشرة! ⚡`);
   };
 
   const handleExportGradesExcel = async (cohortMode: boolean = false) => {
@@ -6280,27 +6354,47 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
                 type="button"
                 onClick={() => {
                   checkDailyRollover();
-                  fetchCentralizedConsumptionOnce().catch(() => {});
+                  setMetricsRefreshNotice('');
+                  fetchCentralizedConsumptionOnce(false).catch(() => {});
                   setStorageReport(prev => calculateStorageUsageReport(prev.cloudCounts));
                   setIsMetricsModalOpen(true);
                 }}
                 className={`relative p-1.5 rounded-lg border flex items-center gap-1 transition cursor-pointer ${
-                  firestoreMetrics.totalReads >= 36000
+                  firestoreMetrics.totalReads >= SPARK_DAILY_READ_LIMIT * 0.9 ||
+                  firestoreMetrics.totalWrites >= SPARK_DAILY_WRITE_LIMIT * 0.9 ||
+                  isFirestoreWriteQuotaExceeded()
                     ? 'bg-rose-950/40 text-rose-400 border-rose-900/50'
-                    : firestoreMetrics.totalReads >= 30000
+                    : firestoreMetrics.totalReads >= SPARK_DAILY_READ_LIMIT * QUOTA_WARNING_RATIO ||
+                      firestoreMetrics.totalWrites >= SPARK_DAILY_WRITE_LIMIT * QUOTA_WARNING_RATIO ||
+                      storageReport.percentUsed >= QUOTA_WARNING_RATIO * 100
                     ? 'bg-amber-950/40 text-amber-400 border-amber-500/30 hover:bg-amber-950/85 hover:border-amber-500'
                     : 'bg-emerald-950/40 text-emerald-400 border-emerald-500/30 hover:bg-emerald-950/85 hover:border-emerald-500'
                 }`}
-                title="مراقبة استهلاك الفايربيس"
+                title="مراقبة الاستهلاك اليومي والمتبقي من المجاني"
               >
-                <Activity className={`w-3.5 h-3.5 ${firestoreMetrics.totalReads >= 30000 ? 'animate-pulse' : ''}`} />
-                <span className={`absolute -top-0.5 -left-0.5 w-2 h-2 rounded-full ${
-                  firestoreMetrics.totalReads >= 36000
-                    ? 'bg-rose-500 animate-ping'
-                    : firestoreMetrics.totalReads >= 30000
-                    ? 'bg-amber-500 animate-ping'
-                    : 'bg-emerald-500'
-                }`} />
+                <Activity
+                  className={`w-3.5 h-3.5 ${
+                    firestoreMetrics.totalReads >= SPARK_DAILY_READ_LIMIT * QUOTA_WARNING_RATIO ||
+                    firestoreMetrics.totalWrites >= SPARK_DAILY_WRITE_LIMIT * QUOTA_WARNING_RATIO ||
+                    storageReport.percentUsed >= QUOTA_WARNING_RATIO * 100 ||
+                    isFirestoreWriteQuotaExceeded()
+                      ? 'animate-pulse'
+                      : ''
+                  }`}
+                />
+                <span
+                  className={`absolute -top-0.5 -left-0.5 w-2 h-2 rounded-full ${
+                    firestoreMetrics.totalReads >= SPARK_DAILY_READ_LIMIT * 0.9 ||
+                    firestoreMetrics.totalWrites >= SPARK_DAILY_WRITE_LIMIT * 0.9 ||
+                    isFirestoreWriteQuotaExceeded()
+                      ? 'bg-rose-500 animate-ping'
+                      : firestoreMetrics.totalReads >= SPARK_DAILY_READ_LIMIT * QUOTA_WARNING_RATIO ||
+                        firestoreMetrics.totalWrites >= SPARK_DAILY_WRITE_LIMIT * QUOTA_WARNING_RATIO ||
+                        storageReport.percentUsed >= QUOTA_WARNING_RATIO * 100
+                      ? 'bg-amber-500 animate-ping'
+                      : 'bg-emerald-500'
+                  }`}
+                />
               </button>
             </div>
           </div>
@@ -11149,7 +11243,9 @@ ${sampleEval}
                                         }
                                       };
                                       setBlockedGrades(updated);
-                                      localStorage.setItem('school_blocked_grades', JSON.stringify(updated));
+                                      const serialized = JSON.stringify(updated);
+                                      localStorage.setItem('school_blocked_grades', serialized);
+                                      safeDispatchStorageUpdate('school_blocked_grades', serialized);
                                     }}
                                     className={`px-3 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1 shrink-0 ${
                                       blockedGrades[student.id]?.blocked
@@ -11172,7 +11268,9 @@ ${sampleEval}
                                         }
                                       };
                                       setBlockedGrades(updated);
-                                      localStorage.setItem('school_blocked_grades', JSON.stringify(updated));
+                                      const serialized = JSON.stringify(updated);
+                                      localStorage.setItem('school_blocked_grades', serialized);
+                                      safeDispatchStorageUpdate('school_blocked_grades', serialized);
                                     }}
                                     className="grow text-xs border border-slate-200 px-3 py-2 rounded-xl bg-white focus:outline-none focus:border-rose-500 text-right font-medium text-slate-800 shadow-2xs"
                                     placeholder="مثال: حجبت العلامات لعدم دفع القسط المالي"
@@ -14074,7 +14172,24 @@ ${sampleEval}
             </motion.div>
           )}
 
-          {isMetricsModalOpen && (
+          {isMetricsModalOpen && (() => {
+            const usedReads = Math.max(0, firestoreMetrics.totalReads || 0);
+            const usedWrites = Math.max(0, firestoreMetrics.totalWrites || 0);
+            const remainingReads = Math.max(0, SPARK_DAILY_READ_LIMIT - usedReads);
+            const remainingWrites = isFirestoreWriteQuotaExceeded() ? 0 : Math.max(0, SPARK_DAILY_WRITE_LIMIT - usedWrites);
+            const readsUsedPct = Math.min(100, (usedReads / SPARK_DAILY_READ_LIMIT) * 100);
+            const readsRemainingPct = Math.max(0, 100 - readsUsedPct);
+            const writesUsedPct = isFirestoreWriteQuotaExceeded() ? 100 : Math.min(100, (usedWrites / SPARK_DAILY_WRITE_LIMIT) * 100);
+            const writesRemainingPct = isFirestoreWriteQuotaExceeded() ? 0 : Math.max(0, 100 - writesUsedPct);
+            const storageUsedPct = Math.min(100, storageReport.percentUsed || 0);
+            const storageRemainingPct = Math.max(0, 100 - storageUsedPct);
+
+            const warnReads = readsUsedPct >= QUOTA_WARNING_RATIO * 100;
+            const warnWrites = writesUsedPct >= QUOTA_WARNING_RATIO * 100 || isFirestoreWriteQuotaExceeded();
+            const warnStorage = storageUsedPct >= QUOTA_WARNING_RATIO * 100;
+            const has80Warning = warnReads || warnWrites || warnStorage;
+
+            return (
             <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-[9999]">
               <motion.div
                 initial={{ opacity: 0, scale: 0.95 }}
@@ -14096,78 +14211,137 @@ ${sampleEval}
                       <BarChart3 className="w-5 h-5" />
                     </div>
                     <div>
-                      <h3 className="font-bold text-slate-800 text-sm">مراقبة حصة واستهلاك Firebase Firestore 📈</h3>
-                      <p className="text-[10px] text-slate-400">متوافق مع توقيت حصة Spark Plan (PT) + نطاق آخر 7 أيام (UTC)</p>
+                      <h3 className="font-bold text-slate-800 text-sm">مراقبة الاستهلاك اليومي والمتبقي من خطة Spark 📊</h3>
+                      <p className="text-[10px] text-slate-400">
+                        القاعدة النشطة: <span className="font-mono text-indigo-600 font-bold">{FIREBASE_DATABASE_ID}</span> | حصة اليوم فقط (لا تُحتسب قراءات الكاش المحلية)
+                      </p>
                     </div>
                   </div>
                 </div>
 
                 <div className="space-y-4">
-                  {/* Daily Auto-Reset & Centralized Sync Status Banner */}
-                  <div className="bg-emerald-50 border border-emerald-200/90 rounded-xl p-3 flex flex-col gap-1.5 text-xs">
+                  {/* Daily Auto-Reset & Active DB Status Banner */}
+                  <div className={`border rounded-xl p-3 flex flex-col gap-1.5 text-xs ${
+                    isFirestoreWriteQuotaExceeded()
+                      ? 'bg-rose-50 border-rose-200'
+                      : 'bg-emerald-50 border-emerald-200/90'
+                  }`}>
                     <div className="flex items-center justify-between flex-wrap gap-2">
                       <div className="flex items-center gap-2">
-                        <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
-                        <span className="font-bold text-emerald-900">العداد المركزي الموحد نشط (system_stats/consumption) 🔄</span>
+                        <span className={`w-2.5 h-2.5 rounded-full animate-pulse shrink-0 ${
+                          isFirestoreWriteQuotaExceeded() ? 'bg-rose-500' : 'bg-emerald-500'
+                        }`} />
+                        <span className={`font-bold ${isFirestoreWriteQuotaExceeded() ? 'text-rose-900' : 'text-emerald-900'}`}>
+                          {isFirestoreWriteQuotaExceeded()
+                            ? 'تم بلوغ حد الكتابة المجاني اليومي المشترك في Firebase ⚠️'
+                            : 'مرتبط بمستند system_stats/consumption للقاعدة النشطة ✅'}
+                        </span>
                       </div>
-                      <span className="text-[10px] bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-md font-bold">
-                        {firestoreMetrics.syncedFromCentral ? 'متصل بالسحابة حيّاً ✅' : 'مزامنة تلقائية'}
+                      <span className="bg-white/90 text-slate-800 border border-slate-200 px-2 py-0.5 rounded-md text-[10px] font-bold">
+                        {(() => {
+                          const resetIn = getTimeUntilFirebaseQuotaReset();
+                          return `يتجدد المجاني بعد ${resetIn.hours} س و ${resetIn.minutes} د`;
+                        })()}
                       </span>
                     </div>
-                    <div className="flex items-center justify-between flex-wrap gap-1 text-[11px] text-emerald-700 font-medium">
-                      <span>تاريخ حصة اليوم (توقيت Firebase الرسمي PT): <strong className="font-mono">{firestoreMetrics.date || '-'}</strong></span>
+                    <div className="flex items-center justify-between flex-wrap gap-1 text-[11px] text-slate-700 font-medium">
+                      <span>التاريخ الحالي للحصة (YYYY-MM-DD): <strong className="font-mono">{firestoreMetrics.date || '-'}</strong></span>
                       {firestoreMetrics.lastOperation && (
-                        <span className="text-[10px] text-emerald-800 font-bold truncate max-w-[240px]" title={firestoreMetrics.lastOperation}>
-                          آخر عملية: {firestoreMetrics.lastOperation}
+                        <span className="text-[10px] text-slate-600 font-bold truncate max-w-[260px]" title={firestoreMetrics.lastOperation}>
+                          آخر عملية فعلية: {firestoreMetrics.lastOperation}
                         </span>
                       )}
                     </div>
-                    <div className="bg-white/80 border border-emerald-200/70 rounded-lg px-2.5 py-2 text-[10px] text-slate-600 leading-relaxed space-y-1">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <span>
-                          <span className="font-bold text-slate-800">قاعدة بيانات Firebase:</span>{' '}
-                          <strong className="font-mono text-indigo-700">{FIREBASE_DATABASE_ID}</strong>
-                        </span>
-                        <span className="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-md font-bold">
-                          {(() => {
-                            const resetIn = getTimeUntilFirebaseQuotaReset();
-                            return `يتجدد المجاني بعد ${resetIn.hours} س و ${resetIn.minutes} د`;
-                          })()}
-                        </span>
-                      </div>
-                      <span className="block text-[9.5px] text-slate-500">
-                        ملاحظة: صفحة &laquo;نظرة عامة&raquo; في Firebase Console قد تجمع 4 قواعد بيانات مشتركة بالحصة تحت مشروع <span className="font-mono">{FIREBASE_PROJECT_ID}</span>؛ للمطابقة 1:1 حدد قاعدة البيانات أعلاه داخل وحدة تحكم Firebase.
-                      </span>
+                    <div className="text-[10px] text-slate-500 leading-relaxed">
+                      المشروع: <span className="font-mono font-bold text-slate-700">{FIREBASE_PROJECT_ID}</span> | يتم تسجيل القراءات والكتابات السحابية الحقيقية فقط دون احتساب قراءات الكاش المحلي.
                     </div>
                   </div>
 
-                  {/* Quick Summary: Remaining Free Daily & Storage Quota */}
-                  <div className="grid grid-cols-3 gap-2.5">
-                    <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-3 text-center">
-                      <span className="text-[10px] font-bold text-emerald-800 block mb-0.5">باقي القراءات المجانية اليوم</span>
-                      <strong className="text-sm sm:text-base font-mono font-black text-emerald-700 block">
-                        {(firestoreMetrics.remainingReads ?? Math.max(0, SPARK_DAILY_READ_LIMIT - firestoreMetrics.totalReads)).toLocaleString()}
+                  {/* 80% Threshold Warning Alert Banner */}
+                  {has80Warning && (
+                    <div className="bg-amber-50 border-2 border-amber-300 rounded-2xl p-3.5 text-xs space-y-1.5 shadow-2xs">
+                      <div className="flex items-center gap-2 font-extrabold text-amber-900">
+                        <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                        <span>تنبيه تحذيري: تجاوز الاستهلاك 80% من الحد اليومي المجاني! ⚠️</span>
+                      </div>
+                      <ul className="list-disc list-inside text-[11px] text-amber-900 space-y-0.5 pr-1">
+                        {warnReads && (
+                          <li>
+                            <strong>القراءات اليومية:</strong> وصلت إلى <strong>{readsUsedPct.toFixed(1)}%</strong> ({usedReads.toLocaleString()} / {SPARK_DAILY_READ_LIMIT.toLocaleString()}) — المتبقي مجاناً: <strong>{remainingReads.toLocaleString()}</strong>
+                          </li>
+                        )}
+                        {warnWrites && (
+                          <li>
+                            <strong>الكتابات اليومية:</strong> وصلت إلى <strong>{writesUsedPct.toFixed(1)}%</strong> ({usedWrites.toLocaleString()} / {SPARK_DAILY_WRITE_LIMIT.toLocaleString()}) — المتبقي مجاناً: <strong>{remainingWrites.toLocaleString()}</strong>
+                          </li>
+                        )}
+                        {warnStorage && (
+                          <li>
+                            <strong>سعة التخزين:</strong> وصلت إلى <strong>{storageUsedPct.toFixed(1)}%</strong> ({storageReport.estimatedFirestoreFormatted} / {SPARK_STORAGE_LIMIT_MB.toLocaleString()} MB) — المتبقي مجاناً: <strong>{storageReport.remainingFreeFormatted}</strong>
+                          </li>
+                        )}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Quick Summary: Today's Remaining Spark Free Quota */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                    <div className={`border rounded-2xl p-3 text-center ${
+                      warnReads ? 'bg-amber-50 border-amber-300' : 'bg-emerald-50 border-emerald-200'
+                    }`}>
+                      <span className={`text-[10px] font-bold block mb-0.5 ${warnReads ? 'text-amber-900' : 'text-emerald-800'}`}>
+                        المتبقي من القراءات اليومية
+                      </span>
+                      <strong className={`text-base font-mono font-black block ${warnReads ? 'text-amber-700' : 'text-emerald-700'}`}>
+                        {remainingReads.toLocaleString()}
                       </strong>
-                      <span className="text-[9.5px] font-mono text-emerald-600">
-                        من {SPARK_DAILY_READ_LIMIT.toLocaleString()} ({((firestoreMetrics.remainingReadsPercent ?? Math.max(0, ((SPARK_DAILY_READ_LIMIT - firestoreMetrics.totalReads) / SPARK_DAILY_READ_LIMIT) * 100))).toFixed(1)}%)
+                      <span className={`text-[10px] font-mono font-bold block ${warnReads ? 'text-amber-700' : 'text-emerald-700'}`}>
+                        متبقي {readsRemainingPct.toFixed(1)}% (مستخدم {readsUsedPct.toFixed(1)}%)
+                      </span>
+                      <span className="text-[9.5px] font-mono text-slate-500 block mt-0.5">
+                        50,000 − {usedReads.toLocaleString()}
                       </span>
                     </div>
-                    <div className="bg-sky-50 border border-sky-200 rounded-2xl p-3 text-center">
-                      <span className="text-[10px] font-bold text-sky-800 block mb-0.5">باقي الكتابات المجانية اليوم</span>
-                      <strong className="text-sm sm:text-base font-mono font-black text-sky-700 block">
-                        {(firestoreMetrics.remainingWrites ?? Math.max(0, SPARK_DAILY_WRITE_LIMIT - firestoreMetrics.totalWrites)).toLocaleString()}
+
+                    <div className={`border rounded-2xl p-3 text-center ${
+                      isFirestoreWriteQuotaExceeded() || remainingWrites === 0
+                        ? 'bg-rose-50 border-rose-200'
+                        : warnWrites
+                        ? 'bg-amber-50 border-amber-300'
+                        : 'bg-sky-50 border-sky-200'
+                    }`}>
+                      <span className={`text-[10px] font-bold block mb-0.5 ${
+                        isFirestoreWriteQuotaExceeded() ? 'text-rose-800' : warnWrites ? 'text-amber-900' : 'text-sky-800'
+                      }`}>المتبقي من الكتابات اليومية</span>
+                      <strong className={`text-base font-mono font-black block ${
+                        isFirestoreWriteQuotaExceeded() ? 'text-rose-700' : warnWrites ? 'text-amber-700' : 'text-sky-700'
+                      }`}>
+                        {isFirestoreWriteQuotaExceeded() ? '0 (مكتمل)' : remainingWrites.toLocaleString()}
                       </strong>
-                      <span className="text-[9.5px] font-mono text-sky-600">
-                        من {SPARK_DAILY_WRITE_LIMIT.toLocaleString()} ({((firestoreMetrics.remainingWritesPercent ?? Math.max(0, ((SPARK_DAILY_WRITE_LIMIT - firestoreMetrics.totalWrites) / SPARK_DAILY_WRITE_LIMIT) * 100))).toFixed(1)}%)
+                      <span className={`text-[10px] font-mono font-bold block ${
+                        isFirestoreWriteQuotaExceeded() ? 'text-rose-700' : warnWrites ? 'text-amber-700' : 'text-sky-700'
+                      }`}>
+                        متبقي {writesRemainingPct.toFixed(1)}% (مستخدم {writesUsedPct.toFixed(1)}%)
+                      </span>
+                      <span className="text-[9.5px] font-mono text-slate-500 block mt-0.5">
+                        20,000 − {usedWrites.toLocaleString()}
                       </span>
                     </div>
-                    <div className="bg-indigo-50 border border-indigo-200 rounded-2xl p-3 text-center">
-                      <span className="text-[10px] font-bold text-indigo-800 block mb-0.5">باقي المساحة المجانية</span>
-                      <strong className="text-sm sm:text-base font-mono font-black text-indigo-700 block">
+
+                    <div className={`border rounded-2xl p-3 text-center ${
+                      warnStorage ? 'bg-amber-50 border-amber-300' : 'bg-indigo-50 border-indigo-200'
+                    }`}>
+                      <span className={`text-[10px] font-bold block mb-0.5 ${warnStorage ? 'text-amber-900' : 'text-indigo-800'}`}>
+                        المتبقي من التخزين (1024 MB)
+                      </span>
+                      <strong className={`text-base font-mono font-black block ${warnStorage ? 'text-amber-700' : 'text-indigo-700'}`}>
                         {storageReport.remainingFreeFormatted}
                       </strong>
-                      <span className="text-[9.5px] font-mono text-indigo-600">
-                        من 1,024 MB ({(100 - storageReport.percentUsed).toFixed(2)}%)
+                      <span className={`text-[10px] font-mono font-bold block ${warnStorage ? 'text-amber-700' : 'text-indigo-600'}`}>
+                        متبقي {storageRemainingPct.toFixed(2)}% (مستخدم {storageUsedPct.toFixed(2)}%)
+                      </span>
+                      <span className="text-[9.5px] font-mono text-slate-500 block mt-0.5">
+                        1,024 MB − {storageReport.estimatedFirestoreFormatted}
                       </span>
                     </div>
                   </div>
@@ -14175,38 +14349,38 @@ ${sampleEval}
                   {/* Today's Quota: Reads + Realtime Reads Breakdown */}
                   <div className="space-y-2">
                     <div className="flex flex-wrap justify-between items-center gap-1 text-xs">
-                      <span className="font-bold text-slate-700">القراءات اليومية (Reads — حد Spark: 50,000)</span>
+                      <span className="font-bold text-slate-700">القراءات اليومية الفعلية (الحد المجاني: 50,000)</span>
                       <span className="font-mono font-bold text-xs">
-                        <span className="text-slate-600">المستخدم: {firestoreMetrics.totalReads.toLocaleString()}</span>
+                        <span className="text-slate-600">اليوم: {usedReads.toLocaleString()} ({readsUsedPct.toFixed(1)}%)</span>
                         <span className="mx-1.5 text-slate-300">|</span>
-                        <span className="text-emerald-700">
-                          المتبقي مجاناً: {(firestoreMetrics.remainingReads ?? Math.max(0, SPARK_DAILY_READ_LIMIT - firestoreMetrics.totalReads)).toLocaleString()} ({(firestoreMetrics.remainingReadsPercent ?? Math.max(0, ((SPARK_DAILY_READ_LIMIT - firestoreMetrics.totalReads) / SPARK_DAILY_READ_LIMIT) * 100)).toFixed(1)}%)
+                        <span className={warnReads ? 'text-amber-700' : 'text-emerald-700'}>
+                          المتبقي: {remainingReads.toLocaleString()} ({readsRemainingPct.toFixed(1)}%)
                         </span>
                       </span>
                     </div>
                     <div className="w-full h-3 bg-slate-100 rounded-full overflow-hidden">
                       <div
                         className={`h-full transition-all duration-500 ${
-                          firestoreMetrics.totalReads >= 45000
+                          readsUsedPct >= 90
                             ? 'bg-rose-500'
-                            : firestoreMetrics.totalReads >= 35000
+                            : warnReads
                             ? 'bg-amber-500'
                             : 'bg-emerald-500'
                         }`}
-                        style={{ width: `${Math.min(100, (firestoreMetrics.totalReads / SPARK_DAILY_READ_LIMIT) * 100)}%` }}
+                        style={{ width: `${readsUsedPct}%` }}
                       />
                     </div>
                     <div className="grid grid-cols-3 gap-2 bg-slate-50 p-2.5 rounded-xl text-[11px] text-slate-500">
                       <div>
-                        <span className="block text-[10px]">قراءات هذا الجهاز</span>
+                        <span className="block text-[10px]">قراءات هذا الجهاز اليوم</span>
                         <strong className="font-mono text-slate-700">{firestoreMetrics.reads.toLocaleString()}</strong>
                       </div>
                       <div>
-                        <span className="block text-[10px]">قراءات فورية (Realtime)</span>
+                        <span className="block text-[10px]">قراءات فورية اليوم (Realtime)</span>
                         <strong className="font-mono text-pink-600">{(firestoreMetrics.totalRealtimeReads || 0).toLocaleString()}</strong>
                       </div>
                       <div>
-                        <span className="block text-[10px]">المسجّل في قاعدة البيانات</span>
+                        <span className="block text-[10px]">في مستند القاعدة اليوم</span>
                         <strong className="font-mono text-indigo-700">{(firestoreMetrics.firestoreReads || 0).toLocaleString()}</strong>
                       </div>
                     </div>
@@ -14215,30 +14389,30 @@ ${sampleEval}
                   {/* Today's Quota: Writes */}
                   <div className="space-y-2">
                     <div className="flex flex-wrap justify-between items-center gap-1 text-xs">
-                      <span className="font-bold text-slate-700">الكتابات اليومية (Writes — حد Spark: 20,000)</span>
+                      <span className="font-bold text-slate-700">الكتابات اليومية الفعلية (الحد المجاني: 20,000)</span>
                       <span className="font-mono font-bold text-xs">
-                        <span className="text-slate-600">المستخدم: {firestoreMetrics.totalWrites.toLocaleString()}</span>
+                        <span className="text-slate-600">اليوم: {usedWrites.toLocaleString()} ({writesUsedPct.toFixed(1)}%)</span>
                         <span className="mx-1.5 text-slate-300">|</span>
-                        <span className="text-sky-700">
-                          المتبقي مجاناً: {(firestoreMetrics.remainingWrites ?? Math.max(0, SPARK_DAILY_WRITE_LIMIT - firestoreMetrics.totalWrites)).toLocaleString()} ({(firestoreMetrics.remainingWritesPercent ?? Math.max(0, ((SPARK_DAILY_WRITE_LIMIT - firestoreMetrics.totalWrites) / SPARK_DAILY_WRITE_LIMIT) * 100)).toFixed(1)}%)
+                        <span className={isFirestoreWriteQuotaExceeded() ? 'text-rose-700' : warnWrites ? 'text-amber-700' : 'text-sky-700'}>
+                          المتبقي: {isFirestoreWriteQuotaExceeded() ? '0 (0.0%)' : `${remainingWrites.toLocaleString()} (${writesRemainingPct.toFixed(1)}%)`}
                         </span>
                       </span>
                     </div>
                     <div className="w-full h-3 bg-slate-100 rounded-full overflow-hidden">
                       <div
                         className={`h-full transition-all duration-500 ${
-                          firestoreMetrics.totalWrites >= 18000
+                          isFirestoreWriteQuotaExceeded() || writesUsedPct >= 90
                             ? 'bg-rose-500'
-                            : firestoreMetrics.totalWrites >= 15000
+                            : warnWrites
                             ? 'bg-amber-500'
                             : 'bg-sky-500'
                         }`}
-                        style={{ width: `${Math.min(100, (firestoreMetrics.totalWrites / SPARK_DAILY_WRITE_LIMIT) * 100)}%` }}
+                        style={{ width: `${writesUsedPct}%` }}
                       />
                     </div>
                     <div className="grid grid-cols-3 gap-2 bg-slate-50 p-2.5 rounded-xl text-[11px] text-slate-500">
                       <div>
-                        <span className="block text-[10px]">كتابات هذا الجهاز</span>
+                        <span className="block text-[10px]">كتابات هذا الجهاز اليوم</span>
                         <strong className="font-mono text-slate-700">{firestoreMetrics.writes.toLocaleString()}</strong>
                       </div>
                       <div>
@@ -14246,47 +14420,9 @@ ${sampleEval}
                         <strong className="font-mono text-amber-600">{(firestoreMetrics.pendingLocalWrites || 0).toLocaleString()}</strong>
                       </div>
                       <div>
-                        <span className="block text-[10px]">المسجّل في قاعدة البيانات</span>
+                        <span className="block text-[10px]">في مستند القاعدة اليوم</span>
                         <strong className="font-mono text-indigo-700">{(firestoreMetrics.firestoreWrites || 0).toLocaleString()}</strong>
                       </div>
-                    </div>
-                  </div>
-
-                  {/* Last 7 Days Summary (Matches Firebase Console 7-Day Overview Chart) */}
-                  <div className="bg-slate-900 text-white rounded-2xl p-4 space-y-3">
-                    <div className="flex items-center justify-between flex-wrap gap-2">
-                      <div>
-                        <span className="text-xs font-extrabold block">ملخص آخر 7 أيام (مطابق لنطاق Firebase Console)</span>
-                        <span className="text-[10px] text-slate-400">
-                          الأيام بتوقيت UTC • الإجمالي التراكمي: {(firestoreMetrics.lifetimeReads || 0).toLocaleString()} قراءة / {(firestoreMetrics.lifetimeWrites || 0).toLocaleString()} كتابة
-                        </span>
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-3 gap-2.5">
-                      <div className="bg-slate-800/90 border border-sky-500/30 rounded-xl p-2.5">
-                        <span className="text-[10px] text-sky-300 block font-bold">يقرأ (7 أيام)</span>
-                        <strong className="text-base font-mono text-white">{(firestoreMetrics.reads7d || 0).toLocaleString()}</strong>
-                      </div>
-                      <div className="bg-slate-800/90 border border-amber-500/30 rounded-xl p-2.5">
-                        <span className="text-[10px] text-amber-300 block font-bold">يكتب (7 أيام)</span>
-                        <strong className="text-base font-mono text-white">{(firestoreMetrics.writes7d || 0).toLocaleString()}</strong>
-                      </div>
-                      <div className="bg-slate-800/90 border border-pink-500/30 rounded-xl p-2.5">
-                        <span className="text-[10px] text-pink-300 block font-bold">قراءات فورية (7 أيام)</span>
-                        <strong className="text-base font-mono text-white">{(firestoreMetrics.realtimeReads7d || 0).toLocaleString()}</strong>
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-7 gap-1 pt-1">
-                      {getRecentUtcDates(7).map((utcDay) => {
-                        const b = firestoreMetrics.dailyHistory?.[utcDay];
-                        return (
-                          <div key={utcDay} className="bg-slate-800/70 rounded-lg p-1.5 text-center border border-slate-700/60">
-                            <span className="block text-[9px] text-slate-400 font-mono">{utcDay.slice(5)}</span>
-                            <span className="block text-[10px] font-mono font-bold text-sky-300" title="القراءات">{b?.reads || 0}</span>
-                            <span className="block text-[9px] font-mono text-amber-300" title="الكتابات">{b?.writes || 0}</span>
-                          </div>
-                        );
-                      })}
                     </div>
                   </div>
 
@@ -14299,7 +14435,7 @@ ${sampleEval}
                         </div>
                         <div>
                           <span className="font-extrabold text-xs text-slate-800 block">سعة التخزين المستخدمة والمتبقية (Storage)</span>
-                          <span className="text-[10px] text-slate-500">الحد المجاني الكلي في Spark Plan: 1,024 MB (1 GiB)</span>
+                          <span className="text-[10px] text-slate-500">الحد المجاني الكلي في Spark Plan: {SPARK_STORAGE_LIMIT_MB.toLocaleString()} ميجابايت (1 GiB)</span>
                         </div>
                       </div>
                       <button
@@ -14316,22 +14452,22 @@ ${sampleEval}
                     <div className="space-y-1.5">
                       <div className="flex justify-between items-center text-xs">
                         <span className="font-bold text-indigo-900">
-                          المستخدم: <span className="font-mono">{storageReport.estimatedFirestoreFormatted}</span>
+                          المستخدم: <span className="font-mono">{storageReport.estimatedFirestoreFormatted}</span> ({storageUsedPct.toFixed(2)}%)
                         </span>
                         <span className="font-bold text-emerald-700">
-                          المتبقي مجاناً: <span className="font-mono">{storageReport.remainingFreeFormatted}</span> ({storageReport.percentUsed.toFixed(3)}%)
+                          المتبقي مجاناً: <span className="font-mono">{storageReport.remainingFreeFormatted}</span> ({storageRemainingPct.toFixed(2)}%)
                         </span>
                       </div>
                       <div className="w-full h-3 bg-white rounded-full overflow-hidden border border-indigo-100">
                         <div
                           className={`h-full transition-all duration-500 ${
-                            storageReport.percentUsed >= 85
+                            storageUsedPct >= 90
                               ? 'bg-rose-500'
-                              : storageReport.percentUsed >= 60
+                              : warnStorage
                               ? 'bg-amber-500'
                               : 'bg-indigo-600'
                           }`}
-                          style={{ width: `${Math.max(1.5, Math.min(100, storageReport.percentUsed))}%` }}
+                          style={{ width: `${Math.max(1.5, storageUsedPct)}%` }}
                         />
                       </div>
                     </div>
@@ -14357,18 +14493,18 @@ ${sampleEval}
                     </div>
                   </div>
 
-                  {/* Quick Centralized Controls & Optional Console Baseline Calibration */}
+                  {/* Quick Centralized Controls & Instant Cloud Fetch */}
                   <div className="bg-slate-50 p-3 rounded-2xl border border-slate-100 space-y-2.5">
-                    <span className="text-[10px] text-slate-400 block font-bold">إدارة ومزامنة العداد المركزي (System Stats Controls)</span>
+                    <span className="text-[10px] text-slate-400 block font-bold">إدارة ومزامنة مستند system_stats/consumption</span>
                     <div className="flex flex-wrap gap-2">
                       <button
                         type="button"
-                        onClick={() => {
-                          fetchCentralizedConsumptionOnce().catch(() => {});
-                        }}
-                        className="flex-1 bg-slate-900 text-white text-[11px] font-bold py-1.5 px-3 rounded-xl hover:bg-slate-800 transition cursor-pointer"
+                        disabled={isRefreshingMetrics}
+                        onClick={handleRefreshMetricsFromCloud}
+                        className="flex-1 bg-slate-900 text-white text-[11px] font-bold py-2 px-3 rounded-xl hover:bg-slate-800 disabled:opacity-60 transition cursor-pointer flex items-center justify-center gap-1.5"
                       >
-                        ⚡ تحديث فوري من السحابة
+                        {isRefreshingMetrics ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                        <span>{isRefreshingMetrics ? 'جاري التحديث من السحابة...' : '⚡ تحديث فوري من السحابة'}</span>
                       </button>
                       <button
                         type="button"
@@ -14379,32 +14515,36 @@ ${sampleEval}
                               setCalibTodayReads(String(firestoreMetrics.totalReads || 0));
                               setCalibTodayWrites(String(firestoreMetrics.totalWrites || 0));
                               setCalibTodayRealtime(String(firestoreMetrics.totalRealtimeReads || 0));
-                              setCalibWeekReads(String(firestoreMetrics.reads7d || firestoreMetrics.totalReads || 0));
-                              setCalibWeekWrites(String(firestoreMetrics.writes7d || firestoreMetrics.totalWrites || 0));
-                              setCalibWeekRealtime(String(firestoreMetrics.realtimeReads7d || firestoreMetrics.totalRealtimeReads || 0));
                             }
                             return next;
                           });
                         }}
-                        className="bg-indigo-100 text-indigo-800 text-[11px] font-bold py-1.5 px-3 rounded-xl hover:bg-indigo-200 transition cursor-pointer"
+                        className="bg-indigo-100 text-indigo-800 text-[11px] font-bold py-2 px-3 rounded-xl hover:bg-indigo-200 transition cursor-pointer"
                       >
-                        🎛️ معايرة مع Console
+                        🎛️ معايرة أرقام اليوم
                       </button>
                       <button
                         type="button"
                         onClick={() => {
                           resetCentralizedFirestoreConsumption(false).catch(() => {});
+                          setMetricsRefreshNotice('🔄 تم تصفير عداد اليوم محلياً وعلى السحابة (إن سمحت الحصة).');
                         }}
-                        className="bg-slate-200 text-slate-700 text-[11px] font-bold py-1.5 px-3 rounded-xl hover:bg-slate-300 transition cursor-pointer"
+                        className="bg-slate-200 text-slate-700 text-[11px] font-bold py-2 px-3 rounded-xl hover:bg-slate-300 transition cursor-pointer"
                       >
                         🔄 تصفير عداد اليوم
                       </button>
                     </div>
 
+                    {metricsRefreshNotice && (
+                      <div className="text-[10.5px] font-bold px-3 py-2 rounded-xl bg-white border border-slate-200 text-slate-700">
+                        {metricsRefreshNotice}
+                      </div>
+                    )}
+
                     {showCalibratePanel && (
                       <div className="bg-white border border-indigo-200 rounded-xl p-3 space-y-2.5 mt-2">
                         <p className="text-[10px] text-slate-600 leading-relaxed">
-                          أدخل الأرقام الظاهرة في لوحة <strong className="text-indigo-700">Firebase Console</strong> لقاعدة البيانات <span className="font-mono">{FIREBASE_DATABASE_ID.slice(0, 18)}...</span> لمطابقة خط الأساس التاريخي مع الرصد الحي القادم:
+                          أدخل أرقام الاستهلاك اليومي من <strong className="text-indigo-700">Firebase Console</strong> لمطابقة عداد اليوم وحساب المتبقي مجاناً بدقة:
                         </p>
                         <div className="grid grid-cols-3 gap-2">
                           <div>
@@ -14437,36 +14577,6 @@ ${sampleEval}
                               className="w-full text-xs font-mono border border-slate-200 rounded-lg px-2 py-1"
                             />
                           </div>
-                          <div>
-                            <label className="block text-[9.5px] font-bold text-slate-500 mb-0.5">قراءات 7 أيام</label>
-                            <input
-                              type="number"
-                              min={0}
-                              value={calibWeekReads}
-                              onChange={e => setCalibWeekReads(e.target.value)}
-                              className="w-full text-xs font-mono border border-slate-200 rounded-lg px-2 py-1"
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-[9.5px] font-bold text-slate-500 mb-0.5">كتابات 7 أيام</label>
-                            <input
-                              type="number"
-                              min={0}
-                              value={calibWeekWrites}
-                              onChange={e => setCalibWeekWrites(e.target.value)}
-                              className="w-full text-xs font-mono border border-slate-200 rounded-lg px-2 py-1"
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-[9.5px] font-bold text-slate-500 mb-0.5">فورية 7 أيام</label>
-                            <input
-                              type="number"
-                              min={0}
-                              value={calibWeekRealtime}
-                              onChange={e => setCalibWeekRealtime(e.target.value)}
-                              className="w-full text-xs font-mono border border-slate-200 rounded-lg px-2 py-1"
-                            />
-                          </div>
                         </div>
                         <div className="flex justify-end gap-2">
                           <button
@@ -14485,10 +14595,7 @@ ${sampleEval}
                                 await calibrateCentralConsumptionBaseline({
                                   todayReads: Number(calibTodayReads) || 0,
                                   todayWrites: Number(calibTodayWrites) || 0,
-                                  todayRealtimeReads: Number(calibTodayRealtime) || 0,
-                                  weekReads: calibWeekReads !== '' ? Number(calibWeekReads) : undefined,
-                                  weekWrites: calibWeekWrites !== '' ? Number(calibWeekWrites) : undefined,
-                                  weekRealtimeReads: calibWeekRealtime !== '' ? Number(calibWeekRealtime) : undefined
+                                  todayRealtimeReads: Number(calibTodayRealtime) || 0
                                 });
                                 setShowCalibratePanel(false);
                               } finally {
@@ -14497,7 +14604,7 @@ ${sampleEval}
                             }}
                             className="px-3 py-1 bg-indigo-600 hover:bg-indigo-700 text-white text-[10px] font-bold rounded-lg cursor-pointer disabled:opacity-60"
                           >
-                            {isCalibrating ? 'جاري الحفظ...' : 'اعتماد ومطابقة الأرقام ✅'}
+                            {isCalibrating ? 'جاري الحفظ...' : 'اعتماد ومطابقة اليوم ✅'}
                           </button>
                         </div>
                       </div>
@@ -14515,7 +14622,8 @@ ${sampleEval}
                 </div>
               </motion.div>
             </div>
-          )}
+            );
+          })()}
 
           {deleteConfirmModal && deleteConfirmModal.isOpen && (
             <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-[9999]">

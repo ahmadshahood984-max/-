@@ -10,7 +10,6 @@ import {
   getDocs,
   getDocsFromCache,
   getDocsFromServer,
-  onSnapshot,
   setDoc,
   type QuerySnapshot
 } from 'firebase/firestore';
@@ -28,8 +27,7 @@ import {
   isFirestoreWriteQuotaExceeded,
   isQuotaError,
   markFirestoreReadQuotaExceeded,
-  markFirestoreWriteQuotaExceeded,
-  registerActiveFirestoreListener
+  markFirestoreWriteQuotaExceeded
 } from './quotaManager';
 import {
   deleteLiveRelayGradeReport,
@@ -39,8 +37,11 @@ import {
   pushLiveRelayGradeReport,
   subscribeLiveRelayGradeReports
 } from './liveRelayClient';
+import { isReadCacheFresh, markReadCacheFresh, invalidateReadCache } from './readCache';
 
 export const GRADE_REPORTS_COLLECTION = 'grade_reports';
+const GRADE_REPORTS_CACHE_KEY = 'grade_reports:all';
+const GRADE_REPORTS_LOCAL_KEY = 'school_grade_reports_cache_v1';
 
 export class FirestoreQuotaExceededError extends Error {
   public readonly isQuota = true;
@@ -160,14 +161,17 @@ export async function submitGradeReportToFirestore(sheet: SentGradeSheet): Promi
     throw new FirestoreQuotaExceededError();
   }
 
-  try {
-    await withFirestoreTimeout(
-      setDoc(doc(db, GRADE_REPORTS_COLLECTION, reportId), payload),
-      FIRESTORE_WRITE_TIMEOUT_MS,
-      reportPath
-    );
+  const firestoreWritePromise: Promise<void> = withFirestoreTimeout(
+    setDoc(doc(db, GRADE_REPORTS_COLLECTION, reportId), payload),
+    FIRESTORE_WRITE_TIMEOUT_MS,
+    reportPath
+  ).then(() => {
     trackFirestoreWrite(1, `رفع كشف درجات (${sheet.className || reportId})`);
-    await relayPromise;
+  });
+
+  try {
+    await Promise.all([firestoreWritePromise, relayPromise]);
+    invalidateReadCache(GRADE_REPORTS_CACHE_KEY);
     return payload;
   } catch (error) {
     if (isQuotaError(error)) {
@@ -180,6 +184,7 @@ export async function submitGradeReportToFirestore(sheet: SentGradeSheet): Promi
     }
     const relayOk = await relayPromise;
     if (relayOk) {
+      console.warn(`Firestore submit fell back to relay (${reportPath}):`, error);
       return Object.assign({}, payload, { __deliveredViaRelay: true });
     }
     handleFirestoreError(error, OperationType.WRITE, reportPath);
@@ -220,14 +225,17 @@ export async function updateGradeReportInFirestore(sheet: SentGradeSheet): Promi
     throw new FirestoreQuotaExceededError();
   }
 
-  try {
-    await withFirestoreTimeout(
-      setDoc(doc(db, GRADE_REPORTS_COLLECTION, reportId), payload, { merge: true }),
-      FIRESTORE_WRITE_TIMEOUT_MS,
-      reportPath
-    );
+  const firestoreWritePromise: Promise<void> = withFirestoreTimeout(
+    setDoc(doc(db, GRADE_REPORTS_COLLECTION, reportId), payload, { merge: true }),
+    FIRESTORE_WRITE_TIMEOUT_MS,
+    reportPath
+  ).then(() => {
     trackFirestoreWrite(1, `اعتماد/تحديث كشف درجات (${sheet.className || reportId})`);
-    await relayPromise;
+  });
+
+  try {
+    await Promise.all([firestoreWritePromise, relayPromise]);
+    invalidateReadCache(GRADE_REPORTS_CACHE_KEY);
     return payload;
   } catch (error) {
     if (isQuotaError(error)) {
@@ -240,6 +248,7 @@ export async function updateGradeReportInFirestore(sheet: SentGradeSheet): Promi
     }
     const relayOk = await relayPromise;
     if (relayOk) {
+      console.warn(`Firestore update fell back to relay (${reportPath}):`, error);
       return Object.assign({}, payload, { __deliveredViaRelay: true });
     }
     handleFirestoreError(error, OperationType.WRITE, reportPath);
@@ -270,6 +279,7 @@ export async function deleteGradeReportFromFirestore(reportId: string): Promise<
       reportPath
     );
     trackFirestoreWrite(1, `حذف كشف درجات (${reportId})`);
+    invalidateReadCache(GRADE_REPORTS_CACHE_KEY);
     await relayPromise;
   } catch (error) {
     if (isQuotaError(error)) {
@@ -298,154 +308,168 @@ function mapSnapshotToGradeReports(snap: QuerySnapshot): SentGradeSheet[] {
   );
 }
 
-/**
- * Fetches all grade reports directly from `grade_reports` on Firestore server AND Live Relay
- * WITHOUT filtering out pending (`submitted`) reports. Never blocked by Firestore write quota!
- */
-export async function fetchGradeReportsFromFirestore(): Promise<SentGradeSheet[]> {
-  const relayPromise = fetchLiveRelaySnapshot()
-    .then((snap) => (snap?.gradeReports ? Object.values(snap.gradeReports) : getCachedRelayGradeReports()))
-    .catch(() => getCachedRelayGradeReports());
+let activeGradeReportsFetchPromise: Promise<SentGradeSheet[]> | null = null;
+let lastGradeReportsFetchResult: SentGradeSheet[] | null = null;
 
-  if (!db) {
-    return await relayPromise;
+function loadCachedGradeReportsFromLocal(): SentGradeSheet[] {
+  if (lastGradeReportsFetchResult && lastGradeReportsFetchResult.length > 0) {
+    return lastGradeReportsFetchResult;
   }
-
-  const colRef = collection(db, GRADE_REPORTS_COLLECTION);
-  const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
-
-  const readCacheFallback = async (): Promise<SentGradeSheet[]> => {
-    try {
-      const cacheSnap = await getDocsFromCache(colRef);
-      return mapSnapshotToGradeReports(cacheSnap);
-    } catch {
-      return [];
-    }
-  };
-
-  if (isOffline || isFirestoreReadQuotaExceeded()) {
-    const [cached, relayList] = await Promise.all([readCacheFallback(), relayPromise]);
-    return mergeGradeReportLists(cached, relayList);
-  }
-
   try {
-    const [snap, relayList] = await Promise.all([
-      withFirestoreTimeout(getDocsFromServer(colRef), FIRESTORE_READ_TIMEOUT_MS, GRADE_REPORTS_COLLECTION),
-      relayPromise
-    ]);
-    trackFirestoreRead(Math.max(1, snap.size), 'جلب كشوفات الدرجات من السحابة');
-    return mergeGradeReportLists(mapSnapshotToGradeReports(snap), relayList);
-  } catch (serverErr: any) {
-    if (isQuotaError(serverErr)) {
-      markFirestoreReadQuotaExceeded(serverErr);
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const raw = window.localStorage.getItem(GRADE_REPORTS_LOCAL_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    }
+  } catch {}
+  return [];
+}
+
+function saveCachedGradeReportsToLocal(list: SentGradeSheet[]): void {
+  lastGradeReportsFetchResult = list;
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.setItem(GRADE_REPORTS_LOCAL_KEY, JSON.stringify(list));
+    }
+  } catch {}
+}
+
+/**
+ * Fetches grade reports on-demand from `grade_reports` with a strict 5-minute TTL cache
+ * plus Live Relay merge. Only hits Firestore server if > 5 minutes elapsed or `force: true`.
+ */
+export async function fetchGradeReportsFromFirestore(options?: { force?: boolean }): Promise<SentGradeSheet[]> {
+  const force = Boolean(options?.force);
+  if (!force && activeGradeReportsFetchPromise) {
+    return activeGradeReportsFetchPromise;
+  }
+
+  // Enforce 5-minute TTL cache across tabs and portal switches
+  if (!force && isReadCacheFresh(GRADE_REPORTS_CACHE_KEY)) {
+    const cachedList = mergeGradeReportLists(loadCachedGradeReportsFromLocal(), getCachedRelayGradeReports());
+    if (cachedList.length > 0) {
+      return cachedList;
+    }
+  }
+
+  const runFetch = (async (): Promise<SentGradeSheet[]> => {
+    const relayPromise = fetchLiveRelaySnapshot()
+      .then((snap) => (snap?.gradeReports ? Object.values(snap.gradeReports) : getCachedRelayGradeReports()))
+      .catch(() => getCachedRelayGradeReports());
+
+    if (!db) {
+      return await relayPromise;
+    }
+
+    const colRef = collection(db, GRADE_REPORTS_COLLECTION);
+    const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
+
+    const readCacheFallback = async (): Promise<SentGradeSheet[]> => {
+      try {
+        const cacheSnap = await getDocsFromCache(colRef);
+        const fromIdb = mapSnapshotToGradeReports(cacheSnap);
+        if (fromIdb.length > 0) return fromIdb;
+      } catch {}
+      return loadCachedGradeReportsFromLocal();
+    };
+
+    if (isOffline || isFirestoreReadQuotaExceeded()) {
       const [cached, relayList] = await Promise.all([readCacheFallback(), relayPromise]);
       return mergeGradeReportLists(cached, relayList);
     }
 
-    const msg = String(serverErr?.message || serverErr || '').toLowerCase();
-    const isPermissionErr = msg.includes('permission') || msg.includes('missing or insufficient');
-    if (isPermissionErr) {
-      handleFirestoreError(serverErr, OperationType.GET, GRADE_REPORTS_COLLECTION);
-    }
-
-    const isTransientTimeoutOrOffline =
-      msg.includes('timed out') ||
-      msg.includes('timeout') ||
-      msg.includes('offline') ||
-      msg.includes('unavailable') ||
-      msg.includes('network');
-
-    const [cached, relayList] = await Promise.all([readCacheFallback(), relayPromise]);
-    if (cached.length > 0 || relayList.length > 0 || isTransientTimeoutOrOffline) {
-      if (isTransientTimeoutOrOffline) {
-        console.warn(`[Firestore Sync] Transient read timeout for ${GRADE_REPORTS_COLLECTION}; using cached/relay data.`);
+    try {
+      const [snap, relayList] = await Promise.all([
+        withFirestoreTimeout(
+          force ? getDocsFromServer(colRef) : getDocs(colRef),
+          FIRESTORE_READ_TIMEOUT_MS,
+          GRADE_REPORTS_COLLECTION
+        ),
+        relayPromise
+      ]);
+      const fromCache = !!snap.metadata?.fromCache;
+      if (!fromCache) {
+        trackFirestoreRead(Math.max(1, snap.size), 'جلب كشوفات الدرجات عند الطلب');
+        markReadCacheFresh(GRADE_REPORTS_CACHE_KEY);
       }
+      const merged = mergeGradeReportLists(mapSnapshotToGradeReports(snap), relayList);
+      saveCachedGradeReportsToLocal(merged);
+      return merged;
+    } catch (serverErr: any) {
+      if (isQuotaError(serverErr)) {
+        markFirestoreReadQuotaExceeded(serverErr);
+        const [cached, relayList] = await Promise.all([readCacheFallback(), relayPromise]);
+        return mergeGradeReportLists(cached, relayList);
+      }
+
+      const msg = String(serverErr?.message || serverErr || '').toLowerCase();
+      const isPermissionErr = msg.includes('permission') || msg.includes('missing or insufficient');
+      if (isPermissionErr) {
+        handleFirestoreError(serverErr, OperationType.GET, GRADE_REPORTS_COLLECTION);
+      }
+
+      const [cached, relayList] = await Promise.all([readCacheFallback(), relayPromise]);
       return mergeGradeReportLists(cached, relayList);
     }
+  })();
 
-    try {
-      const fallbackSnap = await withFirestoreTimeout(
-        getDocs(colRef),
-        FIRESTORE_READ_TIMEOUT_MS,
-        GRADE_REPORTS_COLLECTION
-      );
-      if (!fallbackSnap.metadata?.fromCache) {
-        trackFirestoreRead(Math.max(1, fallbackSnap.size), 'جلب كشوفات الدرجات');
-      }
-      return mergeGradeReportLists(mapSnapshotToGradeReports(fallbackSnap), relayList);
-    } catch (error) {
-      if (isQuotaError(error)) {
-        markFirestoreReadQuotaExceeded(error);
-        return mergeGradeReportLists(await readCacheFallback(), relayList);
-      }
-      const errMsg = String((error as any)?.message || error || '').toLowerCase();
-      if (errMsg.includes('timed out') || errMsg.includes('timeout') || errMsg.includes('offline') || errMsg.includes('unavailable')) {
-        console.warn(`[Firestore Sync] ${GRADE_REPORTS_COLLECTION} read deferred to realtime listener.`);
-        return relayList;
-      }
-      handleFirestoreError(error, OperationType.GET, GRADE_REPORTS_COLLECTION);
+  activeGradeReportsFetchPromise = runFetch;
+  try {
+    return await runFetch;
+  } finally {
+    if (activeGradeReportsFetchPromise === runFetch) {
+      activeGradeReportsFetchPromise = null;
     }
   }
 }
 
 /**
- * Subscribes in real time to ALL documents in `grade_reports` (including `submitted` pending reports)
- * over BOTH Firestore `onSnapshot` (while read quota permits) AND Live Relay SSE pushes.
+ * Subscribes to grade report updates via ZERO-Firestore-read Live Relay SSE
+ * and performs at most ONE on-demand cached fetch (5-minute TTL) instead of a continuous
+ * collection-wide `onSnapshot` listener.
  */
 export function subscribeGradeReportsRealtime(
   onReports: (reports: SentGradeSheet[]) => void,
   onError?: (err: unknown) => void
 ): () => void {
-  let latestFirestoreReports: SentGradeSheet[] = [];
+  let latestFirestoreReports: SentGradeSheet[] = loadCachedGradeReportsFromLocal();
   let latestRelayReports: SentGradeSheet[] = getCachedRelayGradeReports();
+  let disposed = false;
 
   const emitCombined = () => {
+    if (disposed) return;
     const combined = mergeGradeReportLists(latestFirestoreReports, latestRelayReports);
     if (combined.length > 0) {
       onReports(combined);
     }
   };
 
-  // Subscribe to SSE Live Relay grade report updates regardless of Firestore quota state
+  // Instant zero-read updates via SSE Live Relay
   const unsubRelay = subscribeLiveRelayGradeReports(() => {
     latestRelayReports = getCachedRelayGradeReports();
     emitCombined();
   });
 
-  if (latestRelayReports.length > 0) {
+  if (latestFirestoreReports.length > 0 || latestRelayReports.length > 0) {
     emitCombined();
   }
 
-  let unsubFirestore = () => {};
-  if (db && !isFirestoreReadQuotaExceeded()) {
-    const colRef = collection(db, GRADE_REPORTS_COLLECTION);
-    const rawUnsub = onSnapshot(
-      colRef,
-      (snap) => {
-        if (!snap.metadata?.fromCache) {
-          trackFirestoreRead(Math.max(1, snap.size), 'استماع فوري لكشوفات الدرجات', { isRealtime: true });
-        }
-        latestFirestoreReports = mapSnapshotToGradeReports(snap);
-        emitCombined();
-      },
-      (error) => {
-        if (isQuotaError(error)) {
-          markFirestoreReadQuotaExceeded(error);
-        }
-        if (onError) onError(error);
-        try {
-          handleFirestoreError(error, OperationType.GET, GRADE_REPORTS_COLLECTION);
-        } catch {
-          // Error already logged cleanly as FirestoreErrorInfo JSON
-        }
-      }
-    );
-    unsubFirestore = registerActiveFirestoreListener(rawUnsub);
-  }
+  // On-demand fetch ONLY if 5-minute cache expired (0 reads within 5-minute window)
+  fetchGradeReportsFromFirestore({ force: false })
+    .then((reports) => {
+      if (disposed) return;
+      latestFirestoreReports = reports;
+      emitCombined();
+    })
+    .catch((err) => {
+      if (onError) onError(err);
+    });
 
   return () => {
+    disposed = true;
     unsubRelay();
-    unsubFirestore();
   };
 }
 

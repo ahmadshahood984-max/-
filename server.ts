@@ -123,10 +123,11 @@ async function startServer() {
   });
 
   app.post('/api/live-relay/key', (req: Request, res: Response) => {
-    const body = req.body as { key?: unknown; value?: unknown; updatedAt?: unknown } | undefined;
+    const body = req.body as { key?: unknown; value?: unknown; updatedAt?: unknown; allowEmpty?: unknown } | undefined;
     const key = typeof body?.key === 'string' ? body.key.trim() : '';
     const value = typeof body?.value === 'string' ? body.value : '';
     const incomingUpdatedAt = Number(body?.updatedAt) || Date.now();
+    const allowEmpty = body?.allowEmpty === true;
 
     if (!key) {
       res.status(400).json({ ok: false, error: 'missing_key' });
@@ -134,27 +135,24 @@ async function startServer() {
     }
 
     const existing = store.keys[key];
-    // Never overwrite populated data with an empty initialization array/object
-    if (existing && !isEmptyPayloadString(existing.value) && isEmptyPayloadString(value)) {
+    // Never overwrite populated data with an unconfirmed empty initialization array/object
+    if (existing && !allowEmpty && !isEmptyPayloadString(existing.value) && isEmptyPayloadString(value)) {
       res.json({ ok: true, ignored: 'anti_wipe', updatedAt: existing.updatedAt });
       return;
     }
 
-    if (existing && incomingUpdatedAt < existing.updatedAt) {
-      res.json({ ok: true, ignored: 'stale', updatedAt: existing.updatedAt });
-      return;
-    }
-
-    if (existing && existing.value === value && incomingUpdatedAt === existing.updatedAt) {
+    if (existing && existing.value === value) {
       res.json({ ok: true, unchanged: true, updatedAt: existing.updatedAt });
       return;
     }
 
-    const nextRecord: RelayKeyRecord = { value, updatedAt: incomingUpdatedAt };
+    // Use server-monotonic timestamp so clock skew between computer and phone never drops newer edits
+    const nextUpdatedAt = Math.max(Date.now(), incomingUpdatedAt, existing ? existing.updatedAt + 1 : 0);
+    const nextRecord: RelayKeyRecord = { value, updatedAt: nextUpdatedAt };
     store.keys[key] = nextRecord;
     schedulePersistStore();
-    broadcastSse('key_update', { key, value, updatedAt: incomingUpdatedAt });
-    res.json({ ok: true, updatedAt: incomingUpdatedAt });
+    broadcastSse('key_update', { key, value, updatedAt: nextUpdatedAt });
+    res.json({ ok: true, updatedAt: nextUpdatedAt });
   });
 
   app.post('/api/live-relay/grade-report', (req: Request, res: Response) => {
@@ -168,21 +166,13 @@ async function startServer() {
     }
 
     const incomingTs = Number(report.updatedAt) || Date.now();
-    const deletedTs = store.deletedGradeReportIds[reportId] || 0;
-    if (deletedTs > incomingTs) {
-      res.json({ ok: true, ignored: 'deleted' });
-      return;
-    }
     delete store.deletedGradeReportIds[reportId];
 
     const existing = store.gradeReports[reportId];
     const existingTs = Number(existing?.updatedAt) || 0;
-    if (existing && incomingTs < existingTs) {
-      res.json({ ok: true, ignored: 'stale', report: existing });
-      return;
-    }
+    const nextUpdatedAt = Math.max(Date.now(), incomingTs, existingTs ? existingTs + 1 : 0);
 
-    const normalized = { ...report, id: reportId, updatedAt: incomingTs };
+    const normalized = { ...report, id: reportId, updatedAt: nextUpdatedAt };
     store.gradeReports[reportId] = normalized;
     schedulePersistStore();
     broadcastSse('grade_report_upsert', { report: normalized });

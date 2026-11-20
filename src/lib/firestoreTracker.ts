@@ -30,6 +30,7 @@ import {
   getFirebaseQuotaDateStr,
   getUtcDateStr
 } from './quotaManager';
+import { isReadCacheFresh, markReadCacheFresh } from './readCache';
 
 export const FIREBASE_PROJECT_ID = firebaseConfigJson.projectId || 'aesthetic-night-p8gvj';
 export const FIREBASE_DATABASE_ID =
@@ -38,6 +39,8 @@ export const FIREBASE_DATABASE_ID =
 export const SPARK_DAILY_READ_LIMIT = 50000;
 export const SPARK_DAILY_WRITE_LIMIT = 20000;
 export const SPARK_DAILY_DELETE_LIMIT = 20000;
+export const SPARK_STORAGE_LIMIT_MB = 1024;
+export const QUOTA_WARNING_RATIO = 0.8;
 
 export interface DailyUsageBucket {
   reads: number;
@@ -575,10 +578,18 @@ export async function flushConsumptionToFirestore(): Promise<void> {
         updatePayload.realtimeReads = increment(effectiveRealtimeReads);
         updatePayload.lifetimeRealtimeReads = increment(effectiveRealtimeReads);
       }
+      const dailyHistoryPatch: Record<string, Record<string, any>> = {};
       for (const [utcDay, b] of Object.entries(finalUtcBuckets)) {
-        if (b.reads > 0) updatePayload[`dailyHistory.${utcDay}.reads`] = increment(b.reads);
-        if (b.writes > 0) updatePayload[`dailyHistory.${utcDay}.writes`] = increment(b.writes);
-        if (b.realtimeReads > 0) updatePayload[`dailyHistory.${utcDay}.realtimeReads`] = increment(b.realtimeReads);
+        const dayPatch: Record<string, any> = {};
+        if (b.reads > 0) dayPatch.reads = increment(b.reads);
+        if (b.writes > 0) dayPatch.writes = increment(b.writes);
+        if (b.realtimeReads > 0) dayPatch.realtimeReads = increment(b.realtimeReads);
+        if (Object.keys(dayPatch).length > 0) {
+          dailyHistoryPatch[utcDay] = dayPatch;
+        }
+      }
+      if (Object.keys(dailyHistoryPatch).length > 0) {
+        updatePayload.dailyHistory = dailyHistoryPatch;
       }
       await setDoc(consumptionRef, updatePayload, { merge: true });
     }
@@ -655,12 +666,12 @@ export async function incrementFirestoreUsage(
     return;
   }
 
-  // Only flush writes to Firestore; read tracking stays fast locally without wasting write quota
+  // Never burn a Firestore write to report simple reads; accumulate locally and flush in batches with writes
   if (pendingState.writes <= 0) {
     return;
   }
 
-  if (pendingState.writes >= 10) {
+  if (pendingState.writes >= 20) {
     flushConsumptionToFirestore().catch(() => {});
     return;
   }
@@ -669,7 +680,7 @@ export async function incrementFirestoreUsage(
     flushTimer = setTimeout(() => {
       flushTimer = null;
       flushConsumptionToFirestore().catch(() => {});
-    }, 1500);
+    }, 30000);
   }
 }
 
@@ -761,14 +772,42 @@ function applyCentralSnapshotToMetrics(data: Record<string, any> | undefined, is
 }
 
 /**
- * Fetches the live centralized consumption counts directly from `system_stats/consumption` once.
+ * Fetches the live centralized consumption counts directly from `system_stats/consumption`
+ * on the active Firestore database (`ai-studio-c3b19e71-cc85-420b-8314-cb9b70b9467c`).
  */
-export async function fetchCentralizedConsumptionOnce(): Promise<{
+export async function fetchCentralizedConsumptionOnce(forceServer: boolean = false): Promise<{
   reads: number;
   writes: number;
   realtimeReads: number;
+  remainingReads: number;
+  remainingWrites: number;
+  remainingReadsPercent: number;
+  remainingWritesPercent: number;
   date: string;
+  dbId: string;
+  fromCache: boolean;
+  lastOperation?: string;
 } | null> {
+  const cacheKey = 'system_stats:consumption';
+  if (!forceServer && isReadCacheFresh(cacheKey)) {
+    const cached = loadFirestoreMetrics();
+    const remReads = cached.remainingReads ?? Math.max(0, SPARK_DAILY_READ_LIMIT - cached.totalReads);
+    const remWrites = cached.remainingWrites ?? Math.max(0, SPARK_DAILY_WRITE_LIMIT - cached.totalWrites);
+    return {
+      reads: cached.totalReads,
+      writes: cached.totalWrites,
+      realtimeReads: cached.totalRealtimeReads || 0,
+      remainingReads: remReads,
+      remainingWrites: remWrites,
+      remainingReadsPercent: cached.remainingReadsPercent ?? Math.max(0, (remReads / SPARK_DAILY_READ_LIMIT) * 100),
+      remainingWritesPercent: cached.remainingWritesPercent ?? Math.max(0, (remWrites / SPARK_DAILY_WRITE_LIMIT) * 100),
+      date: cached.date,
+      dbId: FIREBASE_DATABASE_ID,
+      fromCache: true,
+      lastOperation: cached.lastOperation
+    };
+  }
+
   if (!db || isFirestoreReadQuotaExceeded()) return null;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return null;
   try {
@@ -779,19 +818,33 @@ export async function fetchCentralizedConsumptionOnce(): Promise<{
 
     const consumptionRef = doc(db, CONSUMPTION_COLLECTION, CONSUMPTION_DOC_ID);
     const snap = await Promise.race([
-      getDocFromServer(consumptionRef).catch(() => getDoc(consumptionRef)),
-      new Promise<null>((_, reject) => setTimeout(() => reject(new Error('timeout')), 3500))
+      forceServer
+        ? getDocFromServer(consumptionRef).catch(() => getDoc(consumptionRef))
+        : getDoc(consumptionRef),
+      new Promise<null>((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000))
     ]);
 
     if (snap) {
       const fromCache = !!snap.metadata?.fromCache;
+      if (!fromCache) {
+        markReadCacheFresh(cacheKey);
+      }
       if (snap.exists()) {
         const updated = applyCentralSnapshotToMetrics(snap.data(), false, fromCache);
+        const remReads = updated.remainingReads ?? Math.max(0, SPARK_DAILY_READ_LIMIT - updated.totalReads);
+        const remWrites = updated.remainingWrites ?? Math.max(0, SPARK_DAILY_WRITE_LIMIT - updated.totalWrites);
         return {
           reads: updated.totalReads,
           writes: updated.totalWrites,
           realtimeReads: updated.totalRealtimeReads || 0,
-          date: updated.date
+          remainingReads: remReads,
+          remainingWrites: remWrites,
+          remainingReadsPercent: updated.remainingReadsPercent ?? Math.max(0, (remReads / SPARK_DAILY_READ_LIMIT) * 100),
+          remainingWritesPercent: updated.remainingWritesPercent ?? Math.max(0, (remWrites / SPARK_DAILY_WRITE_LIMIT) * 100),
+          date: updated.date,
+          dbId: FIREBASE_DATABASE_ID,
+          fromCache,
+          lastOperation: updated.lastOperation
         };
       } else if (!fromCache) {
         recordSilentSelfRead(1, false, 'تهيئة العداد المركزي');
@@ -1122,8 +1175,8 @@ export function subscribeToFirestoreMetrics(
 
   let unsubCentral: (() => void) | null = null;
   if (options?.syncCentral) {
-    fetchCentralizedConsumptionOnce().catch(() => {});
-    if (options?.realtimeCentral !== false) {
+    fetchCentralizedConsumptionOnce(false).catch(() => {});
+    if (options?.realtimeCentral === true) {
       unsubCentral = subscribeToFirebaseSystemUsage(() => {
         // State updates are broadcast via METRICS_EVENT -> handler above
       });

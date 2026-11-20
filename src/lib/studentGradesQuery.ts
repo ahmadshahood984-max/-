@@ -19,6 +19,7 @@ import {
   isQuotaError
 } from './quotaManager';
 import { enqueuePendingGradeBatch, getPendingGradeBatches, removePendingGradeBatch } from './offlineVault';
+import { isReadCacheFresh, markReadCacheFresh } from './readCache';
 
 /**
  * Interface for Consolidated Single-Document Student Grades
@@ -50,6 +51,7 @@ export interface ConsolidatedStudentGradeRecord {
   estimation: string; // e.g. "ممتاز", "جيد جداً"
   teacherNotes?: string;
   directorNotes?: string;
+  approvedSheets?: SentGradeSheet[];
   updatedAt: number;
 }
 
@@ -158,6 +160,12 @@ export async function fetchStudentGradesOnDemand(
   const cleanUserId = normalizeId(currentUserId);
   if (!cleanUserId) return [];
 
+  const cacheKey = `students_grades_on_demand:${cleanUserId}`;
+  if (!forceServer && isReadCacheFresh(cacheKey)) {
+    const cachedLocal = getLocalStudentGrades(cleanUserId, fallbackUnifiedNo);
+    if (cachedLocal.length > 0) return cachedLocal;
+  }
+
   if (!db) {
     return getLocalStudentGrades(cleanUserId, fallbackUnifiedNo);
   }
@@ -175,12 +183,14 @@ export async function fetchStudentGradesOnDemand(
 
     if (snap && !fromCache) {
       trackFirestoreRead(1, `قراءة درجات طالب (${cleanUserId})`);
+      markReadCacheFresh(cacheKey);
     }
     if (snap && snap.exists()) {
       const data = snap.data() as ConsolidatedStudentGradeRecord;
       if (data && data.subjects) {
         const studentGrades = unpackConsolidatedGrades(data);
         mergeStudentGradesIntoLocalStorage(studentGrades);
+        markReadCacheFresh(cacheKey);
         return studentGrades;
       }
     }
@@ -202,6 +212,7 @@ export async function fetchStudentGradesOnDemand(
         if (data && data.subjects) {
           const altGrades = unpackConsolidatedGrades(data);
           mergeStudentGradesIntoLocalStorage(altGrades);
+          markReadCacheFresh(cacheKey);
           return altGrades;
         }
       }
@@ -218,8 +229,10 @@ export async function fetchStudentGradesOnDemand(
   return getLocalStudentGrades(cleanUserId, fallbackUnifiedNo);
 }
 
+const consolidatedRecordMemoryCache = new Map<string, ConsolidatedStudentGradeRecord>();
+
 /**
- * Directly fetch the full consolidated record for a student (cache-first by default)
+ * Directly fetch the full consolidated record for a student (5-min TTL + cache-first by default)
  */
 export async function fetchConsolidatedStudentRecord(
   studentId: string,
@@ -228,6 +241,12 @@ export async function fetchConsolidatedStudentRecord(
 ): Promise<ConsolidatedStudentGradeRecord | null> {
   const cleanId = normalizeId(studentId);
   if (!cleanId) return null;
+
+  const cacheKey = `students_grades_record:${cleanId}`;
+  if (!forceServer && isReadCacheFresh(cacheKey)) {
+    const mem = consolidatedRecordMemoryCache.get(cleanId);
+    if (mem) return mem;
+  }
 
   if (!db) {
     return getLocalConsolidatedRecord(cleanId, fallbackUnifiedNo);
@@ -244,9 +263,13 @@ export async function fetchConsolidatedStudentRecord(
 
     if (snap && !fromCache) {
       trackFirestoreRead(1, `قراءة السجل الموحد (${cleanId})`);
+      markReadCacheFresh(cacheKey);
     }
     if (snap && snap.exists()) {
-      return snap.data() as ConsolidatedStudentGradeRecord;
+      const rec = snap.data() as ConsolidatedStudentGradeRecord;
+      consolidatedRecordMemoryCache.set(cleanId, rec);
+      markReadCacheFresh(cacheKey);
+      return rec;
     }
 
     if (fallbackUnifiedNo && fallbackUnifiedNo !== cleanId) {
@@ -259,7 +282,10 @@ export async function fetchConsolidatedStudentRecord(
         trackFirestoreRead(1, `قراءة السجل الموحد (${fallbackUnifiedNo})`);
       }
       if (altSnap && altSnap.exists()) {
-        return altSnap.data() as ConsolidatedStudentGradeRecord;
+        const rec = altSnap.data() as ConsolidatedStudentGradeRecord;
+        consolidatedRecordMemoryCache.set(cleanId, rec);
+        markReadCacheFresh(cacheKey);
+        return rec;
       }
     }
   } catch (err: any) {
@@ -366,6 +392,7 @@ async function commitConsolidatedBatchToFirestore(
     subjects: { [subjectName: string]: { score: number | null; maxScore: number; examName?: string; notes?: string } };
     teacherNotes?: string;
     directorNotes?: string;
+    approvedSheets?: SentGradeSheet[];
   }>
 ): Promise<boolean> {
   if (!records || records.length === 0 || !db || isFirestoreWriteQuotaExceeded()) return false;
@@ -393,6 +420,7 @@ async function commitConsolidatedBatchToFirestore(
         ...summary,
         teacherNotes: rec.teacherNotes || '',
         directorNotes: rec.directorNotes || '',
+        ...(Array.isArray(rec.approvedSheets) ? { approvedSheets: rec.approvedSheets } : {}),
         updatedAt: Date.now()
       };
 
@@ -454,6 +482,7 @@ export async function batchSaveStudentsGradesConsolidated(
     subjects: { [subjectName: string]: { score: number | null; maxScore: number; examName?: string; notes?: string } };
     teacherNotes?: string;
     directorNotes?: string;
+    approvedSheets?: SentGradeSheet[];
   }>
 ): Promise<boolean> {
   if (!records || records.length === 0) return true;
@@ -710,6 +739,41 @@ export async function syncSentGradeSheetsToConsolidatedCollection(sheets: SentGr
   );
   if (approvedSheets.length === 0) return;
 
+  // Sort newest first and only sync up to the 2 most recent approved sheets
+  // to avoid burning hundreds of Firestore writes on historical sheets every save.
+  const orderedSheets = [...approvedSheets]
+    .sort((a, b) => (new Date(b.dateSent || 0).getTime() || 0) - (new Date(a.dateSent || 0).getTime() || 0))
+    .slice(0, 2);
+
+  // Build per-student scoped approved sheets list across approvedSheets (max 6 recent months per student)
+  const perStudentApprovedSheets = new Map<string, SentGradeSheet[]>();
+  const sortedAllApproved = [...approvedSheets].sort(
+    (a, b) => (new Date(b.dateSent || 0).getTime() || 0) - (new Date(a.dateSent || 0).getTime() || 0)
+  );
+  for (const sheet of sortedAllApproved) {
+    for (const st of sheet.studentsSummary || []) {
+      const cleanId = normalizeId(st.studentId);
+      if (!cleanId) continue;
+      const existing = perStudentApprovedSheets.get(cleanId) || [];
+      if (existing.length < 6 && !existing.some((sh) => sh.month === sheet.month)) {
+        existing.push({
+          id: sheet.id,
+          title: sheet.title,
+          month: sheet.month,
+          classId: sheet.classId,
+          className: sheet.className,
+          cohort: sheet.cohort,
+          dateSent: sheet.dateSent,
+          sentBy: sheet.sentBy,
+          status: 'approved',
+          studentCount: 1,
+          studentsSummary: [st]
+        });
+        perStudentApprovedSheets.set(cleanId, existing);
+      }
+    }
+  }
+
   const records: Array<{
     studentId: string;
     studentName?: string;
@@ -721,11 +785,8 @@ export async function syncSentGradeSheetsToConsolidatedCollection(sheets: SentGr
     subjects: { [subjectName: string]: { score: number | null; maxScore: number; examName?: string; notes?: string } };
     teacherNotes?: string;
     directorNotes?: string;
+    approvedSheets?: SentGradeSheet[];
   }> = [];
-
-  const orderedSheets = [...approvedSheets].sort((a, b) => {
-    return (new Date(a.dateSent || 0).getTime() || 0) - (new Date(b.dateSent || 0).getTime() || 0);
-  });
 
   orderedSheets.forEach(sheet => {
     (sheet.studentsSummary || []).forEach(st => {
@@ -733,14 +794,24 @@ export async function syncSentGradeSheetsToConsolidatedCollection(sheets: SentGr
       if (!cleanId) return;
 
       const subjectsMap: Record<string, { score: number | null; maxScore: number; examName?: string; notes?: string }> = {};
+      let hasAnyRealScore = false;
       (st.scores || []).forEach(sc => {
+        const numericScore = sc.score !== null && sc.score !== undefined ? Number(sc.score) : null;
+        if (numericScore !== null && !Number.isNaN(numericScore)) {
+          hasAnyRealScore = true;
+        }
         subjectsMap[sc.subject] = {
-          score: sc.score !== null && sc.score !== undefined ? Number(sc.score) : null,
+          score: numericScore,
           maxScore: Number(sc.maxScore) || 100,
           examName: sheet.month,
           notes: ''
         };
       });
+
+      const hasNotes = Boolean((st.teacherNotes || '').trim() || (st.directorNotes || '').trim());
+      if (!hasAnyRealScore && !hasNotes) {
+        return;
+      }
 
       const rec = {
         studentId: cleanId,
@@ -752,11 +823,12 @@ export async function syncSentGradeSheetsToConsolidatedCollection(sheets: SentGr
         month: sheet.month,
         subjects: subjectsMap,
         teacherNotes: st.teacherNotes,
-        directorNotes: st.directorNotes
+        directorNotes: st.directorNotes,
+        approvedSheets: perStudentApprovedSheets.get(cleanId)
       };
 
       const sigKey = `${cleanId}_${sheet.month || ''}`;
-      const sig = computeRecordSignature(rec);
+      const sig = computeRecordSignature(rec) + `_sh:${rec.approvedSheets?.length || 0}`;
       if (lastSyncedConsolidatedSignatures.get(sigKey) !== sig) {
         lastSyncedConsolidatedSignatures.set(sigKey, sig);
         records.push(rec);

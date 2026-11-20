@@ -4,7 +4,7 @@
  */
 
 import { db } from './firebase';
-import { collection, setDoc, doc, getDoc, getDocs, serverTimestamp } from 'firebase/firestore';
+import { collection, setDoc, doc, getDoc, getCountFromServer, serverTimestamp } from 'firebase/firestore';
 import { trackFirestoreRead, trackFirestoreWrite } from './firestoreTracker';
 import { safeShowNotification } from './notificationHelper';
 import {
@@ -14,6 +14,7 @@ import {
   markFirestoreReadQuotaExceeded,
   isQuotaError
 } from './quotaManager';
+import { isReadCacheFresh, markReadCacheFresh } from './readCache';
 
 export interface PushNotificationPayload {
   title: string;
@@ -36,6 +37,56 @@ export interface PushNotificationPayload {
  * Dispatches a push notification to a parent's registered device via FCM & Firestore
  * Strictly sends at most ONE notification and ensures deterministic document identification.
  */
+let cachedFcmServerKey: string | null = null;
+let cachedFcmServerKeyFetchedAt = 0;
+
+async function getCachedFcmServerKey(): Promise<string> {
+  try {
+    const savedFcmConfig = localStorage.getItem('school_fcm_config');
+    if (savedFcmConfig) {
+      const parsed = JSON.parse(savedFcmConfig);
+      if (parsed?.serverKey) {
+        cachedFcmServerKey = parsed.serverKey;
+        return parsed.serverKey;
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  const now = Date.now();
+  if (cachedFcmServerKey !== null && now - cachedFcmServerKeyFetchedAt < 5 * 60 * 1000) {
+    return cachedFcmServerKey;
+  }
+
+  if (db && !isFirestoreReadQuotaExceeded()) {
+    try {
+      const configDoc = await getDoc(doc(db, 'school_live_data', 'school_fcm_config'));
+      if (!configDoc.metadata?.fromCache) {
+        trackFirestoreRead(1, 'قراءة إعدادات FCM');
+      }
+      cachedFcmServerKeyFetchedAt = now;
+      if (configDoc.exists()) {
+        const cfg = configDoc.data()?.data;
+        if (typeof cfg === 'string') {
+          const parsed = JSON.parse(cfg);
+          if (parsed?.serverKey) {
+            cachedFcmServerKey = parsed.serverKey;
+            return parsed.serverKey;
+          }
+        } else if (cfg?.serverKey) {
+          cachedFcmServerKey = cfg.serverKey;
+          return cfg.serverKey;
+        }
+      }
+      cachedFcmServerKey = '';
+    } catch (cfgErr: any) {
+      if (isQuotaError(cfgErr)) markFirestoreReadQuotaExceeded(cfgErr);
+    }
+  }
+  return cachedFcmServerKey || '';
+}
+
 export async function sendParentPushNotification(
   parentId: string,
   payload: PushNotificationPayload
@@ -49,7 +100,6 @@ export async function sendParentPushNotification(
   let success = false;
 
   // 1. Add/set record to Firestore 'notifications' collection using msgId as the document ID
-  // Using setDoc ensures that multiple dispatches for the same msgId do not create duplicate documents.
   if (!payload.skipFirestoreRecord && !isFirestoreWriteQuotaExceeded()) {
     try {
       if (db && !isFirestoreWriteQuotaExceeded()) {
@@ -73,7 +123,6 @@ export async function sendParentPushNotification(
         });
         trackFirestoreWrite(1, `حفظ إشعار (${parentId})`);
         success = true;
-        console.log(`[PushDispatcher] Saved notification to Firestore for parent: ${parentId} (ID: ${msgId})`);
       }
     } catch (err: any) {
       if (isQuotaError(err)) {
@@ -92,89 +141,59 @@ export async function sendParentPushNotification(
       if (db && !isFirestoreReadQuotaExceeded()) {
         const tokenDocRef = doc(db, 'fcm_tokens', parentId);
         const tokenDoc = await getDoc(tokenDocRef);
-        trackFirestoreRead(1, `قراءة توكن إشعارات (${parentId})`);
+        if (!tokenDoc.metadata?.fromCache) {
+          trackFirestoreRead(1, `قراءة توكن إشعارات (${parentId})`);
+        }
 
         if (tokenDoc.exists()) {
           const tokenData = tokenDoc.data();
           const fcmToken = tokenData?.token;
 
           if (fcmToken) {
-            console.log(`[PushDispatcher] Found active FCM device token for parent ${parentId}. Device: ${tokenData?.deviceInfo || 'Unknown'}`);
-
-            let serverKey = '';
-            const savedFcmConfig = localStorage.getItem('school_fcm_config');
-            if (savedFcmConfig) {
-              try {
-                const parsed = JSON.parse(savedFcmConfig);
-                if (parsed?.serverKey) serverKey = parsed.serverKey;
-              } catch {
-                // ignore
-              }
-            }
-
-            if (!serverKey && db && !isFirestoreReadQuotaExceeded()) {
-              try {
-                const configDoc = await getDoc(doc(db, 'school_live_data', 'school_fcm_config'));
-                trackFirestoreRead(1, 'قراءة إعدادات FCM');
-                if (configDoc.exists()) {
-                  const cfg = configDoc.data()?.data;
-                  if (typeof cfg === 'string') {
-                    const parsed = JSON.parse(cfg);
-                    if (parsed?.serverKey) serverKey = parsed.serverKey;
-                  } else if (cfg?.serverKey) {
-                    serverKey = cfg.serverKey;
-                  }
-                }
-              } catch (cfgErr: any) {
-                if (isQuotaError(cfgErr)) markFirestoreReadQuotaExceeded(cfgErr);
-              }
-            }
-
+            const serverKey = await getCachedFcmServerKey();
             if (serverKey) {
-            try {
-              await fetch('https://fcm.googleapis.com/fcm/send', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'Authorization': `key=${serverKey}`
-                },
-                body: JSON.stringify({
-                  to: fcmToken,
-                  notification: {
-                    title: title,
-                    body: body,
-                    icon: '/icon.png',
-                    click_action: '/'
+              try {
+                await fetch('https://fcm.googleapis.com/fcm/send', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `key=${serverKey}`
                   },
-                  data: {
-                    title: title,
-                    body: body,
-                    parentId: parentId,
-                    studentId: payload.studentId || '',
-                    category: payload.category || 'grades'
-                  }
-                })
-              });
-              console.log(`[PushDispatcher] FCM push request dispatched.`);
-            } catch (fcmErr) {
-              console.warn('[PushDispatcher] FCM REST dispatch note:', fcmErr);
+                  body: JSON.stringify({
+                    to: fcmToken,
+                    notification: {
+                      title: title,
+                      body: body,
+                      icon: '/icon.png',
+                      click_action: '/'
+                    },
+                    data: {
+                      title: title,
+                      body: body,
+                      parentId: parentId,
+                      studentId: payload.studentId || '',
+                      category: payload.category || 'grades'
+                    }
+                  })
+                });
+              } catch (fcmErr) {
+                console.warn('[PushDispatcher] FCM REST dispatch note:', fcmErr);
+              }
             }
           }
         }
       }
+    } catch (tokenErr) {
+      console.warn('[PushDispatcher] Error querying FCM device token:', tokenErr);
     }
-  } catch (tokenErr) {
-    console.warn('[PushDispatcher] Error querying FCM device token:', tokenErr);
   }
-}
 
   // 3. Fallback: ONLY trigger immediate system notification if the current active browser tab is actively logged in AS THIS SPECIFIC PARENT.
-  // Never show to the Director or Teacher who sent the message!
   try {
     if (typeof window !== 'undefined') {
       const activeParentId = localStorage.getItem('parent_portal_student_id') || localStorage.getItem('school_active_parent_id') || '';
       const isParentPortalActive = window.location.search.includes('portal=parent') || localStorage.getItem('school_active_portal') === 'parent';
-      
+
       if (isParentPortalActive && activeParentId && activeParentId === parentId) {
         safeShowNotification(title, {
           body: body,
@@ -195,8 +214,8 @@ export async function sendParentPushNotification(
 }
 
 /**
- * Dispatches a push notification to multiple parents (e.g. for cohort or class announcements)
- * Saves exactly ONE broadcast record to Firestore, preventing 100+ duplicated documents.
+ * Dispatches a push notification to multiple parents in concurrent batches
+ * and saves exactly ONE broadcast record to Firestore.
  */
 export async function sendBroadcastPushNotification(
   parentIds: string[],
@@ -241,40 +260,55 @@ export async function sendBroadcastPushNotification(
     }
   }
 
-  // 2. Dispatch FCM external push notifications to each parent without duplicating Firestore documents
+  // 2. Warm server key cache once then dispatch FCM pushes concurrently in chunks of 15
+  await getCachedFcmServerKey().catch(() => '');
   let sentCount = 0;
-  for (const pId of uniqueParentIds) {
-    try {
-      const res = await sendParentPushNotification(pId, {
-        ...payload,
-        msgId: `${msgId}_${pId}`,
-        skipFirestoreRecord: true // Do not create a duplicate document for each parent in Firestore!
-      });
-      if (res) sentCount++;
-    } catch (e) {
-      console.warn(`[PushDispatcher] Failed to send to parent ${pId}:`, e);
-    }
+  const CHUNK_SIZE = 15;
+  for (let i = 0; i < uniqueParentIds.length; i += CHUNK_SIZE) {
+    const chunk = uniqueParentIds.slice(i, i + CHUNK_SIZE);
+    const results = await Promise.allSettled(
+      chunk.map((pId) =>
+        sendParentPushNotification(pId, {
+          ...payload,
+          msgId: `${msgId}_${pId}`,
+          skipFirestoreRecord: true
+        })
+      )
+    );
+    results.forEach((res) => {
+      if (res.status === 'fulfilled' && res.value) sentCount++;
+    });
   }
 
   return { total: uniqueParentIds.length, sent: sentCount };
 }
 
+let cachedPushDevicesCount = 0;
+
 /**
- * Gets count of registered push notification devices from Firestore
+ * Gets count of registered push notification devices from Firestore using
+ * getCountFromServer with a 5-minute TTL cache (instead of scanning all token docs).
  */
-export async function getRegisteredPushDevicesCount(): Promise<number> {
-  if (!db || isFirestoreReadQuotaExceeded()) return 0;
+export async function getRegisteredPushDevicesCount(force: boolean = false): Promise<number> {
+  const cacheKey = 'fcm_tokens:count';
+  if (!force && isReadCacheFresh(cacheKey)) {
+    return cachedPushDevicesCount;
+  }
+  if (!db || isFirestoreReadQuotaExceeded()) return cachedPushDevicesCount;
   try {
-    const snap = await getDocs(collection(db, 'fcm_tokens'));
-    trackFirestoreRead(snap.size || 1, `عد الأجهزة المسجلة (${snap.size})`);
-    return snap.size;
+    const aggSnap = await getCountFromServer(collection(db, 'fcm_tokens'));
+    const count = aggSnap.data()?.count || 0;
+    cachedPushDevicesCount = count;
+    markReadCacheFresh(cacheKey);
+    trackFirestoreRead(1, `عد الأجهزة المسجلة (${count})`);
+    return count;
   } catch (err: any) {
     if (isQuotaError(err)) {
       markFirestoreReadQuotaExceeded(err);
     } else {
       console.warn('[PushDispatcher] Could not fetch FCM tokens count:', err);
     }
-    return 0;
+    return cachedPushDevicesCount;
   }
 }
 

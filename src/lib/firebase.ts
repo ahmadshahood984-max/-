@@ -5,7 +5,8 @@
 
 import { initializeApp } from 'firebase/app';
 import { 
-  initializeFirestore, 
+  initializeFirestore,
+  getFirestore,
   persistentLocalCache, 
   persistentMultipleTabManager, 
   memoryLocalCache,
@@ -61,10 +62,14 @@ try {
   }, databaseId);
 } catch (cacheErr) {
   console.warn('[Firestore] IndexedDB persistentLocalCache unavailable, falling back to memoryLocalCache:', cacheErr);
-  firestoreInstance = initializeFirestore(app, {
-    experimentalAutoDetectLongPolling: true,
-    localCache: memoryLocalCache()
-  }, databaseId);
+  try {
+    firestoreInstance = initializeFirestore(app, {
+      experimentalAutoDetectLongPolling: true,
+      localCache: memoryLocalCache()
+    }, databaseId);
+  } catch {
+    firestoreInstance = getFirestore(app, databaseId);
+  }
 }
 
 export const db = firestoreInstance;
@@ -149,12 +154,47 @@ export function extractFirestoreErrorMessage(error: unknown): string {
 
 async function testConnection() {
   if (typeof window === 'undefined') return;
-  try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error('Please check your Firebase configuration.');
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    window.addEventListener('online', () => {
+      testConnection().catch(() => {});
+    }, { once: true });
+    return;
+  }
+
+  const retryDelays = [500, 2000];
+  let lastError: unknown = null;
+
+  for (let i = 0; i < retryDelays.length; i++) {
+    await new Promise(resolve => setTimeout(resolve, retryDelays[i]));
+    try {
+      await getDocFromServer(doc(db, 'test', 'connection'));
+      return;
+    } catch (error) {
+      lastError = error;
+      const msg = error instanceof Error ? error.message.toLowerCase() : String(error || '').toLowerCase();
+      if (!msg.includes('the client is offline') && !msg.includes('unavailable')) {
+        return;
+      }
     }
+  }
+
+  // If SDK WebChannel/Long-Polling reported offline transiently during startup,
+  // verify actual Firebase configuration reachability via Firestore REST API before logging config error.
+  if (lastError instanceof Error && lastError.message.includes('the client is offline')) {
+    try {
+      const restUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(firebaseConfig.projectId)}/databases/${encodeURIComponent(databaseId)}/documents/test/connection?key=${encodeURIComponent(firebaseConfig.apiKey)}`;
+      const res = await fetch(restUrl, { method: 'GET', cache: 'no-store' });
+      if (res.status === 200 || res.status === 404) {
+        console.warn('[Firestore] Startup transport took extra time while Firebase configuration is valid.');
+        return;
+      }
+    } catch {
+      // If offline/unreachable while navigator.onLine is false, do not report config failure
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        return;
+      }
+    }
+    console.error('Please check your Firebase configuration.');
   }
 }
 testConnection();
