@@ -199,6 +199,199 @@ async function testConnection() {
 }
 testConnection();
 
+function toFirestoreRestValue(val: any): any {
+  if (val === null || val === undefined) {
+    return { nullValue: null };
+  }
+  if (typeof val === 'boolean') {
+    return { booleanValue: val };
+  }
+  if (typeof val === 'number') {
+    if (!Number.isFinite(val)) return { nullValue: null };
+    return Number.isInteger(val) ? { integerValue: String(val) } : { doubleValue: val };
+  }
+  if (typeof val === 'string') {
+    return { stringValue: val };
+  }
+  if (Array.isArray(val)) {
+    return {
+      arrayValue: {
+        values: val.filter((item) => item !== undefined).map(toFirestoreRestValue)
+      }
+    };
+  }
+  if (typeof val === 'object') {
+    const fields: Record<string, any> = {};
+    for (const [k, v] of Object.entries(val)) {
+      if (v !== undefined) {
+        fields[k] = toFirestoreRestValue(v);
+      }
+    }
+    return { mapValue: { fields } };
+  }
+  return { stringValue: String(val) };
+}
+
+async function writeDocViaRestApi(
+  collectionName: string,
+  docId: string,
+  data: Record<string, any>,
+  merge: boolean = false,
+  timeoutMs: number = 8000
+): Promise<void> {
+  const fields: Record<string, any> = {};
+  const fieldPaths: string[] = [];
+  for (const [k, v] of Object.entries(data || {})) {
+    if (v !== undefined) {
+      fields[k] = toFirestoreRestValue(v);
+      fieldPaths.push(k);
+    }
+  }
+  const encodedPath = `${encodeURIComponent(collectionName)}/${encodeURIComponent(docId)}`;
+  let url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(firebaseConfig.projectId)}/databases/${encodeURIComponent(databaseId)}/documents/${encodedPath}?key=${encodeURIComponent(firebaseConfig.apiKey)}`;
+  if (merge && fieldPaths.length > 0) {
+    url += '&' + fieldPaths.map((fp) => `updateMask.fieldPaths=${encodeURIComponent(fp)}`).join('&');
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fields }),
+      signal: controller.signal
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => res.statusText);
+      if (res.status === 429 || errText.toLowerCase().includes('quota') || errText.toLowerCase().includes('resource_exhausted')) {
+        throw new Error(`resource-exhausted: ${errText}`);
+      }
+      if (res.status === 403 || errText.toLowerCase().includes('permission')) {
+        throw new Error(`permission-denied: ${errText}`);
+      }
+      throw new Error(`Firestore REST write failed (${res.status}): ${errText}`);
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function deleteDocViaRestApi(
+  collectionName: string,
+  docId: string,
+  timeoutMs: number = 8000
+): Promise<void> {
+  const encodedPath = `${encodeURIComponent(collectionName)}/${encodeURIComponent(docId)}`;
+  const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(firebaseConfig.projectId)}/databases/${encodeURIComponent(databaseId)}/documents/${encodedPath}?key=${encodeURIComponent(firebaseConfig.apiKey)}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: 'DELETE',
+      signal: controller.signal
+    });
+    if (!res.ok && res.status !== 404) {
+      const errText = await res.text().catch(() => res.statusText);
+      if (res.status === 429 || errText.toLowerCase().includes('quota') || errText.toLowerCase().includes('resource_exhausted')) {
+        throw new Error(`resource-exhausted: ${errText}`);
+      }
+      throw new Error(`Firestore REST delete failed (${res.status}): ${errText}`);
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Fast document writer: attempts Firestore SDK `setDoc` first, and if the WebChannel stream
+ * takes longer than `sdkGraceMs` (default 3500ms), immediately falls back to direct Firestore REST PATCH
+ * so grade sheet sends never hang 15 seconds on congested queues or proxy networks.
+ */
+export async function writeFirestoreDocFast(
+  collectionName: string,
+  docId: string,
+  data: Record<string, any>,
+  options?: { merge?: boolean; sdkGraceMs?: number; restTimeoutMs?: number }
+): Promise<void> {
+  const { setDoc } = await import('firebase/firestore');
+  const merge = Boolean(options?.merge);
+  const sdkGraceMs = options?.sdkGraceMs ?? 3500;
+  const restTimeoutMs = options?.restTimeoutMs ?? 9000;
+
+  const docRef = doc(db, collectionName, docId);
+  const sdkPromise = merge
+    ? setDoc(docRef, data, { merge: true })
+    : setDoc(docRef, data);
+
+  let sdkError: unknown = null;
+  const sdkOutcome = await Promise.race([
+    sdkPromise.then(() => 'sdk_ok' as const).catch((err) => {
+      sdkError = err;
+      return 'sdk_err' as const;
+    }),
+    new Promise<'grace_elapsed'>((resolve) => setTimeout(() => resolve('grace_elapsed'), sdkGraceMs))
+  ]);
+
+  if (sdkOutcome === 'sdk_ok') return;
+  if (sdkOutcome === 'sdk_err') {
+    const msg = String((sdkError as any)?.message || sdkError || '').toLowerCase();
+    if (msg.includes('resource-exhausted') || msg.includes('quota') || msg.includes('permission')) {
+      throw sdkError;
+    }
+    // Transient SDK failure — execute direct REST PATCH cleanly
+    await writeDocViaRestApi(collectionName, docId, data, merge, restTimeoutMs);
+    return;
+  }
+
+  // WebChannel took too long — race remaining SDK promise against direct REST PATCH
+  const restPromise = writeDocViaRestApi(collectionName, docId, data, merge, restTimeoutMs);
+  await Promise.race([
+    restPromise,
+    sdkPromise.catch(() => restPromise)
+  ]);
+}
+
+/**
+ * Fast document deleter: attempts Firestore SDK `deleteDoc` and falls back to REST DELETE if stalled.
+ */
+export async function deleteFirestoreDocFast(
+  collectionName: string,
+  docId: string,
+  options?: { sdkGraceMs?: number; restTimeoutMs?: number }
+): Promise<void> {
+  const { deleteDoc } = await import('firebase/firestore');
+  const sdkGraceMs = options?.sdkGraceMs ?? 3000;
+  const restTimeoutMs = options?.restTimeoutMs ?? 8000;
+
+  const docRef = doc(db, collectionName, docId);
+  const sdkPromise = deleteDoc(docRef);
+
+  let sdkError: unknown = null;
+  const sdkOutcome = await Promise.race([
+    sdkPromise.then(() => 'sdk_ok' as const).catch((err) => {
+      sdkError = err;
+      return 'sdk_err' as const;
+    }),
+    new Promise<'grace_elapsed'>((resolve) => setTimeout(() => resolve('grace_elapsed'), sdkGraceMs))
+  ]);
+
+  if (sdkOutcome === 'sdk_ok') return;
+  if (sdkOutcome === 'sdk_err') {
+    const msg = String((sdkError as any)?.message || sdkError || '').toLowerCase();
+    if (msg.includes('resource-exhausted') || msg.includes('quota') || msg.includes('permission')) {
+      throw sdkError;
+    }
+    await deleteDocViaRestApi(collectionName, docId, restTimeoutMs);
+    return;
+  }
+
+  const restPromise = deleteDocViaRestApi(collectionName, docId, restTimeoutMs);
+  await Promise.race([
+    restPromise,
+    sdkPromise.catch(() => restPromise)
+  ]);
+}
+
 /**
  * Cache-First Document Reader:
  * Reads from IndexedDB persistent local cache FIRST (0 Firestore server reads!).

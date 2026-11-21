@@ -123,6 +123,8 @@ export default function App() {
   const [attendance, setAttendance] = useState<Attendance[]>(() => safeParseStorageArray<Attendance>('school_attendance', INITIAL_ATTENDANCE));
   const [grades, setGrades] = useState<Grade[]>(() => safeParseStorageArray<Grade>('school_grades'));
   const [announcements, setAnnouncements] = useState<Announcement[]>(() => safeParseStorageArray<Announcement>('school_announcements', INITIAL_ANNOUNCEMENTS));
+  const announcementsRef = React.useRef<Announcement[]>(announcements);
+  announcementsRef.current = announcements;
   const [messages, setMessages] = useState<Message[]>(() => safeParseStorageArray<Message>('school_messages', INITIAL_MESSAGES));
   const [excuses, setExcuses] = useState<AbsenceExcuse[]>(() => safeParseStorageArray<AbsenceExcuse>('school_excuses', INITIAL_EXCUSES));
 
@@ -295,6 +297,9 @@ export default function App() {
       }
       const targetKeys = activePortal === 'parent' ? PARENT_FAST_LIVE_KEYS : FAST_LIVE_SYNC_KEYS;
       await syncLivePortalDataFromServer({ keys: targetKeys, bypassCache: true, forceServer: true });
+      if (activePortal === 'parent') {
+        window.dispatchEvent(new CustomEvent('school_force_parent_refresh'));
+      }
       reloadFromLocalStorageRef.current?.();
     } catch (err) {
       console.warn('Manual cross-device sync notice:', err);
@@ -313,6 +318,7 @@ export default function App() {
     }
     if (activePortal === 'director' || activePortal === 'teacher') {
       ensureAllRealtimeListeners();
+      syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS }).catch(() => {});
     } else if (activePortal === 'parent') {
       ensureParentRealtimeListeners();
     }
@@ -548,26 +554,24 @@ export default function App() {
     };
     window.addEventListener('school_live_sync_completed', handleLiveSyncCompleted);
 
-    // Defer heavy IndexedDB hydration & automatic server sync until right after first paint
-    const startupTimer = setTimeout(() => {
-      hydrateFromOfflineVault()
-        .then((restored) => {
-          if (restored) reloadFromLocalStorage(false);
-        })
-        .catch(() => {});
+    // Immediately hydrate offline vault for instant first paint and sync fresh cloud state on app open
+    const startupKeys = activePortal === 'parent' ? PARENT_FAST_LIVE_KEYS : FAST_LIVE_SYNC_KEYS;
+    hydrateFromOfflineVault()
+      .then((restored) => {
+        if (restored) reloadFromLocalStorage(false);
+      })
+      .catch(() => {});
 
-      syncLivePortalDataFromServer()
-        .then(() => {
-          reloadFromLocalStorage(true);
-        })
-        .catch((err) => {
-          console.warn('Startup Firestore live sync notice:', err);
-          reloadFromLocalStorage(true);
-        });
-    }, 50);
+    syncLivePortalDataFromServer({ keys: startupKeys, bypassCache: true, forceServer: true })
+      .then(() => {
+        reloadFromLocalStorage(true);
+      })
+      .catch((err) => {
+        console.warn('Startup Firestore live sync notice:', err);
+        reloadFromLocalStorage(true);
+      });
 
     return () => {
-      clearTimeout(startupTimer);
       window.removeEventListener('school_storage_update', handleStorageUpdate);
       window.removeEventListener('school_live_sync_completed', handleLiveSyncCompleted);
     };
@@ -1148,11 +1152,10 @@ export default function App() {
       shift: announceData.shift || 'morning'
     };
 
-    setAnnouncements(prev => {
-      const updated = [newAnn, ...prev];
-      persistDirectToFirestore('school_announcements', updated);
-      return updated;
-    });
+    const updated = [newAnn, ...(Array.isArray(announcementsRef.current) ? announcementsRef.current : announcements)];
+    announcementsRef.current = updated;
+    setAnnouncements(updated);
+    persistDirectToFirestore('school_announcements', updated).catch(() => {});
     logEvent(`${newAnn.authorName} نشر تعميماً جديداً: "${newAnn.title}" المستهدف: ${
       newAnn.target === 'all' ? 'الجميع' : newAnn.target === 'teachers' ? 'المعلمون' : 'أولياء الأمور'
     }`, 'primary');

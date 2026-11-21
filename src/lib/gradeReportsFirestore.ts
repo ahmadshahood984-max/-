@@ -5,19 +5,19 @@
 
 import {
   collection,
-  deleteDoc,
   doc,
   getDocs,
   getDocsFromCache,
   getDocsFromServer,
-  setDoc,
   type QuerySnapshot
 } from 'firebase/firestore';
 import {
   db,
+  deleteFirestoreDocFast,
   extractFirestoreErrorMessage,
   handleFirestoreError,
-  OperationType
+  OperationType,
+  writeFirestoreDocFast
 } from './firebase';
 import { SentGradeSheet } from '../types';
 import { trackFirestoreRead, trackFirestoreWrite } from './firestoreTracker';
@@ -37,7 +37,8 @@ import {
   pushLiveRelayGradeReport,
   subscribeLiveRelayGradeReports
 } from './liveRelayClient';
-import { isReadCacheFresh, markReadCacheFresh, invalidateReadCache } from './readCache';
+import { isReadCacheFresh, markReadCacheFresh, invalidateReadCache, needsInitialSessionServerSync } from './readCache';
+import { notifyCrossDeviceKeyChanged } from './firebaseSync';
 
 export const GRADE_REPORTS_COLLECTION = 'grade_reports';
 const GRADE_REPORTS_CACHE_KEY = 'grade_reports:all';
@@ -161,17 +162,21 @@ export async function submitGradeReportToFirestore(sheet: SentGradeSheet): Promi
     throw new FirestoreQuotaExceededError();
   }
 
-  const firestoreWritePromise: Promise<void> = withFirestoreTimeout(
-    setDoc(doc(db, GRADE_REPORTS_COLLECTION, reportId), payload),
-    FIRESTORE_WRITE_TIMEOUT_MS,
-    reportPath
+  const firestoreWritePromise: Promise<void> = writeFirestoreDocFast(
+    GRADE_REPORTS_COLLECTION,
+    reportId,
+    payload,
+    { merge: false, sdkGraceMs: 3500, restTimeoutMs: 9000 }
   ).then(() => {
     trackFirestoreWrite(1, `رفع كشف درجات (${sheet.className || reportId})`);
   });
 
   try {
     await Promise.all([firestoreWritePromise, relayPromise]);
+    const currentCached = loadCachedGradeReportsFromLocal();
+    saveCachedGradeReportsToLocal(mergeGradeReportLists([payload], currentCached));
     invalidateReadCache(GRADE_REPORTS_CACHE_KEY);
+    notifyCrossDeviceKeyChanged('grade_reports');
     return payload;
   } catch (error) {
     if (isQuotaError(error)) {
@@ -225,17 +230,21 @@ export async function updateGradeReportInFirestore(sheet: SentGradeSheet): Promi
     throw new FirestoreQuotaExceededError();
   }
 
-  const firestoreWritePromise: Promise<void> = withFirestoreTimeout(
-    setDoc(doc(db, GRADE_REPORTS_COLLECTION, reportId), payload, { merge: true }),
-    FIRESTORE_WRITE_TIMEOUT_MS,
-    reportPath
+  const firestoreWritePromise: Promise<void> = writeFirestoreDocFast(
+    GRADE_REPORTS_COLLECTION,
+    reportId,
+    payload,
+    { merge: true, sdkGraceMs: 3500, restTimeoutMs: 9000 }
   ).then(() => {
     trackFirestoreWrite(1, `اعتماد/تحديث كشف درجات (${sheet.className || reportId})`);
   });
 
   try {
     await Promise.all([firestoreWritePromise, relayPromise]);
+    const currentCached = loadCachedGradeReportsFromLocal();
+    saveCachedGradeReportsToLocal(mergeGradeReportLists([payload], currentCached));
     invalidateReadCache(GRADE_REPORTS_CACHE_KEY);
+    notifyCrossDeviceKeyChanged('grade_reports');
     return payload;
   } catch (error) {
     if (isQuotaError(error)) {
@@ -261,6 +270,12 @@ export async function updateGradeReportInFirestore(sheet: SentGradeSheet): Promi
 export async function deleteGradeReportFromFirestore(reportId: string): Promise<void> {
   if (!reportId) return;
   const relayPromise = deleteLiveRelayGradeReport(reportId).catch(() => false);
+
+  // Immediately purge deleted report from local cache so it cannot resurrect
+  const remainingCached = loadCachedGradeReportsFromLocal().filter((r) => r && r.id !== reportId);
+  saveCachedGradeReportsToLocal(remainingCached);
+  invalidateReadCache(GRADE_REPORTS_CACHE_KEY);
+
   if (!db) {
     await relayPromise;
     return;
@@ -273,13 +288,10 @@ export async function deleteGradeReportFromFirestore(reportId: string): Promise<
   }
 
   try {
-    await withFirestoreTimeout(
-      deleteDoc(doc(db, GRADE_REPORTS_COLLECTION, reportId)),
-      FIRESTORE_WRITE_TIMEOUT_MS,
-      reportPath
-    );
+    await deleteFirestoreDocFast(GRADE_REPORTS_COLLECTION, reportId, { sdkGraceMs: 3000, restTimeoutMs: 8000 });
     trackFirestoreWrite(1, `حذف كشف درجات (${reportId})`);
     invalidateReadCache(GRADE_REPORTS_CACHE_KEY);
+    notifyCrossDeviceKeyChanged('grade_reports');
     await relayPromise;
   } catch (error) {
     if (isQuotaError(error)) {
@@ -346,13 +358,15 @@ export async function fetchGradeReportsFromFirestore(options?: { force?: boolean
     return activeGradeReportsFetchPromise;
   }
 
-  // Enforce 5-minute TTL cache across tabs and portal switches
+  // Enforce 5-minute TTL cache across tabs and portal switches within the active session
   if (!force && isReadCacheFresh(GRADE_REPORTS_CACHE_KEY)) {
     const cachedList = mergeGradeReportLists(loadCachedGradeReportsFromLocal(), getCachedRelayGradeReports());
     if (cachedList.length > 0) {
       return cachedList;
     }
   }
+
+  const shouldHitServer = force || needsInitialSessionServerSync(GRADE_REPORTS_CACHE_KEY) || !isReadCacheFresh(GRADE_REPORTS_CACHE_KEY);
 
   const runFetch = (async (): Promise<SentGradeSheet[]> => {
     const relayPromise = fetchLiveRelaySnapshot()
@@ -383,7 +397,7 @@ export async function fetchGradeReportsFromFirestore(options?: { force?: boolean
     try {
       const [snap, relayList] = await Promise.all([
         withFirestoreTimeout(
-          force ? getDocsFromServer(colRef) : getDocs(colRef),
+          shouldHitServer ? getDocsFromServer(colRef) : getDocs(colRef),
           FIRESTORE_READ_TIMEOUT_MS,
           GRADE_REPORTS_COLLECTION
         ),
@@ -457,19 +471,33 @@ export function subscribeGradeReportsRealtime(
   }
 
   // On-demand fetch ONLY if 5-minute cache expired (0 reads within 5-minute window)
-  fetchGradeReportsFromFirestore({ force: false })
-    .then((reports) => {
-      if (disposed) return;
-      latestFirestoreReports = reports;
-      emitCombined();
-    })
-    .catch((err) => {
-      if (onError) onError(err);
-    });
+  const triggerReportsFetch = (force: boolean) => {
+    fetchGradeReportsFromFirestore({ force })
+      .then((reports) => {
+        if (disposed) return;
+        latestFirestoreReports = reports;
+        emitCombined();
+      })
+      .catch((err) => {
+        if (onError) onError(err);
+      });
+  };
+
+  triggerReportsFetch(false);
+
+  const handleReportsPulse = () => {
+    triggerReportsFetch(true);
+  };
+  if (typeof window !== 'undefined') {
+    window.addEventListener('school_grade_reports_pulse', handleReportsPulse);
+  }
 
   return () => {
     disposed = true;
     unsubRelay();
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('school_grade_reports_pulse', handleReportsPulse);
+    }
   };
 }
 

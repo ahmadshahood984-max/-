@@ -74,6 +74,7 @@ import { printElementById } from '../lib/printUtils';
 import { GradeSheetSignatures } from './GradeSheetSignatures';
 import { GradeCellInput } from './GradeCellInput';
 import { applyGradePartUpdate, computeGradeTotal, hasSubGradeParts } from '../lib/gradeSplitUtils';
+import { syncStudentsDirectoryToFirestore } from '../lib/parentStudentQuery';
 import { motion, AnimatePresence } from 'motion/react';
 
 interface TeacherPortalProps {
@@ -236,7 +237,7 @@ export default function TeacherPortal({
     };
 
     window.addEventListener('school_storage_update', handleStorageUpdate);
-    syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS, minIntervalMs: 1500 })
+    syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS })
       .then(() => reloadTeacherSyncedData())
       .catch(() => {});
 
@@ -283,6 +284,12 @@ export default function TeacherPortal({
       }, 0);
     }
   }, [selectedTeacherId]);
+
+  useEffect(() => {
+    if (Array.isArray(students) && students.length > 0) {
+      void syncStudentsDirectoryToFirestore(students);
+    }
+  }, [students]);
 
   const isMessageToCurrentTeacher = (m: Message) => {
     if (!m) return false;
@@ -1293,7 +1300,7 @@ export default function TeacherPortal({
             setTeacherLoginError('');
             try {
               await Promise.race([
-                syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS, minIntervalMs: 0 }),
+                syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS, bypassCache: true }),
                 new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 4000))
               ]);
               const syncedRaw = localStorage.getItem('school_teachers');
@@ -1316,8 +1323,8 @@ export default function TeacherPortal({
             safeDispatchStorageUpdate('school_active_teacher_id', targetTeacher.id);
             setTeacherLoginError('');
             setTeacherPasswordInput('');
-            syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS, minIntervalMs: 0 }).catch(() => {});
-            fetchGradeReportsFromFirestore().catch(() => {});
+            syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS }).catch(() => {});
+            fetchGradeReportsFromFirestore({ force: false }).catch(() => {});
           } else {
             setTeacherLoginError('رقم الهاتف أو المعرف المدخل غير مسجل لدينا، يرجى مراجعة إدارة المدرسة.');
           }

@@ -8,7 +8,7 @@
  * - Persists pending deltas in localStorage so reloads never drop unflushed writes.
  */
 
-import { db } from './firebase';
+import { db, writeFirestoreDocFast } from './firebase';
 import firebaseConfigJson from '../../firebase-applet-config.json';
 import {
   doc,
@@ -1129,6 +1129,67 @@ export async function resetCentralizedFirestoreConsumption(clearHistory: boolean
         markFirestoreWriteQuotaExceeded(err);
       }
     }
+  }
+}
+
+/**
+ * Tests whether Firestore currently accepts a real lightweight write on this database,
+ * clearing false-positive or expired write-quota locks automatically.
+ */
+export async function probeFirestoreWriteAvailability(): Promise<{
+  ok: boolean;
+  isQuotaError: boolean;
+  message: string;
+}> {
+  if (!db) {
+    return { ok: false, isQuotaError: false, message: 'قاعدة بيانات Firestore غير مهيأة.' };
+  }
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return { ok: false, isQuotaError: false, message: 'لا يوجد اتصال بالإنترنت حالياً.' };
+  }
+
+  // Temporarily lift the client-side breaker to perform a real 1-doc write probe
+  resetFirestoreQuotaBreaker();
+
+  const today = getTodayDateString();
+  const utcToday = getUtcDateStr();
+  try {
+    await Promise.race([
+      writeFirestoreDocFast(
+        CONSUMPTION_COLLECTION,
+        CONSUMPTION_DOC_ID,
+        {
+          date: today,
+          utcDate: utcToday,
+          lastProbeAt: Date.now(),
+          lastOperation: 'اختبار فحص إمكانية الكتابة السحابية'
+        },
+        { merge: true, sdkGraceMs: 2500, restTimeoutMs: 5000 }
+      ),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 6000))
+    ]);
+
+    trackFirestoreWrite(1, 'اختبار فحص الكتابة السحابية (ناجح)');
+    return {
+      ok: true,
+      isQuotaError: false,
+      message: '✅ الكتابة على سحابة Firestore متاحة وتعمل بشكل طبيعي الآن.'
+    };
+  } catch (err: any) {
+    const rawMsg = err?.message ? String(err.message) : String(err || '');
+    if (isQuotaError(err)) {
+      markFirestoreWriteQuotaExceeded(err);
+      return {
+        ok: false,
+        isQuotaError: true,
+        message: `⚠️ خادم Firebase لا يزال يرفض الكتابة بسبب حصة المشروع المشترك (${FIREBASE_PROJECT_ID}) أو ضغط الكتابة: ${rawMsg}`
+      };
+    }
+    return {
+      ok: false,
+      isQuotaError: false,
+      message: `⚠️ تعذّر إتمام اختبار الكتابة (${rawMsg || 'مهلة الشبكة'}).`
+    };
   }
 }
 

@@ -48,11 +48,16 @@ function getTodayDateStr(): string {
 
 const WRITE_TS_KEY = 'firestore_write_quota_exceeded_ts';
 const WRITE_DATE_KEY = 'firestore_write_quota_exceeded_date';
+const WRITE_REASON_KEY = 'firestore_write_quota_exceeded_reason';
 const READ_TS_KEY = 'firestore_read_quota_exceeded_ts';
 const READ_DATE_KEY = 'firestore_read_quota_exceeded_date';
 const LEGACY_TS_KEY = 'firestore_quota_exceeded_ts';
 const LEGACY_DATE_KEY = 'firestore_quota_exceeded_date';
-const QUOTA_COOLDOWN_MS = 15 * 60 * 1000;
+// 2-minute cooldown protects against retry storms while allowing fast recovery from transient 429 spikes
+const QUOTA_COOLDOWN_MS = 2 * 60 * 1000;
+
+let lastWriteQuotaErrorDetail = '';
+let lastWriteQuotaErrorAt: number | null = null;
 
 function restoreQuotaFlag(tsKey: string, dateKey: string): boolean {
   try {
@@ -63,12 +68,19 @@ function restoreQuotaFlag(tsKey: string, dateKey: string): boolean {
 
       if (saved && savedDate === today) {
         const ts = parseInt(saved, 10);
-        if (Date.now() - ts < QUOTA_COOLDOWN_MS) {
+        if (Number.isFinite(ts) && Date.now() - ts < QUOTA_COOLDOWN_MS) {
+          if (tsKey === WRITE_TS_KEY) {
+            lastWriteQuotaErrorAt = ts;
+            lastWriteQuotaErrorDetail = sessionStorage.getItem(WRITE_REASON_KEY) || '';
+          }
           return true;
         }
       }
       sessionStorage.removeItem(tsKey);
       sessionStorage.removeItem(dateKey);
+      if (tsKey === WRITE_TS_KEY) {
+        sessionStorage.removeItem(WRITE_REASON_KEY);
+      }
     }
   } catch {
     // Ignore sessionStorage errors
@@ -126,11 +138,35 @@ export function isFirestoreWriteQuotaExceeded(): boolean {
   return checkDynamicReset(writeQuotaExceeded, WRITE_TS_KEY, WRITE_DATE_KEY, () => {
     writeQuotaExceeded = false;
     warnedWriteOnce = false;
+    lastWriteQuotaErrorAt = null;
+    lastWriteQuotaErrorDetail = '';
     try {
       sessionStorage.removeItem(WRITE_TS_KEY);
       sessionStorage.removeItem(WRITE_DATE_KEY);
+      sessionStorage.removeItem(WRITE_REASON_KEY);
     } catch {}
   });
+}
+
+export function getWriteQuotaExceededInfo(): {
+  exceeded: boolean;
+  reason: string;
+  triggeredAt: number | null;
+  cooldownRemainingSec: number;
+} {
+  const exceeded = isFirestoreWriteQuotaExceeded();
+  if (!exceeded) {
+    return { exceeded: false, reason: '', triggeredAt: null, cooldownRemainingSec: 0 };
+  }
+  const triggeredAt = lastWriteQuotaErrorAt;
+  const elapsed = triggeredAt ? Math.max(0, Date.now() - triggeredAt) : 0;
+  const cooldownRemainingSec = Math.max(0, Math.ceil((QUOTA_COOLDOWN_MS - elapsed) / 1000));
+  return {
+    exceeded: true,
+    reason: lastWriteQuotaErrorDetail,
+    triggeredAt,
+    cooldownRemainingSec
+  };
 }
 
 export function isFirestoreReadQuotaExceeded(): boolean {
@@ -152,6 +188,8 @@ export function resetFirestoreQuotaBreaker() {
   readQuotaExceeded = false;
   warnedWriteOnce = false;
   warnedReadOnce = false;
+  lastWriteQuotaErrorAt = null;
+  lastWriteQuotaErrorDetail = '';
   if (readQuotaResetTimer) {
     clearTimeout(readQuotaResetTimer);
     readQuotaResetTimer = null;
@@ -160,6 +198,7 @@ export function resetFirestoreQuotaBreaker() {
     if (typeof window !== 'undefined' && window.sessionStorage) {
       sessionStorage.removeItem(WRITE_TS_KEY);
       sessionStorage.removeItem(WRITE_DATE_KEY);
+      sessionStorage.removeItem(WRITE_REASON_KEY);
       sessionStorage.removeItem(READ_TS_KEY);
       sessionStorage.removeItem(READ_DATE_KEY);
       sessionStorage.removeItem(LEGACY_TS_KEY);
@@ -173,30 +212,53 @@ export function resetFirestoreQuotaBreaker() {
 
 export function isQuotaError(error: any): boolean {
   if (!error) return false;
-  const code = error?.code || '';
+  const name = String(error?.name || '').toLowerCase();
+  const code = String(error?.code || '').toLowerCase();
   const message = String(error?.message || error || '').toLowerCase();
+
+  // Never treat browser localStorage / sessionStorage / IndexedDB 5MB storage limit errors as Firestore quota
+  if (
+    name === 'quotaexceedederror' ||
+    message.includes('setting the value of') ||
+    message.includes('localstorage') ||
+    message.includes('sessionstorage') ||
+    message.includes('indexeddb') ||
+    message.includes('domexception')
+  ) {
+    return false;
+  }
+
   return (
     code === 'resource-exhausted' ||
-    message.includes('quota') ||
-    message.includes('limit exceeded') ||
+    message.includes('resource-exhausted') ||
+    message.includes('resource_exhausted') ||
     message.includes('free daily read units') ||
     message.includes('free daily write units') ||
-    message.includes('quota exceeded')
+    message.includes('quota exceeded') ||
+    message.includes('quota metric') ||
+    message.includes('exceeded its quota')
   );
 }
 
 export function markFirestoreWriteQuotaExceeded(error?: any) {
-  const msg = String(error?.message || error || '').toLowerCase();
+  const rawMsg = error?.message ? String(error.message) : String(error || '');
+  const msg = rawMsg.toLowerCase();
   if (msg.includes('free daily read units')) {
     markFirestoreReadQuotaExceeded(error);
     return;
   }
 
+  const now = Date.now();
   writeQuotaExceeded = true;
+  lastWriteQuotaErrorAt = now;
+  lastWriteQuotaErrorDetail = rawMsg.slice(0, 260);
   try {
     if (typeof window !== 'undefined' && window.sessionStorage) {
-      sessionStorage.setItem(WRITE_TS_KEY, Date.now().toString());
+      sessionStorage.setItem(WRITE_TS_KEY, now.toString());
       sessionStorage.setItem(WRITE_DATE_KEY, getTodayDateStr());
+      if (lastWriteQuotaErrorDetail) {
+        sessionStorage.setItem(WRITE_REASON_KEY, lastWriteQuotaErrorDetail);
+      }
     }
   } catch {}
 
@@ -204,12 +266,12 @@ export function markFirestoreWriteQuotaExceeded(error?: any) {
   if (!warnedWriteOnce) {
     warnedWriteOnce = true;
     console.warn(
-      '[Firestore Quota Manager] Firestore daily free write quota reached. Reads remain active and writes are routed through the live server relay + local queue.',
-      error ? (error?.message || error) : ''
+      '[Firestore Quota Manager] Firestore write quota/rate-limit notice. Reads remain active and writes are routed through the live server relay + local queue.',
+      rawMsg
     );
   }
   if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('firestore_quota_status_changed', { detail: { exceeded: true, type: 'write' } }));
+    window.dispatchEvent(new CustomEvent('firestore_quota_status_changed', { detail: { exceeded: true, type: 'write', reason: lastWriteQuotaErrorDetail } }));
   }
 }
 

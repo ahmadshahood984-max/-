@@ -85,9 +85,9 @@ import { motion, AnimatePresence } from 'motion/react';
 import { loadXlsx } from '../lib/xlsxLoader';
 import { db } from '../lib/firebase';
 import { collection, addDoc, setDoc, deleteDoc, doc, serverTimestamp, writeBatch, getDocs } from 'firebase/firestore';
-import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead, checkDailyRollover, fetchCentralizedConsumptionOnce, resetCentralizedFirestoreConsumption, calibrateCentralConsumptionBaseline, getTimeUntilFirebaseQuotaReset, SPARK_DAILY_READ_LIMIT, SPARK_DAILY_WRITE_LIMIT, SPARK_STORAGE_LIMIT_MB, QUOTA_WARNING_RATIO, FIREBASE_PROJECT_ID, FIREBASE_DATABASE_ID } from '../lib/firestoreTracker';
+import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead, checkDailyRollover, fetchCentralizedConsumptionOnce, resetCentralizedFirestoreConsumption, calibrateCentralConsumptionBaseline, getTimeUntilFirebaseQuotaReset, probeFirestoreWriteAvailability, SPARK_DAILY_READ_LIMIT, SPARK_DAILY_WRITE_LIMIT, SPARK_STORAGE_LIMIT_MB, QUOTA_WARNING_RATIO, FIREBASE_PROJECT_ID, FIREBASE_DATABASE_ID } from '../lib/firestoreTracker';
 import { calculateStorageUsageReport, measureLiveCloudStorageAudit, StorageUsageReport } from '../lib/storageUsage';
-import { persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate, saveSyncedLocalOnly, recordDeletedStudentIds, queueOfflineNotification, deduplicateGradeSheetsPreservingTeachers, syncLivePortalDataFromServer, FAST_LIVE_SYNC_KEYS } from '../lib/firebaseSync';
+import { persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate, saveSyncedLocalOnly, recordDeletedStudentIds, queueOfflineNotification, deduplicateGradeSheetsPreservingTeachers, syncLivePortalDataFromServer, flushPendingLocalSyncKeys, FAST_LIVE_SYNC_KEYS } from '../lib/firebaseSync';
 import {
   submitGradeReportToFirestore,
   updateGradeReportInFirestore,
@@ -97,10 +97,13 @@ import {
   extractFirestoreErrorMessage,
   isFirestoreQuotaError
 } from '../lib/gradeReportsFirestore';
+import { getDeletedRelayGradeReportIds } from '../lib/liveRelayClient';
 import {
   isFirestoreQuotaExceeded,
   isFirestoreWriteQuotaExceeded,
   isFirestoreReadQuotaExceeded,
+  getWriteQuotaExceededInfo,
+  resetFirestoreQuotaBreaker,
   markFirestoreQuotaExceeded,
   markFirestoreReadQuotaExceeded,
   isQuotaError
@@ -108,6 +111,11 @@ import {
 import { getStoredWelcomeMessages, saveWelcomeMessages, DEFAULT_WELCOME_MESSAGES, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { Bell, Activity, Info, Smartphone } from 'lucide-react';
 import { sendParentPushNotification, sendBroadcastPushNotification, getRegisteredPushDevicesCount } from '../lib/pushDispatcher';
+import { syncStudentsDirectoryToFirestore } from '../lib/parentStudentQuery';
+import {
+  syncSentGradeSheetsToConsolidatedCollection,
+  resyncAndClearDeletedSheetStudents
+} from '../lib/studentGradesQuery';
 
 const getShareableOrigin = (preferPublished = false) => {
   if (typeof window === 'undefined') return '';
@@ -270,20 +278,56 @@ export default function DirectorPortal({
   const [calibTodayRealtime, setCalibTodayRealtime] = useState('');
   const [isCalibrating, setIsCalibrating] = useState(false);
   const [isRefreshingMetrics, setIsRefreshingMetrics] = useState(false);
+  const [isProbingWriteQuota, setIsProbingWriteQuota] = useState(false);
   const [metricsRefreshNotice, setMetricsRefreshNotice] = useState<string>('');
+  const [, setQuotaStatusTick] = useState(0);
+
+  React.useEffect(() => {
+    const handleQuotaEvent = () => setQuotaStatusTick(t => t + 1);
+    window.addEventListener('firestore_quota_status_changed', handleQuotaEvent);
+    return () => window.removeEventListener('firestore_quota_status_changed', handleQuotaEvent);
+  }, []);
+
+  const handleTestWriteAvailability = async () => {
+    setIsProbingWriteQuota(true);
+    setMetricsRefreshNotice('');
+    try {
+      checkDailyRollover();
+      const probe = await probeFirestoreWriteAvailability();
+      if (probe.ok) {
+        flushPendingLocalSyncKeys().catch(() => {});
+        await fetchCentralizedConsumptionOnce(true).catch(() => null);
+      }
+      setMetricsRefreshNotice(probe.message);
+      setQuotaStatusTick(t => t + 1);
+    } finally {
+      setIsProbingWriteQuota(false);
+    }
+  };
 
   const handleRefreshMetricsFromCloud = async () => {
     setIsRefreshingMetrics(true);
     setMetricsRefreshNotice('');
     try {
       checkDailyRollover();
+      let probeNote = '';
+      if (isFirestoreWriteQuotaExceeded()) {
+        const probe = await probeFirestoreWriteAvailability();
+        if (probe.ok) {
+          flushPendingLocalSyncKeys().catch(() => {});
+          probeNote = ' | ✅ تم التحقق من استعادة إمكانية الكتابة السحابية';
+        } else if (probe.isQuotaError) {
+          probeNote = ' | ⚠️ لا يزال الخادم المشترك يبلغ عن حد الكتابة';
+        }
+      }
       const res = await fetchCentralizedConsumptionOnce(true);
+      setQuotaStatusTick(t => t + 1);
       if (res) {
         setMetricsRefreshNotice(
-          `✅ تم جلب أحدث أرقام ${res.date} من السحابة (${res.dbId}) — قراءات: ${res.reads.toLocaleString()} | كتابات: ${res.writes.toLocaleString()}`
+          `✅ تم جلب أحدث أرقام ${res.date} من السحابة (${res.dbId}) — قراءات: ${res.reads.toLocaleString()} | كتابات: ${res.writes.toLocaleString()}${probeNote}`
         );
       } else {
-        setMetricsRefreshNotice('⚠️ تعذّر الاتصال المباشر بالسحابة حالياً أو اكتملت حصة القراءة — يتم عرض آخر قراءة محفوظة.');
+        setMetricsRefreshNotice(`⚠️ تعذّر الاتصال المباشر بالسحابة حالياً أو اكتملت حصة القراءة — يتم عرض آخر قراءة محفوظة.${probeNote}`);
       }
     } finally {
       setIsRefreshingMetrics(false);
@@ -626,7 +670,13 @@ export default function DirectorPortal({
     getRegisteredPushDevicesCount().then(count => {
       setRegisteredPushCount(count);
     }).catch(() => {});
-  }, [activeTab]);
+  }, []);
+
+  React.useEffect(() => {
+    if (Array.isArray(students) && students.length > 0) {
+      void syncStudentsDirectoryToFirestore(students);
+    }
+  }, [students]);
 
   const handleSaveStudentWhatsAppOnly = (targetStudent: Student, phoneVal: string) => {
     const cleanPhone = phoneVal.trim();
@@ -765,7 +815,7 @@ export default function DirectorPortal({
   });
   const [isAddingNewMonth, setIsAddingNewMonth] = useState(false);
   const [newMonthName, setNewMonthName] = useState('');
-  const [monthlyEvaluations, setMonthlyEvaluations] = useState<Record<string, { month: string; text: string }>>(() => {
+  const [monthlyEvaluations, setMonthlyEvaluations] = useState<Record<string, { month: string; text: string; teacherText?: string; directorText?: string }>>(() => {
     const saved = localStorage.getItem('school_monthly_evaluations');
     if (saved) {
       try {
@@ -1116,6 +1166,11 @@ export default function DirectorPortal({
   });
   const [isSentSheetsModalOpen, setIsSentSheetsModalOpen] = useState(false);
   const [selectedSentSheetToView, setSelectedSentSheetToView] = useState<SentGradeSheet | null>(null);
+  const [isSendingClassGrades, setIsSendingClassGrades] = useState(false);
+  const [expandedSentMonth, setExpandedSentMonth] = useState<string | null>(null);
+  const [archiveSearchQuery, setArchiveSearchQuery] = useState('');
+  const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null);
+  const [deletingArchiveKey, setDeletingArchiveKey] = useState<string | null>(null);
 
   useEffect(() => {
     const handleStorage = (e: any) => {
@@ -1237,18 +1292,24 @@ export default function DirectorPortal({
     let reportResult: any = null;
     let batchSyncedOk = false;
     try {
-      const [resReport, resBatch] = await Promise.all([
+      const allApprovedForConsolidated = updatedSentSheets.filter(
+        s => s && (s.status === 'approved' || (!s.teacherId && s.status !== 'submitted' && s.status !== 'draft'))
+      );
+      const [resReport, resConsolidated] = await Promise.all([
         updateGradeReportInFirestore(updatedSheet),
-        persistGradeReportBatchDirect({
-          grades,
-          ...(hadAutoGradeMsgs ? { messages: cleanedMessages } : {}),
-          sentSheets: updatedSentSheets,
-          monthlyEvaluations,
-          currentMonth: sheet.month
-        })
+        syncSentGradeSheetsToConsolidatedCollection(allApprovedForConsolidated, {
+          onlyStudentIds: updatedSummaryList.map(s => s.studentId)
+        }),
+        persistDirectToFirestore('school_evaluation_current_month', sheet.month, { timeoutMs: 4000 })
       ]);
       reportResult = resReport;
-      batchSyncedOk = resBatch;
+      batchSyncedOk = Boolean(resConsolidated);
+      persistGradeReportBatchDirect({
+        grades,
+        ...(hadAutoGradeMsgs ? { messages: cleanedMessages } : {}),
+        sentSheets: updatedSentSheets,
+        monthlyEvaluations
+      }).catch(() => false);
     } catch (error: any) {
       if (isFirestoreQuotaError(error) || isQuotaError(error) || isFirestoreQuotaExceeded()) {
         const syncedBatch = await persistGradeReportBatchDirect({
@@ -2178,7 +2239,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       }
     };
     reloadFromLocalStorage();
-    syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS, minIntervalMs: 1500 })
+    syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS })
       .then(() => reloadFromLocalStorage())
       .catch(() => {});
 
@@ -2186,17 +2247,33 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     const applyDirectGradeReports = (directReports: SentGradeSheet[]) => {
       if (!Array.isArray(directReports) || directReports.length === 0) return;
 
+      const deletedMap = getDeletedRelayGradeReportIds();
       let existingLocalSheets: SentGradeSheet[] = [];
       try {
         const raw = localStorage.getItem('school_sent_grade_sheets');
         if (raw) {
           const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed)) existingLocalSheets = parsed;
+          if (Array.isArray(parsed)) {
+            existingLocalSheets = parsed.filter(sh => {
+              if (!sh?.id) return false;
+              const delTs = deletedMap.get(sh.id) || 0;
+              const shTs = Number((sh as any).updatedAt) || new Date(sh.dateSent || 0).getTime() || 0;
+              return delTs <= shTs;
+            });
+          }
         }
       } catch {}
       const mergedLocalSheets = deduplicateGradeSheetsPreservingTeachers([...directReports, ...existingLocalSheets]);
       saveSyncedLocalOnly('school_sent_grade_sheets', JSON.stringify(mergedLocalSheets));
-      setSentGradeSheets(prev => deduplicateGradeSheetsPreservingTeachers([...directReports, ...prev]));
+      setSentGradeSheets(prev => {
+        const cleanPrev = prev.filter(sh => {
+          if (!sh?.id) return false;
+          const delTs = deletedMap.get(sh.id) || 0;
+          const shTs = Number((sh as any).updatedAt) || new Date(sh.dateSent || 0).getTime() || 0;
+          return delTs <= shTs;
+        });
+        return deduplicateGradeSheetsPreservingTeachers([...directReports, ...cleanPrev]);
+      });
 
       // Hydrate any missing student+subject+month scores from submitted/approved reports into local `grades`
       // strictly without triggering a redundant cloud writeback
@@ -2247,6 +2324,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       reloadFromLocalStorage();
     };
     window.addEventListener('school_live_sync_completed', handleLiveSyncCompleted);
+    window.addEventListener('school_app_resumed', handleLiveSyncCompleted);
 
     const unsubGradeReports = subscribeGradeReportsRealtime(
       (reports) => applyDirectGradeReports(reports),
@@ -2258,6 +2336,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     return () => {
       window.removeEventListener('school_storage_update', handleStorageUpdate);
       window.removeEventListener('school_live_sync_completed', handleLiveSyncCompleted);
+      window.removeEventListener('school_app_resumed', handleLiveSyncCompleted);
       unsubGradeReports();
     };
   }, []);
@@ -4788,205 +4867,319 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     setIsAddingNewMonth(false);
   };
 
-  const handleSaveAndSendGradesToParents = async (cohortMode: boolean = false) => {
-    // 1. Target students
-    let targetStudents: Student[] = [];
-    let scopeTitle = '';
-    let targetClassId = '';
-
-    if (cohortMode) {
-      const cohortClasses = classes.filter(matchesCohort);
-      targetStudents = students.filter(s => cohortClasses.some(c => c.id === s.classId));
-      if (targetStudents.length === 0) {
-        targetStudents = students.filter(matchesCohort);
-      }
-      scopeTitle = `كامل الفوج (${activeCohort === 'evening' ? 'المسائي' : 'الصباحي'})`;
-      targetClassId = 'cohort';
-    } else {
-      if (!selectedClassForGrades) {
-        alert('الرجاء اختيار الصف الدراسي أولاً، أو استخدام حفظ وإرسال لكامل الفوج.');
-        return;
-      }
-      const cls = classes.find(c => c.id === selectedClassForGrades);
-      if (!cls) return;
-      targetStudents = students.filter(s => s.classId === selectedClassForGrades);
-      scopeTitle = cls.name;
-      targetClassId = cls.id;
+  const handleSaveAndSendGradesToParents = async () => {
+    if (isSendingClassGrades) return;
+    // 1. Strictly per-class sending to parents (never cohort-wide bulk send)
+    if (!selectedClassForGrades) {
+      alert('الرجاء اختيار الصف الدراسي أولاً لحفظ وإرسال كشف درجات طلابه إلى أولياء الأمور.');
+      return;
     }
+    const cls = classes.find(c => c.id === selectedClassForGrades);
+    if (!cls) return;
+    const targetStudents: Student[] = students.filter(s => s.classId === selectedClassForGrades);
+    const scopeTitle = cls.name;
+    const targetClassId = cls.id;
 
     if (targetStudents.length === 0) {
-      alert('لا يوجد طلاب مسجلون في هذا النطاق لحفظ نتائجهم وإرسالها.');
+      alert('لا يوجد طلاب مسجلون في هذا الصف لحفظ نتائجهم وإرسالها.');
       return;
     }
 
-    const uniqueSubjects = customSubjects && customSubjects.length > 0 
-      ? customSubjects 
-      : ['الرياضيات', 'العلوم', 'اللغة العربية', 'التربية الإسلامية', 'اللغة الإنجليزية', 'الاجتماعيات'];
-
-    const studentsSummary: any[] = [];
-    const nowIso = new Date().toISOString();
-
-    for (const student of targetStudents) {
-      const studentGrades = grades.filter(g => g.studentId === student.id && (g.examName === currentEvaluationMonth || !g.examName));
-
-      let studentTotalScore = 0;
-      let studentScoredCount = 0;
-      const studentScoresList = uniqueSubjects.map(sub => {
-        const g = studentGrades.find(x => x.subject && x.subject.trim() === sub.trim());
-        const totalForSub = computeGradeTotal(g);
-        const hasScore = totalForSub !== null && !Number.isNaN(totalForSub);
-        if (hasScore) {
-          studentTotalScore += totalForSub;
-          studentScoredCount++;
-        }
-        return {
-          subject: sub,
-          score: hasScore ? totalForSub : null,
-          maxScore: Number(g?.maxScore || numericMaxGrade || 100)
-        };
+    setIsSendingClassGrades(true);
+    try {
+      const baseSubjects = customSubjects && customSubjects.length > 0
+        ? customSubjects
+        : ['الرياضيات', 'العلوم', 'اللغة العربية', 'التربية الإسلامية', 'اللغة الإنجليزية', 'الاجتماعيات'];
+      const targetIdentifiersSet = new Set<string>();
+      targetStudents.forEach(s => {
+        if (s.id) targetIdentifiersSet.add(String(s.id).trim());
+        if (s.unifiedNo) targetIdentifiersSet.add(String(s.unifiedNo).trim());
+        if (s.rollNo) targetIdentifiersSet.add(String(s.rollNo).trim());
       });
+      const trimmedTargetMonth = String(currentEvaluationMonth || '').trim();
+      const extraRecordedSubjects = grades
+        .filter(g => targetIdentifiersSet.has(String(g.studentId || '').trim()) && (!g.examName || String(g.examName).trim() === trimmedTargetMonth))
+        .map(g => g.subject)
+        .filter(Boolean);
+      const extraSheetSubjects = sentGradeSheets
+        .filter(sh => String(sh.month || '').trim() === trimmedTargetMonth && (sh.classId === targetClassId || sh.className === scopeTitle))
+        .flatMap(sh => (sh.studentsSummary || []).flatMap(sm => (sm.scores || []).map(sc => sc.subject)))
+        .filter(Boolean);
+      const uniqueSubjects = Array.from(new Set([...baseSubjects, ...extraRecordedSubjects, ...extraSheetSubjects]));
 
-      const avg = studentScoredCount > 0 ? (studentTotalScore / studentScoredCount).toFixed(1) : '---';
-      const avgFormatted = avg !== '---' ? `${avg}%` : '---';
-      let estimation = '---';
-      if (studentScoredCount > 0) {
-        const avgNum = Number(avg);
-        if (avgNum > 90) estimation = 'ممتاز 🌟';
-        else if (avgNum > 80) estimation = 'جيد جداً ✨';
-        else if (avgNum > 60) estimation = 'جيد 👍';
-        else if (avgNum > 40) estimation = 'وسط 🟢';
-        else estimation = 'ضعيف 🔴';
+      const studentsSummary: any[] = [];
+      const nowIso = new Date().toISOString();
+
+      for (const student of targetStudents) {
+        const stUnif = student.unifiedNo ? String(student.unifiedNo).trim() : '';
+        const stRoll = student.rollNo ? String(student.rollNo).trim() : '';
+        const studentGrades = grades.filter(g => {
+          const gid = String(g.studentId || '').trim();
+          const matchesStudent = gid === student.id || (stUnif && gid === stUnif) || (stRoll && gid === stRoll);
+          const gMonth = String(g.examName || '').trim();
+          const matchesMonth = !gMonth || gMonth === trimmedTargetMonth;
+          return matchesStudent && matchesMonth;
+        });
+
+        // Also gather any scores recorded in teacher-submitted sheets for this month as a fallback
+        const fallbackSheetScores = new Map<string, { score: number; maxScore: number }>();
+        for (const sh of sentGradeSheets) {
+          if (String(sh.month || '').trim() !== trimmedTargetMonth) continue;
+          const summaryMatch = (sh.studentsSummary || []).find(sm =>
+            sm.studentId === student.id ||
+            (stUnif && sm.unifiedNo && String(sm.unifiedNo).trim() === stUnif) ||
+            (stRoll && sm.rollNo && String(sm.rollNo).trim() === stRoll)
+          );
+          if (summaryMatch && Array.isArray(summaryMatch.scores)) {
+            summaryMatch.scores.forEach(sc => {
+              if (sc && sc.subject && sc.score !== null && sc.score !== undefined && !Number.isNaN(Number(sc.score))) {
+                const key = sc.subject.trim();
+                if (!fallbackSheetScores.has(key)) {
+                  fallbackSheetScores.set(key, { score: Number(sc.score), maxScore: Number(sc.maxScore || numericMaxGrade || 100) });
+                }
+              }
+            });
+          }
+        }
+
+        let studentTotalScore = 0;
+        let studentScoredCount = 0;
+        const studentScoresList = uniqueSubjects.map(sub => {
+          const g = studentGrades.find(x => x.subject && x.subject.trim() === sub.trim());
+          const totalForSub = computeGradeTotal(g);
+          const fb = fallbackSheetScores.get(sub.trim());
+          const finalScore = (totalForSub !== null && !Number.isNaN(totalForSub))
+            ? totalForSub
+            : (fb ? fb.score : null);
+          const hasScore = finalScore !== null && !Number.isNaN(finalScore);
+          if (hasScore) {
+            studentTotalScore += finalScore;
+            studentScoredCount++;
+          }
+          return {
+            subject: sub,
+            score: hasScore ? finalScore : null,
+            maxScore: Number(g?.maxScore || fb?.maxScore || numericMaxGrade || 100)
+          };
+        });
+
+        const avg = studentScoredCount > 0 ? (studentTotalScore / studentScoredCount).toFixed(1) : '---';
+        const avgFormatted = avg !== '---' ? `${avg}%` : '---';
+        let estimation = '---';
+        if (studentScoredCount > 0) {
+          const avgNum = Number(avg);
+          if (avgNum > 90) estimation = 'ممتاز 🌟';
+          else if (avgNum > 80) estimation = 'جيد جداً ✨';
+          else if (avgNum > 60) estimation = 'جيد 👍';
+          else if (avgNum > 40) estimation = 'وسط 🟢';
+          else estimation = 'ضعيف 🔴';
+        }
+
+        // Evaluation directives
+        const evalForStudentMonth = monthlyEvaluations[`${student.id}_${currentEvaluationMonth}`] ||
+          monthlyEvaluations[`${student.unifiedNo}_${currentEvaluationMonth}`] ||
+          (monthlyEvaluations[student.id]?.month === currentEvaluationMonth ? monthlyEvaluations[student.id] : null) ||
+          monthlyEvaluations[student.id];
+
+        const teacherDirectiveText = evalForStudentMonth?.teacherText || evalForStudentMonth?.text || '';
+        const directorDirectiveText = evalForStudentMonth?.directorText || '';
+
+        const studentParent = parents.find(p => p.childrenIds.includes(student.id) || p.id === student.parentId);
+        const receiverParentId = studentParent?.id || student.parentId || 'parent';
+        const receiverParentName = studentParent?.name || student.parentName || 'ولي الأمر';
+
+        studentsSummary.push({
+          studentId: student.id,
+          studentName: student.name,
+          unifiedNo: student.unifiedNo || student.rollNo,
+          rollNo: student.rollNo,
+          parentId: receiverParentId,
+          parentName: receiverParentName,
+          parentPhone: studentParent?.phone || student.parentPhone || '',
+          average: avgFormatted,
+          estimation: estimation,
+          scores: studentScoresList,
+          teacherNotes: teacherDirectiveText,
+          directorNotes: directorDirectiveText
+        });
       }
 
-      // Evaluation directives
-      const evalForStudentMonth = monthlyEvaluations[`${student.id}_${currentEvaluationMonth}`] || 
-        monthlyEvaluations[`${student.unifiedNo}_${currentEvaluationMonth}`] ||
-        (monthlyEvaluations[student.id]?.month === currentEvaluationMonth ? monthlyEvaluations[student.id] : null) ||
-        monthlyEvaluations[student.id];
+      // 2. Build SentGradeSheet record
+      const sheetRecord: SentGradeSheet = {
+        id: 'gs_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
+        title: `كشف درجات ${scopeTitle} - شهر ${currentEvaluationMonth}`,
+        month: currentEvaluationMonth,
+        classId: targetClassId,
+        className: scopeTitle,
+        cohort: activeCohort,
+        dateSent: nowIso,
+        sentBy: 'المدير العام (إدارة المدرسة)',
+        status: 'approved',
+        studentCount: targetStudents.length,
+        studentsSummary
+      };
 
-      const teacherDirectiveText = evalForStudentMonth?.teacherText || evalForStudentMonth?.text || '';
-      const directorDirectiveText = evalForStudentMonth?.directorText || '';
+      // 3. Update States immediately
+      const hadAutoGradeMsgs = messages.some(isAutoGradeNotificationMessage);
+      const cleanedMessages = hadAutoGradeMsgs
+        ? messages.filter(m => !isAutoGradeNotificationMessage(m))
+        : messages;
+      if (hadAutoGradeMsgs) {
+        setMessages(cleanedMessages);
+      }
 
-      const studentParent = parents.find(p => p.childrenIds.includes(student.id) || p.id === student.parentId);
-      const receiverParentId = studentParent?.id || student.parentId || 'parent';
-      const receiverParentName = studentParent?.name || student.parentName || 'ولي الأمر';
+      let latestStoredSheets: SentGradeSheet[] = [];
+      try {
+        const raw = localStorage.getItem('school_sent_grade_sheets');
+        if (raw) latestStoredSheets = JSON.parse(raw);
+      } catch {}
+      const baseSheets = deduplicateGradeSheets([
+        ...(Array.isArray(latestStoredSheets) ? latestStoredSheets : []),
+        ...sentGradeSheets
+      ]);
+      const updatedExistingSheets = baseSheets
+        .filter(s => !(s.month === currentEvaluationMonth && (s.classId === targetClassId || s.className === scopeTitle) && !s.teacherId))
+        .map(s => {
+          if (
+            s.month === currentEvaluationMonth &&
+            s.status === 'submitted' &&
+            s.teacherId &&
+            (s.classId === targetClassId || s.className === scopeTitle)
+          ) {
+            return {
+              ...s,
+              status: 'approved' as const,
+              sentBy: s.sentBy?.includes('(معتمد)') ? s.sentBy : `${s.sentBy} (معتمد من الإدارة ✅)`
+            };
+          }
+          return s;
+        });
+      const updatedSentSheets = deduplicateGradeSheets([sheetRecord, ...updatedExistingSheets]);
+      setSentGradeSheets(updatedSentSheets);
+      saveSyncedLocalOnly('school_sent_grade_sheets', JSON.stringify(updatedSentSheets));
+      safeDispatchStorageUpdate('school_sent_grade_sheets', JSON.stringify(updatedSentSheets));
 
-      studentsSummary.push({
-        studentId: student.id,
-        studentName: student.name,
-        unifiedNo: student.unifiedNo || student.rollNo,
-        rollNo: student.rollNo,
-        parentId: receiverParentId,
-        parentName: receiverParentName,
-        parentPhone: studentParent?.phone || student.parentPhone || '',
-        average: avgFormatted,
-        estimation: estimation,
-        scores: studentScoresList,
-        teacherNotes: teacherDirectiveText,
-        directorNotes: directorDirectiveText
-      });
-    }
+      // 4. Critical fast path FIRST (parent-facing students_grades + grade_reports + current month)
+      // Heavy archive keys run right after so large arrays never congest the Firestore write stream!
+      let mainReportResult: any = null;
+      let batchSyncedOk = false;
+      try {
+        const newlyApprovedTeacherSheets = updatedExistingSheets.filter(
+          s => s.month === currentEvaluationMonth && s.status === 'approved' && s.teacherId && (s.classId === targetClassId || s.className === scopeTitle)
+        );
+        const allApprovedForConsolidated = updatedSentSheets.filter(
+          s => s && (s.status === 'approved' || (!s.teacherId && s.status !== 'submitted' && s.status !== 'draft'))
+        );
+        const criticalResults = await Promise.all([
+          submitGradeReportToFirestore(sheetRecord),
+          syncSentGradeSheetsToConsolidatedCollection(allApprovedForConsolidated, {
+            onlyStudentIds: targetStudents.map(s => s.id)
+          }),
+          persistDirectToFirestore('school_evaluation_current_month', currentEvaluationMonth, { timeoutMs: 4000 }),
+          ...newlyApprovedTeacherSheets.map(s => updateGradeReportInFirestore(s))
+        ]);
+        mainReportResult = criticalResults[0];
+        batchSyncedOk = Boolean(criticalResults[1]);
 
-    // 2. Build SentGradeSheet record
-    const sheetRecord: SentGradeSheet = {
-      id: 'gs_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
-      title: `كشف درجات ${scopeTitle} - شهر ${currentEvaluationMonth}`,
-      month: currentEvaluationMonth,
-      classId: targetClassId,
-      className: scopeTitle,
-      cohort: activeCohort,
-      dateSent: nowIso,
-      sentBy: 'المدير العام (إدارة المدرسة)',
-      status: 'approved',
-      studentCount: targetStudents.length,
-      studentsSummary
-    };
-
-    // 3. Update States (استبدال كشف المدير السابق لنفس الشهر وتحديث حالة كشوف المعلمين إلى معتمد دون إنشاء إشعارات أو رسائل متراكمة)
-    const hadAutoGradeMsgs = messages.some(isAutoGradeNotificationMessage);
-    const cleanedMessages = hadAutoGradeMsgs
-      ? messages.filter(m => !isAutoGradeNotificationMessage(m))
-      : messages;
-    if (hadAutoGradeMsgs) {
-      setMessages(cleanedMessages);
-    }
-
-    let latestStoredSheets: SentGradeSheet[] = [];
-    try {
-      const raw = localStorage.getItem('school_sent_grade_sheets');
-      if (raw) latestStoredSheets = JSON.parse(raw);
-    } catch {}
-    const baseSheets = deduplicateGradeSheets([
-      ...(Array.isArray(latestStoredSheets) ? latestStoredSheets : []),
-      ...sentGradeSheets
-    ]);
-    const updatedExistingSheets = baseSheets
-      .filter(s => !(s.month === currentEvaluationMonth && (s.classId === targetClassId || s.className === scopeTitle) && !s.teacherId))
-      .map(s => {
-        if (
-          s.month === currentEvaluationMonth &&
-          s.status === 'submitted' &&
-          s.teacherId &&
-          (cohortMode || s.classId === targetClassId || s.className === scopeTitle)
-        ) {
-          return {
-            ...s,
-            status: 'approved' as const,
-            sentBy: s.sentBy?.includes('(معتمد)') ? s.sentBy : `${s.sentBy} (معتمد من الإدارة ✅)`
-          };
-        }
-        return s;
-      });
-    const updatedSentSheets = deduplicateGradeSheets([sheetRecord, ...updatedExistingSheets]);
-    setSentGradeSheets(updatedSentSheets);
-
-    // 4. Simultaneously save approved grade report (and any approved teacher sheets) + consolidated keys across devices
-    let mainReportResult: any = null;
-    let batchSyncedOk = false;
-    try {
-      const newlyApprovedTeacherSheets = updatedExistingSheets.filter(
-        s => s.month === currentEvaluationMonth && s.status === 'approved' && s.teacherId && (cohortMode || s.classId === targetClassId || s.className === scopeTitle)
-      );
-      const [resMain, ...restResults] = await Promise.all([
-        submitGradeReportToFirestore(sheetRecord),
-        ...newlyApprovedTeacherSheets.map(s => updateGradeReportInFirestore(s)),
+        // Archive keys sync right after critical writes succeed without blocking the Director UI
         persistGradeReportBatchDirect({
           grades,
           ...(hadAutoGradeMsgs ? { messages: cleanedMessages } : {}),
           sentSheets: updatedSentSheets,
-          monthlyEvaluations,
-          currentMonth: currentEvaluationMonth
-        })
-      ]);
-      mainReportResult = resMain;
-      batchSyncedOk = Boolean(restResults[restResults.length - 1]);
-    } catch (error: any) {
-      if (isFirestoreQuotaError(error) || isQuotaError(error) || isFirestoreQuotaExceeded()) {
-        const syncedBatch = await persistGradeReportBatchDirect({
-          grades,
-          ...(hadAutoGradeMsgs ? { messages: cleanedMessages } : {}),
-          sentSheets: updatedSentSheets,
-          monthlyEvaluations,
-          currentMonth: currentEvaluationMonth
-        });
-        if (syncedBatch) {
-          alert(`⚠️ تم حفظ كشف الدرجات لشهر (${currentEvaluationMonth}) محلياً وبثه عبر القناة الفورية للخادم الحالي، لكن الحصة اليومية المجانية للكتابة في Firebase قد اكتملت لليوم.\n\nملاحظة: المتصفحات الخارجية على هواتف أولياء الأمور تحتاج رصيد كتابة في Firebase لتستقبل التحديث (تتجدد الحصة غداً).`);
-        } else {
-          alert(`⚠️ تم حفظ كشف الدرجات محلياً على جهازك فقط، لأن الحصة اليومية للكتابة في Firestore قد اكتملت لليوم (تتجدد الحصة غداً).`);
+          monthlyEvaluations
+        }).catch(() => false);
+      } catch (error: any) {
+        if (isFirestoreQuotaError(error) || isQuotaError(error) || isFirestoreQuotaExceeded()) {
+          const syncedBatch = await persistGradeReportBatchDirect({
+            grades,
+            ...(hadAutoGradeMsgs ? { messages: cleanedMessages } : {}),
+            sentSheets: updatedSentSheets,
+            monthlyEvaluations,
+            currentMonth: currentEvaluationMonth
+          }).catch(() => false);
+          if (syncedBatch) {
+            alert(`⚠️ تم حفظ كشف الدرجات لشهر (${currentEvaluationMonth}) محلياً وبثه عبر القناة الفورية للخادم الحالي، لكن الحصة اليومية المجانية للكتابة في Firebase قد اكتملت لليوم.`);
+          } else {
+            alert(`⚠️ تم حفظ كشف الدرجات محلياً على جهازك فقط، لأن الحصة اليومية للكتابة في Firestore قد اكتملت لليوم (تتجدد الحصة غداً).`);
+          }
+          return;
         }
+        const errDetail = extractFirestoreErrorMessage(error);
+        alert(`❌ تعذّر حفظ وإرسال كشف الدرجات:\n${errDetail}`);
         return;
       }
-      const errDetail = extractFirestoreErrorMessage(error);
-      alert(`❌ تعذّر حفظ وإرسال كشف الدرجات:\n${errDetail}`);
-      return;
-    }
 
-    if (mainReportResult?.__deliveredViaRelay || !batchSyncedOk || isFirestoreWriteQuotaExceeded()) {
-      alert(`⚠️ تم حفظ كشف الدرجات لشهر (${currentEvaluationMonth}) محلياً، ولكن لم يكتمل رفعه إلى سحابة Firestore بسبب اكتمال الحصة اليومية للكتابة أو انقطاع الشبكة (تتجدد الحصة غداً).\n\nملاحظة: قد لا تظهر الدرجات في متصفحات أخرى خارج هذا الخادم حتى يتم الرفع السحابي.`);
-      return;
-    }
+      if (mainReportResult?.__deliveredViaRelay || !batchSyncedOk || isFirestoreWriteQuotaExceeded()) {
+        alert(`⚠️ تم حفظ كشف الدرجات لشهر (${currentEvaluationMonth}) محلياً، ولكن لم يكتمل رفعه إلى سحابة Firestore بسبب اكتمال الحصة اليومية للكتابة أو انقطاع الشبكة (تتجدد الحصة غداً).`);
+        return;
+      }
 
-    alert(`🎉 تم بنجاح حفظ واعتماد وإرسال كشف الدرجات لشهر (${currentEvaluationMonth}) إلى أولياء الأمور على جميع الأجهزة والمتصفحات!\n\n📊 إجمالي الطلاب المستلمين: ${targetStudents.length} طالب وطالبة\n🏫 النطاق: ${scopeTitle}\n\n✅ تم التثبيت السحابي في Firestore وإظهار الدرجات في بوابات أولياء الأمور مباشرة! ⚡`);
+      alert(`🎉 تم بنجاح حفظ واعتماد وإرسال كشف الدرجات لشهر (${currentEvaluationMonth}) إلى أولياء الأمور على جميع الأجهزة والمتصفحات!\n\n📊 إجمالي الطلاب المستلمين: ${targetStudents.length} طالب وطالبة\n🏫 الصف: ${scopeTitle}\n\n✅ تم التثبيت السحابي في Firestore وإظهار الدرجات في بوابات أولياء الأمور مباشرة! ⚡`);
+    } finally {
+      setIsSendingClassGrades(false);
+    }
+  };
+
+  const handleDeleteSentGradeSheet = async (sheet: SentGradeSheet) => {
+    if (!sheet?.id) return;
+    setDeletingArchiveKey(sheet.id);
+    try {
+      const next = sentGradeSheets.filter(s => s.id !== sheet.id);
+      setSentGradeSheets(next);
+      const serialized = JSON.stringify(next);
+      saveSyncedLocalOnly('school_sent_grade_sheets', serialized);
+      safeDispatchStorageUpdate('school_sent_grade_sheets', serialized);
+      if (selectedSentSheetToView?.id === sheet.id) {
+        setSelectedSentSheetToView(null);
+      }
+
+      const affectedIds = (sheet.studentsSummary || []).map(sm => sm.studentId).filter(Boolean);
+      await Promise.all([
+        deleteGradeReportFromFirestore(sheet.id).catch(() => {}),
+        persistDirectToFirestore('school_sent_grade_sheets', next, { timeoutMs: 5000 }).catch(() => false),
+        resyncAndClearDeletedSheetStudents(affectedIds, next).catch(() => false)
+      ]);
+      setConfirmDeleteKey(null);
+    } finally {
+      setDeletingArchiveKey(null);
+    }
+  };
+
+  const handleDeleteSentMonth = async (monthName: string) => {
+    const cleanMonth = String(monthName || '').trim();
+    if (!cleanMonth) return;
+    setDeletingArchiveKey(`month_${cleanMonth}`);
+    try {
+      const sheetsToDelete = sentGradeSheets.filter(s => String(s.month || '').trim() === cleanMonth);
+      if (sheetsToDelete.length === 0) return;
+
+      const next = sentGradeSheets.filter(s => String(s.month || '').trim() !== cleanMonth);
+      setSentGradeSheets(next);
+      const serialized = JSON.stringify(next);
+      saveSyncedLocalOnly('school_sent_grade_sheets', serialized);
+      safeDispatchStorageUpdate('school_sent_grade_sheets', serialized);
+      if (selectedSentSheetToView && String(selectedSentSheetToView.month || '').trim() === cleanMonth) {
+        setSelectedSentSheetToView(null);
+      }
+      if (expandedSentMonth === cleanMonth) {
+        setExpandedSentMonth(null);
+      }
+
+      const affectedIds: string[] = Array.from(
+        new Set<string>(
+          sheetsToDelete.flatMap(sh => (sh.studentsSummary || []).map(sm => String(sm.studentId || '').trim()).filter(Boolean))
+        )
+      );
+
+      await Promise.all([
+        ...sheetsToDelete.map(sh => deleteGradeReportFromFirestore(sh.id).catch(() => {})),
+        persistDirectToFirestore('school_sent_grade_sheets', next, { timeoutMs: 5000 }).catch(() => false),
+        resyncAndClearDeletedSheetStudents(affectedIds, next).catch(() => false)
+      ]);
+      setConfirmDeleteKey(null);
+    } finally {
+      setDeletingArchiveKey(null);
+    }
   };
 
   const handleExportGradesExcel = async (cohortMode: boolean = false) => {
@@ -5409,11 +5602,13 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
               });
               if (c % 400 !== 0) commitPromises.push(b.commit());
               if (commitPromises.length > 0) {
-                await Promise.all(commitPromises);
+                await Promise.all(commitPromises).catch((writeErr: any) => {
+                  if (isQuotaError(writeErr)) markFirestoreQuotaExceeded(writeErr);
+                });
                 if (c > 0) trackFirestoreWrite(c, `حذف دفعة إشعارات (${c})`);
               }
             }).catch((err: any) => {
-              if (isQuotaError(err)) markFirestoreQuotaExceeded(err);
+              if (isQuotaError(err)) markFirestoreReadQuotaExceeded(err);
             });
           }
         } else if (category === 'excuses') {
@@ -10531,7 +10726,7 @@ if __name__ == "__main__":
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
                   <div>
-                    <label className="block text-xs font-semibold text-slate-600 mb-1.5">اختر الصف الدراسي للمعاينة الفردية:</label>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1.5">اختر الصف الدراسي لإرسال درجاته لأولياء الأمور:</label>
                     <select
                       value={selectedClassForGrades}
                       onChange={e => setSelectedClassForGrades(e.target.value)}
@@ -10619,36 +10814,28 @@ if __name__ == "__main__":
                       </button>
                     </div>
 
-                    {/* 5. Save & Send to Parents */}
+                    {/* 5. Save & Send to Parents (Per Class Only) */}
                     <button
                       type="button"
-                      onClick={() => handleSaveAndSendGradesToParents(false)}
-                      disabled={!selectedClassForGrades}
-                      className="text-xs font-bold py-2 px-3 rounded-xl border border-indigo-200 bg-indigo-600 hover:bg-indigo-700 text-white transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5 shadow-xs"
-                      title="حفظ وإرسال كشف درجات طلاب الصف المحدد"
+                      onClick={() => handleSaveAndSendGradesToParents()}
+                      disabled={!selectedClassForGrades || isSendingClassGrades}
+                      className="text-xs font-bold py-2 px-3.5 rounded-xl border border-indigo-200 bg-indigo-600 hover:bg-indigo-700 text-white transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5 shadow-xs"
+                      title="حفظ وإرسال كشف درجات طلاب الصف المحدد مباشرة لأولياء الأمور"
                     >
                       <Send className="w-3.5 h-3.5" />
-                      <span>💾 إرسال درجات الصف</span>
+                      <span>{isSendingClassGrades ? '⏳ جاري الإرسال...' : '💾 إرسال درجات الصف لأولياء الأمور'}</span>
                     </button>
 
                     <button
                       type="button"
-                      onClick={() => handleSaveAndSendGradesToParents(true)}
-                      className="text-xs font-black py-2 px-3.5 rounded-xl border border-purple-300 bg-purple-700 hover:bg-purple-800 text-white transition cursor-pointer flex items-center justify-center gap-1.5 shadow-xs"
-                      title="حفظ واعتماد وإرسال كشوف الدرجات لكافة أولياء أمور الفوج الدراسي بالكامل"
-                    >
-                      <Send className="w-3.5 h-3.5 text-purple-200" />
-                      <span>🚀 حفظ وإرسال لكامل الفوج</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setIsSentSheetsModalOpen(true)}
+                      onClick={() => {
+                        setIsSentSheetsModalOpen(true);
+                      }}
                       className="text-xs font-bold py-2 px-3.5 rounded-xl border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900 transition cursor-pointer flex items-center justify-center gap-1.5 shadow-xs"
-                      title="سجل وأرشيف كشوف الدرجات المرسلة والمحفوظة"
+                      title="سجل وأرشيف كشوف الدرجات المرسلة"
                     >
                       <ClipboardList className="w-3.5 h-3.5 text-amber-700" />
-                      <span>📁 سجل الكشوفات المحفوظة ({sentGradeSheets.length})</span>
+                      <span>📁 سجل كشوف الدرجات ({sentGradeSheets.length})</span>
                     </button>
 
                     <button
@@ -10784,11 +10971,12 @@ ${sampleEval}
 
                       <button
                         type="button"
-                        onClick={() => handleSaveAndSendGradesToParents(false)}
-                        className="text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white py-2 px-4 rounded-xl transition cursor-pointer shadow-xs flex items-center justify-center gap-1.5"
+                        disabled={isSendingClassGrades}
+                        onClick={() => handleSaveAndSendGradesToParents()}
+                        className="text-xs font-bold bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white py-2 px-4 rounded-xl transition cursor-pointer shadow-xs flex items-center justify-center gap-1.5"
                       >
                         <Send className="w-3.5 h-3.5" />
-                        <span>💾 حفظ وإرسال النتائج لأولياء الأمور</span>
+                        <span>{isSendingClassGrades ? '⏳ جاري الإرسال...' : '💾 إرسال درجات الصف لأولياء الأمور'}</span>
                       </button>
 
                       <div className="flex flex-wrap items-center gap-2 bg-indigo-50/70 border border-indigo-200/80 p-2 sm:py-1.5 rounded-2xl shadow-2xs">
@@ -10899,11 +11087,12 @@ ${sampleEval}
                             </button>
                             <button
                               type="button"
-                              onClick={() => handleSaveAndSendGradesToParents(false)}
-                              className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white font-black text-xs rounded-xl transition shadow-md flex items-center justify-center gap-2 cursor-pointer"
+                              disabled={isSendingClassGrades}
+                              onClick={() => handleSaveAndSendGradesToParents()}
+                              className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 disabled:opacity-60 text-white font-black text-xs rounded-xl transition shadow-md flex items-center justify-center gap-2 cursor-pointer"
                             >
                               <Send className="w-4 h-4" />
-                              <span>🚀 اعتماد وإرسال النتائج لأولياء الأمور</span>
+                              <span>{isSendingClassGrades ? '⏳ جاري الاعتماد والإرسال...' : '🚀 اعتماد وإرسال درجات الصف لأولياء الأمور'}</span>
                             </button>
                           </div>
                         </div>
@@ -11307,6 +11496,187 @@ ${sampleEval}
                   الرجاء تحديد الصف الدراسي من القائمة أعلاه لمعاينة كشوف الدرجات.
                 </div>
               )}
+
+              {/* Sent Months Only Manager (No student names, no monthly evaluations) */}
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                <div className="p-4 sm:p-5 border-b border-slate-100 bg-gradient-to-l from-indigo-50/70 via-white to-amber-50/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <h3 className="font-extrabold text-slate-800 text-sm flex items-center gap-2">
+                      <span>📅 الأشهر المرسلة لكشوف الدرجات</span>
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-1">
+                      تظهر هنا أسماء الأشهر التي تم إرسال كشوف درجاتها، ويمكنك فتح أي شهر أو حذفه ليُحذف تلقائياً من بوابة ولي الأمر والسحابة.
+                    </p>
+                  </div>
+                  <span className="text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 px-3 py-1.5 rounded-xl self-start sm:self-auto">
+                    📜 إجمالي الكشوفات المرسلة: {sentGradeSheets.length}
+                  </span>
+                </div>
+
+                <div className="p-4 sm:p-5 space-y-3">
+                  {(() => {
+                    const monthGroups = Array.from(
+                      sentGradeSheets.reduce((acc, sh) => {
+                        const m = String(sh.month || '').trim() || 'غير محدد';
+                        const list = acc.get(m) || [];
+                        list.push(sh);
+                        acc.set(m, list);
+                        return acc;
+                      }, new Map<string, SentGradeSheet[]>())
+                    );
+
+                    if (monthGroups.length === 0) {
+                      return (
+                        <div className="text-center py-8 bg-slate-50 rounded-2xl border border-dashed border-slate-200 text-xs text-slate-400">
+                          لا توجد أشهر مرسلة لكشوف الدرجات حالياً.
+                        </div>
+                      );
+                    }
+
+                    return (
+                      <div className="space-y-2.5">
+                        {monthGroups.map(([monthName, monthSheets]) => {
+                          const isExpanded = expandedSentMonth === monthName;
+                          const isConfirmingMonth = confirmDeleteKey === `month_${monthName}`;
+                          const isDeletingMonth = deletingArchiveKey === `month_${monthName}`;
+
+                          return (
+                            <div
+                              key={monthName}
+                              className="rounded-2xl border border-slate-200 bg-slate-50/50 overflow-hidden transition hover:border-indigo-200"
+                            >
+                              <div className="p-3.5 sm:p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                                <button
+                                  type="button"
+                                  onClick={() => setExpandedSentMonth(isExpanded ? null : monthName)}
+                                  className="flex items-center gap-3 text-right cursor-pointer flex-1"
+                                >
+                                  <span className="w-9 h-9 rounded-xl bg-indigo-100 text-indigo-700 flex items-center justify-center text-base shrink-0">
+                                    📅
+                                  </span>
+                                  <div>
+                                    <div className="font-extrabold text-slate-800 text-sm">
+                                      شهر {monthName}
+                                    </div>
+                                    <div className="text-[11px] text-slate-500">
+                                      {monthSheets.length} {monthSheets.length === 1 ? 'كشف مرسل' : 'كشوفات مرسلة'}
+                                    </div>
+                                  </div>
+                                </button>
+
+                                <div className="flex items-center gap-2 shrink-0">
+                                  <button
+                                    type="button"
+                                    onClick={() => setExpandedSentMonth(isExpanded ? null : monthName)}
+                                    className="px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-700 rounded-xl text-xs font-bold border border-slate-200 cursor-pointer"
+                                  >
+                                    {isExpanded ? 'إخفاء الكشوفات ▲' : `عرض الكشوفات (${monthSheets.length}) ▼`}
+                                  </button>
+
+                                  {isConfirmingMonth ? (
+                                    <div className="flex items-center gap-1.5 bg-rose-50 border border-rose-200 px-2 py-1 rounded-xl">
+                                      <button
+                                        type="button"
+                                        disabled={isDeletingMonth}
+                                        onClick={() => handleDeleteSentMonth(monthName)}
+                                        className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-[11px] font-bold cursor-pointer disabled:opacity-50"
+                                      >
+                                        {isDeletingMonth ? 'جاري الحذف...' : 'تأكيد حذف الشهر'}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setConfirmDeleteKey(null)}
+                                        className="px-2 py-1 bg-white text-slate-600 rounded-lg text-[11px] font-bold border border-slate-200 cursor-pointer"
+                                      >
+                                        إلغاء
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={() => setConfirmDeleteKey(`month_${monthName}`)}
+                                      className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 rounded-xl text-xs font-bold border border-rose-200 cursor-pointer flex items-center gap-1"
+                                      title="حذف كافة كشوف هذا الشهر نهائياً من السجل ومن بوابة ولي الأمر"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                      <span>حذف</span>
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+
+                              {isExpanded && (
+                                <div className="border-t border-slate-200 bg-white p-3 space-y-2">
+                                  {monthSheets.map((sheet, idx) => {
+                                    const isConfirming = confirmDeleteKey === `sheet_${sheet.id}`;
+                                    const isDeleting = deletingArchiveKey === sheet.id;
+                                    return (
+                                      <div
+                                        key={sheet.id || idx}
+                                        className="p-3 rounded-xl border border-slate-100 bg-slate-50/50 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                                      >
+                                        <div>
+                                          <div className="font-bold text-slate-800 text-xs">{sheet.title}</div>
+                                          <div className="text-[11px] text-slate-500 mt-0.5 flex flex-wrap items-center gap-2">
+                                            <span>🏫 {sheet.className}</span>
+                                            <span>🕒 {new Date(sheet.dateSent).toLocaleDateString('ar-EG', { year: 'numeric', month: 'short', day: 'numeric' })}</span>
+                                          </div>
+                                        </div>
+
+                                        <div className="flex items-center gap-2 shrink-0">
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              setSelectedSentSheetToView(sheet);
+                                              setIsSentSheetsModalOpen(true);
+                                            }}
+                                            className="px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg text-[11px] font-bold border border-indigo-200 cursor-pointer flex items-center gap-1"
+                                          >
+                                            <Eye className="w-3.5 h-3.5" />
+                                            <span>معاينة</span>
+                                          </button>
+                                          {isConfirming ? (
+                                            <div className="flex items-center gap-1 bg-rose-50 border border-rose-200 px-2 py-0.5 rounded-lg">
+                                              <button
+                                                type="button"
+                                                disabled={isDeleting}
+                                                onClick={() => handleDeleteSentGradeSheet(sheet)}
+                                                className="px-2 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded text-[11px] font-bold cursor-pointer disabled:opacity-50"
+                                              >
+                                                {isDeleting ? 'جاري...' : 'تأكيد'}
+                                              </button>
+                                              <button
+                                                type="button"
+                                                onClick={() => setConfirmDeleteKey(null)}
+                                                className="px-2 py-1 bg-white text-slate-600 rounded text-[11px] font-bold border border-slate-200 cursor-pointer"
+                                              >
+                                                إلغاء
+                                              </button>
+                                            </div>
+                                          ) : (
+                                            <button
+                                              type="button"
+                                              onClick={() => setConfirmDeleteKey(`sheet_${sheet.id}`)}
+                                              className="px-2.5 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 rounded-lg text-[11px] font-bold border border-rose-200 cursor-pointer flex items-center gap-1"
+                                            >
+                                              <Trash2 className="w-3.5 h-3.5" />
+                                              <span>حذف</span>
+                                            </button>
+                                          )}
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
+                </div>
+              </div>
             </motion.div>
           )}
 
@@ -14173,19 +14543,22 @@ ${sampleEval}
           )}
 
           {isMetricsModalOpen && (() => {
+            const writeQuotaInfo = getWriteQuotaExceededInfo();
+            const isWriteLocked = writeQuotaInfo.exceeded;
             const usedReads = Math.max(0, firestoreMetrics.totalReads || 0);
             const usedWrites = Math.max(0, firestoreMetrics.totalWrites || 0);
             const remainingReads = Math.max(0, SPARK_DAILY_READ_LIMIT - usedReads);
-            const remainingWrites = isFirestoreWriteQuotaExceeded() ? 0 : Math.max(0, SPARK_DAILY_WRITE_LIMIT - usedWrites);
+            const remainingWritesInDb = Math.max(0, SPARK_DAILY_WRITE_LIMIT - usedWrites);
+            const isSharedProjectWriteLimit = isWriteLocked && usedWrites < SPARK_DAILY_WRITE_LIMIT;
             const readsUsedPct = Math.min(100, (usedReads / SPARK_DAILY_READ_LIMIT) * 100);
             const readsRemainingPct = Math.max(0, 100 - readsUsedPct);
-            const writesUsedPct = isFirestoreWriteQuotaExceeded() ? 100 : Math.min(100, (usedWrites / SPARK_DAILY_WRITE_LIMIT) * 100);
-            const writesRemainingPct = isFirestoreWriteQuotaExceeded() ? 0 : Math.max(0, 100 - writesUsedPct);
+            const writesUsedPct = Math.min(100, (usedWrites / SPARK_DAILY_WRITE_LIMIT) * 100);
+            const writesRemainingPct = Math.max(0, 100 - writesUsedPct);
             const storageUsedPct = Math.min(100, storageReport.percentUsed || 0);
             const storageRemainingPct = Math.max(0, 100 - storageUsedPct);
 
             const warnReads = readsUsedPct >= QUOTA_WARNING_RATIO * 100;
-            const warnWrites = writesUsedPct >= QUOTA_WARNING_RATIO * 100 || isFirestoreWriteQuotaExceeded();
+            const warnWrites = writesUsedPct >= QUOTA_WARNING_RATIO * 100;
             const warnStorage = storageUsedPct >= QUOTA_WARNING_RATIO * 100;
             const has80Warning = warnReads || warnWrites || warnStorage;
 
@@ -14222,18 +14595,20 @@ ${sampleEval}
                 <div className="space-y-4">
                   {/* Daily Auto-Reset & Active DB Status Banner */}
                   <div className={`border rounded-xl p-3 flex flex-col gap-1.5 text-xs ${
-                    isFirestoreWriteQuotaExceeded()
+                    isWriteLocked
                       ? 'bg-rose-50 border-rose-200'
                       : 'bg-emerald-50 border-emerald-200/90'
                   }`}>
                     <div className="flex items-center justify-between flex-wrap gap-2">
                       <div className="flex items-center gap-2">
                         <span className={`w-2.5 h-2.5 rounded-full animate-pulse shrink-0 ${
-                          isFirestoreWriteQuotaExceeded() ? 'bg-rose-500' : 'bg-emerald-500'
+                          isWriteLocked ? 'bg-rose-500' : 'bg-emerald-500'
                         }`} />
-                        <span className={`font-bold ${isFirestoreWriteQuotaExceeded() ? 'text-rose-900' : 'text-emerald-900'}`}>
-                          {isFirestoreWriteQuotaExceeded()
-                            ? 'تم بلوغ حد الكتابة المجاني اليومي المشترك في Firebase ⚠️'
+                        <span className={`font-bold ${isWriteLocked ? 'text-rose-900' : 'text-emerald-900'}`}>
+                          {isSharedProjectWriteLimit
+                            ? 'توقف مؤقت للكتابة من خادم Firebase المشترك (حصة المشروع Spark) ⚠️'
+                            : isWriteLocked
+                            ? 'تم بلوغ حد الكتابة المجاني اليومي في Firebase ⚠️'
                             : 'مرتبط بمستند system_stats/consumption للقاعدة النشطة ✅'}
                         </span>
                       </div>
@@ -14255,9 +14630,52 @@ ${sampleEval}
                     <div className="text-[10px] text-slate-500 leading-relaxed">
                       المشروع: <span className="font-mono font-bold text-slate-700">{FIREBASE_PROJECT_ID}</span> | يتم تسجيل القراءات والكتابات السحابية الحقيقية فقط دون احتساب قراءات الكاش المحلي.
                     </div>
+
+                    {isWriteLocked && (
+                      <div className="mt-1 bg-white/90 border border-rose-200 rounded-xl p-2.5 text-[11px] text-rose-950 space-y-1.5">
+                        <p className="font-bold leading-relaxed">
+                          {isSharedProjectWriteLimit
+                            ? `ملاحظة مهمة: قاعدة مدرستكم استهلكت فقط ${usedWrites.toLocaleString()} من أصل ${SPARK_DAILY_WRITE_LIMIT.toLocaleString()} كتابة اليوم (${writesUsedPct.toFixed(1)}%). لكن حصة Spark المجانية في Firebase تُحسب بشكل مشترك على مستوى المشروع (${FIREBASE_PROJECT_ID}) أو بسبب ضغط كتابة لحظي مؤقت.`
+                            : 'وصل استهلاك الكتابات اليومي لهذه القاعدة إلى الحد الأقصى المجاني.'}
+                        </p>
+                        <p className="text-[10px] text-slate-600 leading-relaxed">
+                          القراءة والمزامنة المباشرة بين أجهزتكم عبر البث الفوري (Live Relay) والذاكرة المحلية مستمرة بشكل طبيعي ولا يضيع أي تعديل.
+                          {writeQuotaInfo.cooldownRemainingSec > 0 && (
+                            <span className="font-bold text-rose-700"> (إعادة فحص تلقائي خلال {writeQuotaInfo.cooldownRemainingSec} ث)</span>
+                          )}
+                        </p>
+                        {writeQuotaInfo.reason && (
+                          <div className="text-[9.5px] font-mono bg-rose-50/80 border border-rose-100 rounded-lg px-2 py-1 text-rose-800 break-all" dir="ltr">
+                            {writeQuotaInfo.reason}
+                          </div>
+                        )}
+                        <div className="pt-0.5 flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            disabled={isProbingWriteQuota}
+                            onClick={handleTestWriteAvailability}
+                            className="px-3 py-1.5 bg-rose-600 hover:bg-rose-700 disabled:opacity-60 text-white rounded-lg text-[10.5px] font-bold flex items-center gap-1.5 transition cursor-pointer"
+                          >
+                            {isProbingWriteQuota ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+                            <span>{isProbingWriteQuota ? 'جاري اختبار الكتابة...' : '🔓 فحص وإعادة اختبار الكتابة الآن'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              resetFirestoreQuotaBreaker();
+                              setQuotaStatusTick(t => t + 1);
+                              setMetricsRefreshNotice('🔓 تم إعادة تفعيل مسار الكتابة محلياً؛ سيتم التحقق مع العملية القادمة.');
+                            }}
+                            className="px-2.5 py-1.5 bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 rounded-lg text-[10.5px] font-bold transition cursor-pointer"
+                          >
+                            تصفير التنبيه المؤقت
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
 
-                  {/* 80% Threshold Warning Alert Banner */}
+                  {/* 80% Threshold Warning Alert Banner (only when actual DB consumption >= 80%) */}
                   {has80Warning && (
                     <div className="bg-amber-50 border-2 border-amber-300 rounded-2xl p-3.5 text-xs space-y-1.5 shadow-2xs">
                       <div className="flex items-center gap-2 font-extrabold text-amber-900">
@@ -14272,7 +14690,7 @@ ${sampleEval}
                         )}
                         {warnWrites && (
                           <li>
-                            <strong>الكتابات اليومية:</strong> وصلت إلى <strong>{writesUsedPct.toFixed(1)}%</strong> ({usedWrites.toLocaleString()} / {SPARK_DAILY_WRITE_LIMIT.toLocaleString()}) — المتبقي مجاناً: <strong>{remainingWrites.toLocaleString()}</strong>
+                            <strong>الكتابات اليومية:</strong> وصلت إلى <strong>{writesUsedPct.toFixed(1)}%</strong> ({usedWrites.toLocaleString()} / {SPARK_DAILY_WRITE_LIMIT.toLocaleString()}) — المتبقي مجاناً: <strong>{remainingWritesInDb.toLocaleString()}</strong>
                           </li>
                         )}
                         {warnStorage && (
@@ -14304,22 +14722,28 @@ ${sampleEval}
                     </div>
 
                     <div className={`border rounded-2xl p-3 text-center ${
-                      isFirestoreWriteQuotaExceeded() || remainingWrites === 0
+                      isWriteLocked || remainingWritesInDb === 0
                         ? 'bg-rose-50 border-rose-200'
                         : warnWrites
                         ? 'bg-amber-50 border-amber-300'
                         : 'bg-sky-50 border-sky-200'
                     }`}>
                       <span className={`text-[10px] font-bold block mb-0.5 ${
-                        isFirestoreWriteQuotaExceeded() ? 'text-rose-800' : warnWrites ? 'text-amber-900' : 'text-sky-800'
-                      }`}>المتبقي من الكتابات اليومية</span>
-                      <strong className={`text-base font-mono font-black block ${
-                        isFirestoreWriteQuotaExceeded() ? 'text-rose-700' : warnWrites ? 'text-amber-700' : 'text-sky-700'
+                        isWriteLocked ? 'text-rose-800' : warnWrites ? 'text-amber-900' : 'text-sky-800'
                       }`}>
-                        {isFirestoreWriteQuotaExceeded() ? '0 (مكتمل)' : remainingWrites.toLocaleString()}
+                        {isSharedProjectWriteLimit ? 'الكتابة في قاعدة المدرسة' : 'المتبقي من الكتابات اليومية'}
+                      </span>
+                      <strong className={`text-base font-mono font-black block ${
+                        isWriteLocked ? 'text-rose-700' : warnWrites ? 'text-amber-700' : 'text-sky-700'
+                      }`}>
+                        {isSharedProjectWriteLimit
+                          ? `${usedWrites.toLocaleString()} (موقوف مشتركاً)`
+                          : isWriteLocked
+                          ? '0 (مكتمل)'
+                          : remainingWritesInDb.toLocaleString()}
                       </strong>
                       <span className={`text-[10px] font-mono font-bold block ${
-                        isFirestoreWriteQuotaExceeded() ? 'text-rose-700' : warnWrites ? 'text-amber-700' : 'text-sky-700'
+                        isWriteLocked ? 'text-rose-700' : warnWrites ? 'text-amber-700' : 'text-sky-700'
                       }`}>
                         متبقي {writesRemainingPct.toFixed(1)}% (مستخدم {writesUsedPct.toFixed(1)}%)
                       </span>
@@ -14389,22 +14813,26 @@ ${sampleEval}
                   {/* Today's Quota: Writes */}
                   <div className="space-y-2">
                     <div className="flex flex-wrap justify-between items-center gap-1 text-xs">
-                      <span className="font-bold text-slate-700">الكتابات اليومية الفعلية (الحد المجاني: 20,000)</span>
+                      <span className="font-bold text-slate-700">الكتابات اليومية الفعلية في قاعدة المدرسة (الحد: 20,000)</span>
                       <span className="font-mono font-bold text-xs">
                         <span className="text-slate-600">اليوم: {usedWrites.toLocaleString()} ({writesUsedPct.toFixed(1)}%)</span>
                         <span className="mx-1.5 text-slate-300">|</span>
-                        <span className={isFirestoreWriteQuotaExceeded() ? 'text-rose-700' : warnWrites ? 'text-amber-700' : 'text-sky-700'}>
-                          المتبقي: {isFirestoreWriteQuotaExceeded() ? '0 (0.0%)' : `${remainingWrites.toLocaleString()} (${writesRemainingPct.toFixed(1)}%)`}
+                        <span className={isWriteLocked ? 'text-rose-700' : warnWrites ? 'text-amber-700' : 'text-sky-700'}>
+                          {isSharedProjectWriteLimit
+                            ? `متاح بالقاعدة: ${remainingWritesInDb.toLocaleString()} (مشترك الخادم مقفول)`
+                            : `المتبقي: ${remainingWritesInDb.toLocaleString()} (${writesRemainingPct.toFixed(1)}%)`}
                         </span>
                       </span>
                     </div>
                     <div className="w-full h-3 bg-slate-100 rounded-full overflow-hidden">
                       <div
                         className={`h-full transition-all duration-500 ${
-                          isFirestoreWriteQuotaExceeded() || writesUsedPct >= 90
+                          writesUsedPct >= 90
                             ? 'bg-rose-500'
                             : warnWrites
                             ? 'bg-amber-500'
+                            : isWriteLocked
+                            ? 'bg-amber-400'
                             : 'bg-sky-500'
                         }`}
                         style={{ width: `${writesUsedPct}%` }}
@@ -17364,8 +17792,21 @@ ${sampleEval}
                       </div>
                     </div>
                   ) : (
-                    // List of All Sent Grade Sheets
-                    <div className="space-y-3">
+                    // List of Sent Grade Sheets (Months & Sheets only, no student names or evaluations)
+                    <div className="space-y-4">
+                      <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-100">
+                        <span className="text-xs font-extrabold text-indigo-900">
+                          📜 كشوف الدرجات المرسلة ({sentGradeSheets.length})
+                        </span>
+                        <input
+                          type="text"
+                          value={archiveSearchQuery}
+                          onChange={e => setArchiveSearchQuery(e.target.value)}
+                          placeholder="🔍 بحث بالشهر أو الصف..."
+                          className="w-full sm:w-64 text-xs border border-slate-200 rounded-xl px-3 py-1.5 bg-slate-50 focus:bg-white focus:border-indigo-500 focus:outline-none text-right"
+                        />
+                      </div>
+
                       {sentGradeSheets.length === 0 ? (
                         <div className="text-center py-16 px-4 bg-slate-50/80 rounded-3xl border border-dashed border-slate-200 space-y-3">
                           <div className="w-14 h-14 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center mx-auto text-2xl shadow-xs">
@@ -17373,69 +17814,97 @@ ${sampleEval}
                           </div>
                           <h4 className="font-bold text-slate-700 text-sm">لا توجد كشوفات درجات محفوظة بعد</h4>
                           <p className="text-xs text-slate-400 max-w-md mx-auto leading-relaxed">
-                            عند الضغط على "إرسال درجات الصف" أو "حفظ وإرسال لكامل الفوج"، سيتم إرسال الكشف لأولياء الأمور كرسائل وتقارير رسمية وتوثيق نسخة دائمة هنا في سجل الإدارة لتبقى محفوظة دائماً.
+                            عند اختيار الصف والضغط على "إرسال درجات الصف لأولياء الأمور"، سيتم إرسال الكشف وتثبيته مباشرة لولي الأمر وتوثيق نسخة دائمة هنا في سجل الإدارة.
                           </p>
                         </div>
                       ) : (
-                        sentGradeSheets.map((sheet, index) => (
-                          <div
-                            key={sheet.id || index}
-                            className="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-2xs hover:border-indigo-300 transition-all flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4"
-                          >
-                            <div className="flex items-start gap-3.5">
-                              <div className="w-11 h-11 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 font-bold shrink-0 text-lg shadow-2xs">
-                                📜
-                              </div>
-                              <div className="space-y-1">
-                                <div className="flex flex-wrap items-center gap-2">
-                                  <h4 className="font-extrabold text-slate-800 text-sm">{sheet.title}</h4>
-                                  {sheet.status === 'submitted' ? (
-                                    <span className="bg-amber-100 text-amber-900 text-[11px] font-extrabold px-2.5 py-0.5 rounded-full border border-amber-300 animate-pulse">
-                                      مرسل من {sheet.sentBy} ⏳ (بانتظار الاعتماد)
-                                    </span>
-                                  ) : (
-                                    <span className="bg-emerald-50 text-emerald-700 text-[11px] font-bold px-2 py-0.5 rounded-full border border-emerald-200">
-                                      معتمد وموثق ✅ {sheet.sentBy?.includes('المعلم') ? `(${sheet.sentBy})` : ''}
-                                    </span>
-                                  )}
-                                </div>
-                                <div className="text-xs text-slate-400 flex flex-wrap items-center gap-x-3 gap-y-1">
-                                  <span>📅 شهر: <strong className="text-slate-600">{sheet.month}</strong></span>
-                                  <span>🏫 النطاق: <strong className="text-slate-600">{sheet.className}</strong></span>
-                                  <span>👥 عدد الطلاب: <strong className="text-slate-600">{sheet.studentCount} طالب/ة</strong></span>
-                                  <span>🕒 تاريخ الإرسال: <strong className="text-slate-600 font-mono">{new Date(sheet.dateSent).toLocaleDateString('ar-EG', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</strong></span>
-                                </div>
-                              </div>
-                            </div>
+                        sentGradeSheets
+                          .filter(sh => {
+                            const q = archiveSearchQuery.trim().toLowerCase();
+                            if (!q) return true;
+                            return (
+                              String(sh.title || '').toLowerCase().includes(q) ||
+                              String(sh.className || '').toLowerCase().includes(q) ||
+                              String(sh.month || '').toLowerCase().includes(q)
+                            );
+                          })
+                          .map((sheet, index) => {
+                            const isConfirming = confirmDeleteKey === `modal_sheet_${sheet.id}`;
+                            const isDeleting = deletingArchiveKey === sheet.id;
+                            return (
+                              <div
+                                key={sheet.id || index}
+                                className="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-2xs hover:border-indigo-300 transition-all"
+                              >
+                                <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
+                                  <div className="flex items-start gap-3.5">
+                                    <div className="w-11 h-11 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 font-bold shrink-0 text-lg shadow-2xs">
+                                      📅
+                                    </div>
+                                    <div className="space-y-1">
+                                      <div className="flex flex-wrap items-center gap-2">
+                                        <h4 className="font-extrabold text-slate-800 text-sm">شهر {sheet.month} — {sheet.className}</h4>
+                                        {sheet.status === 'submitted' ? (
+                                          <span className="bg-amber-100 text-amber-900 text-[11px] font-extrabold px-2.5 py-0.5 rounded-full border border-amber-300">
+                                            بانتظار الاعتماد ⏳
+                                          </span>
+                                        ) : (
+                                          <span className="bg-emerald-50 text-emerald-700 text-[11px] font-bold px-2 py-0.5 rounded-full border border-emerald-200">
+                                            مرسل لولي الأمر ✅
+                                          </span>
+                                        )}
+                                      </div>
+                                      <div className="text-xs text-slate-400 flex flex-wrap items-center gap-x-3 gap-y-1">
+                                        <span>📜 {sheet.title}</span>
+                                        <span>🕒 {new Date(sheet.dateSent).toLocaleDateString('ar-EG', { year: 'numeric', month: 'short', day: 'numeric' })}</span>
+                                      </div>
+                                    </div>
+                                  </div>
 
-                            <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
-                              <button
-                                type="button"
-                                onClick={() => setSelectedSentSheetToView(sheet)}
-                                className="px-3 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl text-xs font-bold flex items-center gap-1 transition cursor-pointer border border-indigo-200 shadow-2xs"
-                                title="معاينة وتدقيق الكشف بالكامل"
-                              >
-                                <Eye className="w-3.5 h-3.5" />
-                                <span>معاينة وتدقيق 👁️</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={async () => {
-                                  const next = sentGradeSheets.filter(s => s.id !== sheet.id);
-                                  setSentGradeSheets(next);
-                                  try {
-                                    await deleteGradeReportFromFirestore(sheet.id);
-                                  } catch {}
-                                  await persistDirectToFirestore('school_sent_grade_sheets', next);
-                                }}
-                                className="w-8 h-8 rounded-xl bg-slate-100 hover:bg-rose-50 text-slate-400 hover:text-rose-600 flex items-center justify-center transition cursor-pointer border border-slate-200"
-                                title="حذف من السجل"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-                          </div>
-                        ))
+                                  <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                                    <button
+                                      type="button"
+                                      onClick={() => setSelectedSentSheetToView(sheet)}
+                                      className="px-3 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl text-xs font-bold flex items-center gap-1 transition cursor-pointer border border-indigo-200 shadow-2xs"
+                                      title="معاينة الكشف بالكامل"
+                                    >
+                                      <Eye className="w-3.5 h-3.5" />
+                                      <span>معاينة</span>
+                                    </button>
+                                    {isConfirming ? (
+                                      <div className="flex items-center gap-1.5 bg-rose-50 border border-rose-200 px-2 py-1 rounded-xl">
+                                        <button
+                                          type="button"
+                                          disabled={isDeleting}
+                                          onClick={() => handleDeleteSentGradeSheet(sheet)}
+                                          className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold cursor-pointer disabled:opacity-50"
+                                        >
+                                          {isDeleting ? 'جاري الحذف...' : 'تأكيد الحذف'}
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => setConfirmDeleteKey(null)}
+                                          className="px-2 py-1 bg-white text-slate-600 rounded-lg text-xs font-bold border border-slate-200 cursor-pointer"
+                                        >
+                                          إلغاء
+                                        </button>
+                                      </div>
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        onClick={() => setConfirmDeleteKey(`modal_sheet_${sheet.id}`)}
+                                        className="px-2.5 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-600 flex items-center justify-center gap-1 transition cursor-pointer border border-rose-200 text-xs font-bold"
+                                        title="حذف من السجل ومن بوابة ولي الأمر"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                        <span>حذف</span>
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })
                       )}
                     </div>
                   )}

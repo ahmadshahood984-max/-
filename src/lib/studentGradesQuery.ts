@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { db, getDocCacheFirst } from './firebase';
+import { db, deleteFirestoreDocFast, getDocCacheFirst, writeFirestoreDocFast } from './firebase';
 import { 
   doc, 
   setDoc, 
@@ -230,6 +230,12 @@ export async function fetchStudentGradesOnDemand(
 }
 
 const consolidatedRecordMemoryCache = new Map<string, ConsolidatedStudentGradeRecord>();
+const serverConfirmedMissingStudentIds = new Set<string>();
+
+export function isConsolidatedRecordConfirmedMissingOnServer(studentId: string): boolean {
+  const cleanId = normalizeId(studentId);
+  return cleanId ? serverConfirmedMissingStudentIds.has(cleanId) : false;
+}
 
 /**
  * Directly fetch the full consolidated record for a student (5-min TTL + cache-first by default)
@@ -246,6 +252,7 @@ export async function fetchConsolidatedStudentRecord(
   if (!forceServer && isReadCacheFresh(cacheKey)) {
     const mem = consolidatedRecordMemoryCache.get(cleanId);
     if (mem) return mem;
+    if (serverConfirmedMissingStudentIds.has(cleanId)) return null;
   }
 
   if (!db) {
@@ -268,12 +275,15 @@ export async function fetchConsolidatedStudentRecord(
     if (snap && snap.exists()) {
       const rec = snap.data() as ConsolidatedStudentGradeRecord;
       consolidatedRecordMemoryCache.set(cleanId, rec);
+      serverConfirmedMissingStudentIds.delete(cleanId);
       markReadCacheFresh(cacheKey);
       return rec;
     }
 
-    if (fallbackUnifiedNo && fallbackUnifiedNo !== cleanId) {
-      const altRef = doc(db, 'students_grades', normalizeId(fallbackUnifiedNo));
+    let altMissingConfirmed = !fallbackUnifiedNo || normalizeId(fallbackUnifiedNo) === cleanId;
+    if (fallbackUnifiedNo && normalizeId(fallbackUnifiedNo) !== cleanId) {
+      const altId = normalizeId(fallbackUnifiedNo);
+      const altRef = doc(db, 'students_grades', altId);
       const { snap: altSnap, fromCache: altFromCache } = await getDocCacheFirst(altRef, {
         forceServer: effectiveForceServer,
         timeoutMs: 2000
@@ -284,9 +294,18 @@ export async function fetchConsolidatedStudentRecord(
       if (altSnap && altSnap.exists()) {
         const rec = altSnap.data() as ConsolidatedStudentGradeRecord;
         consolidatedRecordMemoryCache.set(cleanId, rec);
+        serverConfirmedMissingStudentIds.delete(cleanId);
         markReadCacheFresh(cacheKey);
         return rec;
       }
+      altMissingConfirmed = Boolean(altSnap && !altFromCache && !altSnap.exists());
+    }
+
+    if (snap && !fromCache && !snap.exists() && altMissingConfirmed) {
+      consolidatedRecordMemoryCache.delete(cleanId);
+      serverConfirmedMissingStudentIds.add(cleanId);
+      markReadCacheFresh(cacheKey);
+      return null;
     }
   } catch (err: any) {
     if (isQuotaError(err)) {
@@ -400,6 +419,7 @@ async function commitConsolidatedBatchToFirestore(
   for (let i = 0; i < records.length; i += 400) {
     const chunk = records.slice(i, i + 400);
     const batch = writeBatch(db);
+    const chunkPayloads: Array<{ cleanId: string; payload: ConsolidatedStudentGradeRecord; merge: boolean }> = [];
 
     chunk.forEach(rec => {
       const cleanId = normalizeId(rec.studentId);
@@ -424,10 +444,36 @@ async function commitConsolidatedBatchToFirestore(
         updatedAt: Date.now()
       };
 
-      batch.set(docRef, payload, { merge: true });
+      const merge = !Array.isArray(rec.approvedSheets);
+      chunkPayloads.push({ cleanId, payload, merge });
+      if (merge) {
+        batch.set(docRef, payload, { merge: true });
+      } else {
+        batch.set(docRef, payload);
+      }
     });
 
-    await batch.commit();
+    const batchPromise = batch.commit();
+    const outcome = await Promise.race([
+      batchPromise.then(() => 'sdk_ok' as const),
+      new Promise<'grace_elapsed'>((resolve) => setTimeout(() => resolve('grace_elapsed'), 4500))
+    ]);
+
+    if (outcome !== 'sdk_ok') {
+      // Fallback to direct REST API writes in small paced waves so we never trip per-second 429 limits
+      for (let j = 0; j < chunkPayloads.length; j += 4) {
+        const wave = chunkPayloads.slice(j, j + 4);
+        await Promise.all(
+          wave.map(({ cleanId, payload, merge }) =>
+            writeFirestoreDocFast('students_grades', cleanId, payload, { merge, sdkGraceMs: 500, restTimeoutMs: 8000 })
+          )
+        );
+        if (j + 4 < chunkPayloads.length) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+    }
+
     trackFirestoreWrite(chunk.length, `حفظ دفعة درجات (${chunk.length} طالب)`);
   }
   return true;
@@ -487,16 +533,22 @@ export async function batchSaveStudentsGradesConsolidated(
 ): Promise<boolean> {
   if (!records || records.length === 0) return true;
 
-  const changedRecords = records.filter((rec) => {
+  const changedRecords: typeof records = [];
+  const pendingSigUpdates: Array<{ cleanId: string; sig: string; subSig: string }> = [];
+
+  records.forEach((rec) => {
     const cleanId = normalizeId(rec.studentId);
-    if (!cleanId) return false;
+    if (!cleanId) return;
     const sig = computeRecordSignature(rec);
     if (lastSyncedConsolidatedSignatures.get(cleanId) === sig) {
-      return false;
+      return;
     }
-    lastSyncedConsolidatedSignatures.set(cleanId, sig);
-    lastSyncedConsolidatedSignatures.set(`subjects_${cleanId}`, computeSubjectsSignature(rec.subjects));
-    return true;
+    pendingSigUpdates.push({
+      cleanId,
+      sig,
+      subSig: computeSubjectsSignature(rec.subjects)
+    });
+    changedRecords.push(rec);
   });
 
   if (changedRecords.length === 0) return true;
@@ -504,15 +556,22 @@ export async function batchSaveStudentsGradesConsolidated(
   const batchId = `gb_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   await enqueuePendingGradeBatch(batchId, changedRecords);
 
-  if (!db || isFirestoreWriteQuotaExceeded()) return true;
+  if (!db || isFirestoreWriteQuotaExceeded()) return false;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-    return true;
+    return false;
   }
 
   try {
     const commitPromise = commitConsolidatedBatchToFirestore(changedRecords)
       .then(async (ok) => {
-        if (ok) await removePendingGradeBatch(batchId);
+        if (ok) {
+          pendingSigUpdates.forEach(({ cleanId, sig, subSig }) => {
+            lastSyncedConsolidatedSignatures.set(cleanId, sig);
+            lastSyncedConsolidatedSignatures.set(`subjects_${cleanId}`, subSig);
+          });
+          persistConsolidatedSignaturesToStorage();
+          await removePendingGradeBatch(batchId);
+        }
         return ok;
       })
       .catch((err: any) => {
@@ -524,17 +583,17 @@ export async function batchSaveStudentsGradesConsolidated(
         return false;
       });
 
-    // Never hang caller UI if internet drops mid-flight
-    await Promise.race([
+    // Wait up to 8s for real Firestore confirmation so callers never falsely report success
+    const committed = await Promise.race([
       commitPromise,
-      new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 2000))
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 8000))
     ]);
-    return true;
+    return committed;
   } catch (err: any) {
     if (isQuotaError(err)) {
       markFirestoreWriteQuotaExceeded(err);
     }
-    return true;
+    return false;
   }
 }
 
@@ -729,33 +788,56 @@ export async function seedGradesToStudentCollection(grades: Grade[]): Promise<vo
  * Sync student summaries from SentGradeSheet records into consolidated single-document records,
  * skipping previously synced identical student snapshots to avoid redundant Firestore writes.
  */
-export async function syncSentGradeSheetsToConsolidatedCollection(sheets: SentGradeSheet[]): Promise<void> {
-  if (!Array.isArray(sheets) || sheets.length === 0) return;
+export async function syncSentGradeSheetsToConsolidatedCollection(
+  sheets: SentGradeSheet[],
+  options?: { onlyStudentIds?: string[] }
+): Promise<boolean> {
+  if (!Array.isArray(sheets) || sheets.length === 0) return true;
+  const scopedIds = options?.onlyStudentIds && options.onlyStudentIds.length > 0
+    ? new Set(options.onlyStudentIds.map(normalizeId).filter(Boolean))
+    : null;
 
   // STRICT GATE: Only Director-approved/sent grade sheets may be synced to students_grades.
   // Never sync teacher-submitted ('submitted') or draft sheets before the Director approves & sends them.
   const approvedSheets = sheets.filter(
     (s) => s && (s.status === 'approved' || (!s.teacherId && s.status !== 'submitted' && s.status !== 'draft'))
   );
-  if (approvedSheets.length === 0) return;
+  if (approvedSheets.length === 0) return true;
 
-  // Sort newest first and only sync up to the 2 most recent approved sheets
-  // to avoid burning hundreds of Firestore writes on historical sheets every save.
-  const orderedSheets = [...approvedSheets]
-    .sort((a, b) => (new Date(b.dateSent || 0).getTime() || 0) - (new Date(a.dateSent || 0).getTime() || 0))
-    .slice(0, 2);
+  // Sort class-specific sheets before any legacy 'cohort' sheets, newest first, and Director before Teacher
+  const orderedSheets = [...approvedSheets].sort((a, b) => {
+    const aIsCohort = a.classId === 'cohort' ? 1 : 0;
+    const bIsCohort = b.classId === 'cohort' ? 1 : 0;
+    if (aIsCohort !== bIsCohort) return aIsCohort - bIsCohort;
+    const timeDiff = (new Date(b.dateSent || 0).getTime() || 0) - (new Date(a.dateSent || 0).getTime() || 0);
+    if (timeDiff !== 0) return timeDiff;
+    const aIsTeacher = a.teacherId ? 1 : 0;
+    const bIsTeacher = b.teacherId ? 1 : 0;
+    return aIsTeacher - bIsTeacher;
+  });
 
-  // Build per-student scoped approved sheets list across approvedSheets (max 6 recent months per student)
+  // Build per-student scoped approved sheets list (max 6 recent entries per student, deduplicated per class+month+role)
   const perStudentApprovedSheets = new Map<string, SentGradeSheet[]>();
-  const sortedAllApproved = [...approvedSheets].sort(
-    (a, b) => (new Date(b.dateSent || 0).getTime() || 0) - (new Date(a.dateSent || 0).getTime() || 0)
-  );
-  for (const sheet of sortedAllApproved) {
+  const perStudentSheetKeys = new Map<string, Set<string>>();
+  for (const sheet of orderedSheets) {
+    const isCohortSheet = sheet.classId === 'cohort';
+    const roleTag = sheet.teacherId ? `t_${sheet.teacherId}` : 'director';
+    const scopeKey = `${sheet.classId || sheet.className || 'all'}_${String(sheet.month || '').trim()}_${roleTag}`;
+    const monthKey = String(sheet.month || '').trim();
+
     for (const st of sheet.studentsSummary || []) {
       const cleanId = normalizeId(st.studentId);
       if (!cleanId) continue;
       const existing = perStudentApprovedSheets.get(cleanId) || [];
-      if (existing.length < 6 && !existing.some((sh) => sh.month === sheet.month)) {
+      const seenKeys = perStudentSheetKeys.get(cleanId) || new Set<string>();
+
+      // Skip any legacy cohort sheet if a class-specific sheet already exists for this student & month
+      if (isCohortSheet && existing.some((sh) => String(sh.month || '').trim() === monthKey && sh.classId !== 'cohort')) {
+        continue;
+      }
+
+      if (existing.length < 6 && !seenKeys.has(scopeKey)) {
+        seenKeys.add(scopeKey);
         existing.push({
           id: sheet.id,
           title: sheet.title,
@@ -765,14 +847,83 @@ export async function syncSentGradeSheetsToConsolidatedCollection(sheets: SentGr
           cohort: sheet.cohort,
           dateSent: sheet.dateSent,
           sentBy: sheet.sentBy,
+          ...(sheet.teacherId ? { teacherId: sheet.teacherId } : {}),
           status: 'approved',
           studentCount: 1,
           studentsSummary: [st]
         });
         perStudentApprovedSheets.set(cleanId, existing);
+        perStudentSheetKeys.set(cleanId, seenKeys);
       }
     }
   }
+
+  // Merge one consolidated record per student (preserving newest month's scores across teacher/director sheets)
+  const perStudentMerged = new Map<string, {
+    studentId: string;
+    studentName?: string;
+    classId?: string;
+    className?: string;
+    unifiedNo?: string;
+    rollNo?: string;
+    month?: string;
+    subjects: { [subjectName: string]: { score: number | null; maxScore: number; examName?: string; notes?: string } };
+    teacherNotes?: string;
+    directorNotes?: string;
+    approvedSheets?: SentGradeSheet[];
+  }>();
+
+  orderedSheets.forEach((sheet) => {
+    const isCohortSheet = sheet.classId === 'cohort';
+    (sheet.studentsSummary || []).forEach((st) => {
+      const cleanId = normalizeId(st.studentId);
+      if (!cleanId) return;
+
+      const existingRec = perStudentMerged.get(cleanId);
+      // Only merge subject map for the student's newest month (skip overwriting with older months' subjects)
+      if (existingRec && existingRec.month && sheet.month && existingRec.month !== sheet.month) {
+        return;
+      }
+      // Never let a legacy cohort sheet overwrite a class-specific sheet for the same month
+      if (isCohortSheet && existingRec && existingRec.classId && existingRec.classId !== 'cohort') {
+        return;
+      }
+
+      const subjectsMap: Record<string, { score: number | null; maxScore: number; examName?: string; notes?: string }> = existingRec
+        ? { ...existingRec.subjects }
+        : {};
+
+      (st.scores || []).forEach((sc) => {
+        if (!sc || !sc.subject) return;
+        const numericScore = sc.score !== null && sc.score !== undefined ? Number(sc.score) : null;
+        const prevSub = subjectsMap[sc.subject];
+        // Never overwrite an existing numeric score with null
+        if (prevSub && prevSub.score !== null && (numericScore === null || Number.isNaN(numericScore))) {
+          return;
+        }
+        subjectsMap[sc.subject] = {
+          score: numericScore !== null && !Number.isNaN(numericScore) ? numericScore : null,
+          maxScore: Number(sc.maxScore) || prevSub?.maxScore || 100,
+          examName: sheet.month,
+          notes: ''
+        };
+      });
+
+      perStudentMerged.set(cleanId, {
+        studentId: cleanId,
+        studentName: st.studentName || existingRec?.studentName,
+        classId: sheet.classId || existingRec?.classId,
+        className: sheet.className || existingRec?.className,
+        unifiedNo: st.unifiedNo || existingRec?.unifiedNo,
+        rollNo: st.rollNo || existingRec?.rollNo,
+        month: sheet.month || existingRec?.month,
+        subjects: subjectsMap,
+        teacherNotes: st.teacherNotes || existingRec?.teacherNotes,
+        directorNotes: st.directorNotes || existingRec?.directorNotes,
+        approvedSheets: perStudentApprovedSheets.get(cleanId)
+      });
+    });
+  });
 
   const records: Array<{
     studentId: string;
@@ -787,58 +938,154 @@ export async function syncSentGradeSheetsToConsolidatedCollection(sheets: SentGr
     directorNotes?: string;
     approvedSheets?: SentGradeSheet[];
   }> = [];
+  const pendingSheetSigUpdates: Array<{ sigKey: string; sig: string }> = [];
 
-  orderedSheets.forEach(sheet => {
-    (sheet.studentsSummary || []).forEach(st => {
-      const cleanId = normalizeId(st.studentId);
-      if (!cleanId) return;
+  perStudentMerged.forEach((rec, cleanId) => {
+    if (scopedIds && !scopedIds.has(cleanId)) return;
+    const sigKey = `${cleanId}_${rec.month || ''}`;
+    const sig = computeRecordSignature(rec) + `_sh:${JSON.stringify((rec.approvedSheets || []).map((s) => `${s.id}:${s.status}`))}`;
+    if (lastSyncedConsolidatedSignatures.get(sigKey) !== sig) {
+      pendingSheetSigUpdates.push({ sigKey, sig });
+      records.push(rec);
+    }
+  });
 
-      const subjectsMap: Record<string, { score: number | null; maxScore: number; examName?: string; notes?: string }> = {};
-      let hasAnyRealScore = false;
-      (st.scores || []).forEach(sc => {
-        const numericScore = sc.score !== null && sc.score !== undefined ? Number(sc.score) : null;
-        if (numericScore !== null && !Number.isNaN(numericScore)) {
-          hasAnyRealScore = true;
-        }
-        subjectsMap[sc.subject] = {
-          score: numericScore,
-          maxScore: Number(sc.maxScore) || 100,
-          examName: sheet.month,
-          notes: ''
-        };
-      });
-
-      const hasNotes = Boolean((st.teacherNotes || '').trim() || (st.directorNotes || '').trim());
-      if (!hasAnyRealScore && !hasNotes) {
-        return;
-      }
-
-      const rec = {
-        studentId: cleanId,
-        studentName: st.studentName,
-        classId: sheet.classId,
-        className: sheet.className,
-        unifiedNo: st.unifiedNo,
-        rollNo: st.rollNo,
-        month: sheet.month,
-        subjects: subjectsMap,
-        teacherNotes: st.teacherNotes,
-        directorNotes: st.directorNotes,
-        approvedSheets: perStudentApprovedSheets.get(cleanId)
-      };
-
-      const sigKey = `${cleanId}_${sheet.month || ''}`;
-      const sig = computeRecordSignature(rec) + `_sh:${rec.approvedSheets?.length || 0}`;
-      if (lastSyncedConsolidatedSignatures.get(sigKey) !== sig) {
+  if (records.length > 0) {
+    const savedOk = await batchSaveStudentsGradesConsolidated(records);
+    if (savedOk) {
+      pendingSheetSigUpdates.forEach(({ sigKey, sig }) => {
         lastSyncedConsolidatedSignatures.set(sigKey, sig);
-        records.push(rec);
+      });
+      persistConsolidatedSignaturesToStorage();
+    }
+    return savedOk;
+  }
+  return true;
+}
+
+/**
+ * After deleting a SentGradeSheet, updates `students_grades/{studentId}` for every affected student:
+ * - If the student still has other approved sheets, re-syncs their consolidated record with only remaining sheets.
+ * - If the student now has zero remaining approved sheets, deletes their consolidated `students_grades/{studentId}` doc
+ *   so deleted grades never remain visible to parents.
+ */
+export async function resyncAndClearDeletedSheetStudents(
+  affectedStudentIds: string[],
+  remainingSheets: SentGradeSheet[]
+): Promise<boolean> {
+  const cleanIds = Array.from(new Set((affectedStudentIds || []).map(normalizeId).filter(Boolean)));
+  if (cleanIds.length === 0) return true;
+
+  // Invalidate cached sync signatures for affected students so updates/deletes are never skipped
+  cleanIds.forEach((cleanId) => {
+    consolidatedRecordMemoryCache.delete(cleanId);
+    Array.from(lastSyncedConsolidatedSignatures.keys()).forEach((k) => {
+      if (k === cleanId || k === `subjects_${cleanId}` || k.startsWith(`${cleanId}_`)) {
+        lastSyncedConsolidatedSignatures.delete(k);
+      }
+    });
+  });
+  persistConsolidatedSignaturesToStorage();
+
+  const remainingApproved = (remainingSheets || []).filter(
+    (s) => s && (s.status === 'approved' || (!s.teacherId && s.status !== 'submitted' && s.status !== 'draft'))
+  );
+
+  const idsStillWithSheets = new Set<string>();
+  remainingApproved.forEach((sh) => {
+    (sh.studentsSummary || []).forEach((st) => {
+      const sid = normalizeId(st.studentId);
+      if (sid && cleanIds.includes(sid)) {
+        idsStillWithSheets.add(sid);
       }
     });
   });
 
-  if (records.length > 0) {
-    persistConsolidatedSignaturesToStorage();
-    await batchSaveStudentsGradesConsolidated(records);
+  const idsToDelete = cleanIds.filter((id) => !idsStillWithSheets.has(id));
+  const idsToResync = Array.from(idsStillWithSheets);
+
+  let ok = true;
+  if (idsToResync.length > 0) {
+    const synced = await syncSentGradeSheetsToConsolidatedCollection(remainingApproved, { onlyStudentIds: idsToResync });
+    if (!synced) ok = false;
+  }
+
+  if (idsToDelete.length > 0 && db && !isFirestoreWriteQuotaExceeded() && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
+    for (let i = 0; i < idsToDelete.length; i += 10) {
+      const wave = idsToDelete.slice(i, i + 10);
+      await Promise.all(
+        wave.map(async (sid) => {
+          try {
+            await deleteFirestoreDocFast('students_grades', sid, { sdkGraceMs: 2500, restTimeoutMs: 7000 });
+            trackFirestoreWrite(1, `مسح درجات محذوفة (${sid})`);
+          } catch (err: any) {
+            if (isQuotaError(err)) markFirestoreWriteQuotaExceeded(err);
+            ok = false;
+          }
+        })
+      );
+    }
+  }
+
+  return ok;
+}
+
+/**
+ * Clears a deleted monthly evaluation (`teacherNotes`/`directorNotes`) from `students_grades/{studentId}`
+ * if that student currently has a consolidated document, and invalidates cached signatures.
+ */
+export async function clearStudentMonthlyEvaluationInConsolidated(
+  studentId: string,
+  month: string
+): Promise<boolean> {
+  const cleanId = normalizeId(studentId);
+  if (!cleanId) return true;
+  consolidatedRecordMemoryCache.delete(cleanId);
+  Array.from(lastSyncedConsolidatedSignatures.keys()).forEach((k) => {
+    if (k === cleanId || k.startsWith(`${cleanId}_`)) {
+      lastSyncedConsolidatedSignatures.delete(k);
+    }
+  });
+  persistConsolidatedSignaturesToStorage();
+
+  if (!db || isFirestoreWriteQuotaExceeded() || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+    return false;
+  }
+
+  try {
+    const { snap } = await getDocCacheFirst(doc(db, 'students_grades', cleanId), {
+      forceServer: true,
+      timeoutMs: 3000
+    });
+    if (!snap || !snap.exists()) return true;
+    const data = snap.data() as ConsolidatedStudentGradeRecord;
+    const targetMonth = String(month || '').trim();
+    const updatedApproved = Array.isArray(data.approvedSheets)
+      ? data.approvedSheets.map((sh) => {
+          if (targetMonth && String(sh.month || '').trim() !== targetMonth) return sh;
+          return {
+            ...sh,
+            studentsSummary: (sh.studentsSummary || []).map((sm) => ({
+              ...sm,
+              teacherNotes: '',
+              directorNotes: ''
+            }))
+          };
+        })
+      : undefined;
+
+    const patch: Record<string, any> = {
+      teacherNotes: '',
+      directorNotes: '',
+      updatedAt: Date.now(),
+      ...(updatedApproved ? { approvedSheets: updatedApproved } : {})
+    };
+    await writeFirestoreDocFast('students_grades', cleanId, patch, { merge: true, sdkGraceMs: 2500, restTimeoutMs: 7000 });
+    trackFirestoreWrite(1, `حذف تقييم شهري (${cleanId})`);
+    return true;
+  } catch (err: any) {
+    if (isQuotaError(err)) markFirestoreWriteQuotaExceeded(err);
+    return false;
   }
 }
 

@@ -4,52 +4,25 @@
  */
 
 /**
- * Persistent 5-Minute Read TTL Cache Registry
- * Prevents repeated Firestore server reads across tab switches, portal switches,
- * window focus events, and reloads within the same 5-minute window.
+ * Per-Session 5-Minute Read TTL Cache Registry
+ * - On every fresh app open / page load, starts empty so startup sync hits the cloud immediately.
+ * - Within the active session, prevents repeated Firestore server reads across tab switches,
+ *   portal switches, and re-renders for at least 5 minutes.
  */
 
 export const DEFAULT_FIRESTORE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes minimum
 
-const STORAGE_KEY = 'school_firestore_read_ttl_v1';
+const LEGACY_STORAGE_KEY = 'school_firestore_read_ttl_v1';
 const memoryTimestamps = new Map<string, number>();
+const sessionServerSyncedKeys = new Set<string>();
 
-function loadPersistedTimestamps(): void {
-  try {
-    if (typeof window === 'undefined' || !window.localStorage) return;
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return;
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object') {
-      const now = Date.now();
-      for (const [k, ts] of Object.entries(parsed)) {
-        const num = Number(ts);
-        if (Number.isFinite(num) && num > 0 && now - num < 60 * 60 * 1000) {
-          memoryTimestamps.set(k, num);
-        }
-      }
-    }
-  } catch {
-    // ignore storage errors
+// Clean up any legacy cross-session TTL persistence so reopening the app always syncs immediately
+try {
+  if (typeof window !== 'undefined' && window.localStorage) {
+    window.localStorage.removeItem(LEGACY_STORAGE_KEY);
   }
-}
-
-loadPersistedTimestamps();
-
-function persistTimestamps(): void {
-  try {
-    if (typeof window === 'undefined' || !window.localStorage) return;
-    const obj: Record<string, number> = {};
-    const now = Date.now();
-    memoryTimestamps.forEach((ts, k) => {
-      if (now - ts < 60 * 60 * 1000) {
-        obj[k] = ts;
-      }
-    });
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
-  } catch {
-    // ignore storage errors
-  }
+} catch {
+  // ignore storage errors
 }
 
 export function isReadCacheFresh(
@@ -63,7 +36,15 @@ export function isReadCacheFresh(
 
 export function markReadCacheFresh(cacheKey: string): void {
   memoryTimestamps.set(cacheKey, Date.now());
-  persistTimestamps();
+  sessionServerSyncedKeys.add(cacheKey);
+}
+
+export function needsInitialSessionServerSync(cacheKey: string): boolean {
+  return !sessionServerSyncedKeys.has(cacheKey);
+}
+
+export function markInitialSessionServerSynced(cacheKey: string): void {
+  sessionServerSyncedKeys.add(cacheKey);
 }
 
 export function invalidateReadCache(cacheKeyPrefix?: string): void {
@@ -76,5 +57,4 @@ export function invalidateReadCache(cacheKeyPrefix?: string): void {
       }
     }
   }
-  persistTimestamps();
 }

@@ -30,8 +30,35 @@ let relayAvailable: boolean | null = null;
 let eventSource: EventSource | null = null;
 let keyUpdateHandler: KeyUpdateCallback | null = null;
 const gradeReportListeners = new Set<GradeReportListener>();
+const DELETED_GRADE_REPORTS_STORAGE_KEY = 'school_deleted_grade_report_ids_v1';
 const cachedRelayGradeReports = new Map<string, SentGradeSheet & { updatedAt?: number }>();
 const deletedGradeReportIds = new Map<string, number>();
+
+try {
+  if (typeof window !== 'undefined' && window.localStorage) {
+    const rawDeleted = window.localStorage.getItem(DELETED_GRADE_REPORTS_STORAGE_KEY);
+    if (rawDeleted) {
+      const parsed = JSON.parse(rawDeleted);
+      if (parsed && typeof parsed === 'object') {
+        for (const [id, ts] of Object.entries(parsed)) {
+          const numTs = Number(ts) || 0;
+          if (id && numTs > 0) deletedGradeReportIds.set(id, numTs);
+        }
+      }
+    }
+  }
+} catch {}
+
+function persistDeletedGradeReportIds(): void {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const entries = Array.from(deletedGradeReportIds.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 120);
+      window.localStorage.setItem(DELETED_GRADE_REPORTS_STORAGE_KEY, JSON.stringify(Object.fromEntries(entries)));
+    }
+  } catch {}
+}
 
 function sortGradeReports(list: SentGradeSheet[]): SentGradeSheet[] {
   return [...list].sort(
@@ -186,7 +213,9 @@ export async function pushLiveRelayGradeReport(report: SentGradeSheet & { update
   if (typeof window === 'undefined' || !report?.id) return false;
   const enriched = { ...report, updatedAt: Number(report.updatedAt) || Date.now() };
   cachedRelayGradeReports.set(report.id, enriched);
-  deletedGradeReportIds.delete(report.id);
+  if (deletedGradeReportIds.delete(report.id)) {
+    persistDeletedGradeReportIds();
+  }
 
   if (relayAvailable === false) return false;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return false;
@@ -215,6 +244,7 @@ export async function deleteLiveRelayGradeReport(reportId: string): Promise<bool
   if (typeof window === 'undefined' || !reportId) return false;
   cachedRelayGradeReports.delete(reportId);
   deletedGradeReportIds.set(reportId, Date.now());
+  persistDeletedGradeReportIds();
 
   if (relayAvailable === false) return false;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return false;
