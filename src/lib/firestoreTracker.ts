@@ -32,9 +32,9 @@ import {
 } from './quotaManager';
 import { isReadCacheFresh, markReadCacheFresh } from './readCache';
 
-export const FIREBASE_PROJECT_ID = firebaseConfigJson.projectId || 'aesthetic-night-p8gvj';
+export const FIREBASE_PROJECT_ID = firebaseConfigJson.projectId || 'madrasa-international';
 export const FIREBASE_DATABASE_ID =
-  firebaseConfigJson.firestoreDatabaseId || 'ai-studio-c3b19e71-cc85-420b-8314-cb9b70b9467c';
+  firebaseConfigJson.firestoreDatabaseId || '(default)';
 
 export const SPARK_DAILY_READ_LIMIT = 50000;
 export const SPARK_DAILY_WRITE_LIMIT = 20000;
@@ -169,6 +169,24 @@ function loadPendingDeltas(): PendingDeltasState {
     utcBuckets: {},
     lastOperation: ''
   };
+}
+
+const ACTIVE_FIREBASE_TARGET_KEY = 'school_active_firebase_target';
+try {
+  if (typeof localStorage !== 'undefined') {
+    const targetSig = `${FIREBASE_PROJECT_ID}:${FIREBASE_DATABASE_ID}`;
+    const prevTarget = localStorage.getItem(ACTIVE_FIREBASE_TARGET_KEY);
+    if (prevTarget && prevTarget !== targetSig) {
+      localStorage.removeItem(METRICS_KEY);
+      localStorage.removeItem(PENDING_DELTAS_KEY);
+      resetFirestoreQuotaBreaker();
+    }
+    if (prevTarget !== targetSig) {
+      localStorage.setItem(ACTIVE_FIREBASE_TARGET_KEY, targetSig);
+    }
+  }
+} catch {
+  // ignore
 }
 
 let pendingState: PendingDeltasState = loadPendingDeltas();

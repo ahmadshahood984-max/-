@@ -29,15 +29,15 @@ import { getAuth } from 'firebase/auth';
 import firebaseConfigJson from '../../firebase-applet-config.json';
 
 const firebaseConfig = {
-  apiKey: firebaseConfigJson.apiKey || "AIzaSyDcSshIC_Rs7m8uOF9OkHIJQ--JTifVKUQ",
-  authDomain: firebaseConfigJson.authDomain || "aesthetic-night-p8gvj.firebaseapp.com",
-  projectId: firebaseConfigJson.projectId || "aesthetic-night-p8gvj",
-  storageBucket: firebaseConfigJson.storageBucket || "aesthetic-night-p8gvj.firebasestorage.app",
-  messagingSenderId: firebaseConfigJson.messagingSenderId || "600017099331",
-  appId: firebaseConfigJson.appId || "1:600017099331:web:23e214f289dbe0ecdc92f6"
+  apiKey: firebaseConfigJson.apiKey || "AIzaSyAP9pcAzPnD-MtTq3HDJPTIRdeDTOly3H8",
+  authDomain: firebaseConfigJson.authDomain || "madrasa-international.firebaseapp.com",
+  projectId: firebaseConfigJson.projectId || "madrasa-international",
+  storageBucket: firebaseConfigJson.storageBucket || "madrasa-international.firebasestorage.app",
+  messagingSenderId: firebaseConfigJson.messagingSenderId || "573753610239",
+  appId: firebaseConfigJson.appId || "1:573753610239:web:39c0921354098948ba21ca"
 };
 
-const databaseId = firebaseConfigJson.firestoreDatabaseId || "ai-studio-c3b19e71-cc85-420b-8314-cb9b70b9467c";
+const databaseId = firebaseConfigJson.firestoreDatabaseId || "(default)";
 
 // Suppress internal WebChannel / transient polling logs in browser console
 try {

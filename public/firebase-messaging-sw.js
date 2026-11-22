@@ -14,12 +14,12 @@ const APP_SHELL_URLS = ['/', '/index.html', '/manifest.json', '/icon.png'];
 // 1. Initialize Firebase App in the Service Worker
 try {
   firebase.initializeApp({
-    apiKey: "AIzaSyDcSshIC_Rs7m8uOF9OkHIJQ--JTifVKUQ",
-    authDomain: "aesthetic-night-p8gvj.firebaseapp.com",
-    projectId: "aesthetic-night-p8gvj",
-    storageBucket: "aesthetic-night-p8gvj.firebasestorage.app",
-    messagingSenderId: "600017099331",
-    appId: "1:600017099331:web:23e214f289dbe0ecdc92f6"
+    apiKey: "AIzaSyAP9pcAzPnD-MtTq3HDJPTIRdeDTOly3H8",
+    authDomain: "madrasa-international.firebaseapp.com",
+    projectId: "madrasa-international",
+    storageBucket: "madrasa-international.firebasestorage.app",
+    messagingSenderId: "573753610239",
+    appId: "1:573753610239:web:39c0921354098948ba21ca"
   });
 
   const messaging = firebase.messaging();

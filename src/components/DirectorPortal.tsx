@@ -87,7 +87,7 @@ import { db } from '../lib/firebase';
 import { collection, addDoc, setDoc, deleteDoc, doc, serverTimestamp, writeBatch, getDocs } from 'firebase/firestore';
 import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead, checkDailyRollover, fetchCentralizedConsumptionOnce, resetCentralizedFirestoreConsumption, calibrateCentralConsumptionBaseline, getTimeUntilFirebaseQuotaReset, probeFirestoreWriteAvailability, SPARK_DAILY_READ_LIMIT, SPARK_DAILY_WRITE_LIMIT, SPARK_STORAGE_LIMIT_MB, QUOTA_WARNING_RATIO, FIREBASE_PROJECT_ID, FIREBASE_DATABASE_ID } from '../lib/firestoreTracker';
 import { calculateStorageUsageReport, measureLiveCloudStorageAudit, StorageUsageReport } from '../lib/storageUsage';
-import { persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate, saveSyncedLocalOnly, recordDeletedStudentIds, queueOfflineNotification, deduplicateGradeSheetsPreservingTeachers, syncLivePortalDataFromServer, flushPendingLocalSyncKeys, FAST_LIVE_SYNC_KEYS } from '../lib/firebaseSync';
+import { persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate, saveSyncedLocalOnly, recordDeletedStudentIds, queueOfflineNotification, deduplicateGradeSheetsPreservingTeachers, syncLivePortalDataFromServer, flushPendingLocalSyncKeys, FAST_LIVE_SYNC_KEYS, SYNC_KEYS } from '../lib/firebaseSync';
 import {
   submitGradeReportToFirestore,
   updateGradeReportInFirestore,
@@ -972,6 +972,12 @@ export default function DirectorPortal({
   const [clipboardModalBody, setClipboardModalBody] = useState('');
   const [clipboardModalText, setClipboardModalText] = useState('');
   const [clipboardModalSuccess, setClipboardModalSuccess] = useState(false);
+  const [lastBackupFile, setLastBackupFile] = useState<{
+    fileName: string;
+    sizeFormatted: string;
+    jsonStr: string;
+    blobUrl: string;
+  } | null>(null);
 
   // States for text-based import pastes
   const [pastedStudentData, setPastedStudentData] = useState('');
@@ -982,6 +988,8 @@ export default function DirectorPortal({
 
   const [pastedBackupData, setPastedBackupData] = useState('');
   const [showPastedBackupInput, setShowPastedBackupInput] = useState(false);
+  const [isUploadingLocalToCloud, setIsUploadingLocalToCloud] = useState(false);
+  const [cloudUploadResult, setCloudUploadResult] = useState<string | null>(null);
 
   const toggleApkMode = (val: boolean) => {
     setApkCompatibilityMode(val);
@@ -5901,39 +5909,225 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     );
   };
 
-  const handleDownloadBackup = () => {
-    const backupData = {
-      teachers,
-      students,
-      classes,
-      parents,
-      grades,
-      attendance,
-      announcements,
-      messages,
-      excuses,
-      directorPassword,
-      system_patches: JSON.parse(localStorage.getItem('system_patches') || '[]'),
-      backupDate: new Date().toISOString()
-    };
-    const jsonStr = JSON.stringify(backupData);
-
-    if (apkCompatibilityMode) {
-      triggerClipboardExport(
-        "📋 نسخ كود النسخة الاحتياطية",
-        "تم نسخ كود النسخة الاحتياطية الكامل للمدرسة بنجاح إلى الحافظة! يمكنك لصقه وحفظه في تطبيق الملاحظات أو إرساله لنفسك، والرجوع لاستعادته بلصقه في أي وقت دون استخدام ملفات.",
-        jsonStr
-      );
-      return;
+  const applyRestoredBackupObject = (backup: any) => {
+    if (!backup || typeof backup !== 'object') {
+      throw new Error('ملف غير صالح');
     }
+    if (Array.isArray(backup.teachers)) {
+      setTeachers(backup.teachers);
+      persistDirectToFirestore('school_teachers', backup.teachers).catch(() => {});
+    }
+    if (Array.isArray(backup.students)) {
+      setStudents(backup.students);
+      persistDirectToFirestore('school_students', backup.students).catch(() => {});
+      syncStudentsDirectoryToFirestore(backup.students).catch(() => {});
+    }
+    if (Array.isArray(backup.classes)) {
+      setClasses(backup.classes);
+      persistDirectToFirestore('school_classes', backup.classes).catch(() => {});
+    }
+    if (Array.isArray(backup.parents)) {
+      setParents(backup.parents);
+      persistDirectToFirestore('school_parents', backup.parents).catch(() => {});
+    }
+    if (Array.isArray(backup.grades)) {
+      setGrades(backup.grades);
+      persistDirectToFirestore('school_grades', backup.grades).catch(() => {});
+    }
+    if (Array.isArray(backup.attendance)) {
+      setAttendance(backup.attendance);
+      persistDirectToFirestore('school_attendance', backup.attendance).catch(() => {});
+    }
+    if (Array.isArray(backup.announcements)) {
+      setAnnouncements(backup.announcements);
+      persistDirectToFirestore('school_announcements', backup.announcements).catch(() => {});
+    }
+    if (Array.isArray(backup.messages)) {
+      setMessages(backup.messages);
+      persistDirectToFirestore('school_messages', backup.messages).catch(() => {});
+    }
+    if (Array.isArray(backup.excuses)) {
+      setExcuses(backup.excuses);
+      persistDirectToFirestore('school_excuses', backup.excuses).catch(() => {});
+    }
+    if (backup.directorPassword && changeDirectorPassword) {
+      changeDirectorPassword(backup.directorPassword);
+      persistDirectToFirestore('school_director_password', backup.directorPassword).catch(() => {});
+    }
+    if (backup.system_patches !== undefined) {
+      try {
+        localStorage.setItem('system_patches', JSON.stringify(backup.system_patches));
+      } catch {}
+    }
+    if (backup.syncedKeys && typeof backup.syncedKeys === 'object') {
+      Object.entries(backup.syncedKeys).forEach(([k, rawVal]) => {
+        if (typeof rawVal === 'string' && SYNC_KEYS.includes(k)) {
+          try {
+            localStorage.setItem(k, rawVal);
+            safeDispatchStorageUpdate(k, rawVal);
+            let parsed: any = rawVal;
+            try { parsed = JSON.parse(rawVal); } catch {}
+            persistDirectToFirestore(k, parsed).catch(() => {});
+            if (k === 'school_sent_grade_sheets' && Array.isArray(parsed)) {
+              syncSentGradeSheetsToConsolidatedCollection(parsed).catch(() => {});
+            }
+          } catch {}
+        }
+      });
+    }
+  };
 
-    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(jsonStr);
-    const downloadAnchor = document.createElement('a');
-    downloadAnchor.setAttribute("href", dataStr);
-    downloadAnchor.setAttribute("download", `نسخة_احتياطية_المدرسة_الدولية_${new Date().toISOString().split('T')[0]}.json`);
-    document.body.appendChild(downloadAnchor);
-    downloadAnchor.click();
-    downloadAnchor.remove();
+  const handleUploadLocalDataToCloud = async () => {
+    if (isUploadingLocalToCloud) return;
+    setIsUploadingLocalToCloud(true);
+    setCloudUploadResult(null);
+    try {
+      resetFirestoreQuotaBreaker();
+
+      const entriesToSync: Array<[string, any]> = [
+        ['school_teachers', teachers],
+        ['school_students', students],
+        ['school_classes', classes],
+        ['school_parents', parents],
+        ['school_grades', grades],
+        ['school_attendance', attendance],
+        ['school_announcements', announcements],
+        ['school_messages', messages],
+        ['school_excuses', excuses],
+        ['school_director_password', directorPassword]
+      ];
+      const addedKeys = new Set(entriesToSync.map(([k]) => k));
+
+      SYNC_KEYS.forEach((k) => {
+        if (addedKeys.has(k)) return;
+        try {
+          const raw = localStorage.getItem(k);
+          if (raw !== null) {
+            let parsed: any = raw;
+            try { parsed = JSON.parse(raw); } catch {}
+            entriesToSync.push([k, parsed]);
+            addedKeys.add(k);
+          }
+        } catch {}
+      });
+
+      let syncedCount = 0;
+      for (let i = 0; i < entriesToSync.length; i += 4) {
+        const batch = entriesToSync.slice(i, i + 4);
+        const results = await Promise.all(
+          batch.map(([key, val]) => persistDirectToFirestore(key, val, { timeoutMs: 8000 }).catch(() => false))
+        );
+        syncedCount += results.filter(Boolean).length;
+      }
+
+      if (students.length > 0) {
+        await syncStudentsDirectoryToFirestore(students).catch(() => {});
+      }
+
+      try {
+        const rawSheets = localStorage.getItem('school_sent_grade_sheets');
+        if (rawSheets) {
+          const parsedSheets = JSON.parse(rawSheets);
+          if (Array.isArray(parsedSheets) && parsedSheets.length > 0) {
+            await syncSentGradeSheetsToConsolidatedCollection(parsedSheets).catch(() => {});
+          }
+        }
+      } catch {}
+
+      setCloudUploadResult(
+        `✅ تم رفع ومزامنة ${syncedCount} من أصل ${entriesToSync.length} سجل إلى سحابة (${FIREBASE_PROJECT_ID}) بنجاح! بياناتك أصبحت متاحة الآن على جميع الأجهزة وبوابات المعلمين وأولياء الأمور.`
+      );
+    } catch (err: any) {
+      setCloudUploadResult(`⚠️ تعذر إكمال الرفع للسحابة: ${err?.message || 'تحقق من الاتصال بالإنترنت'}`);
+    } finally {
+      setIsUploadingLocalToCloud(false);
+    }
+  };
+
+  const handleDownloadBackup = () => {
+    try {
+      let parsedPatches: any[] = [];
+      try {
+        parsedPatches = JSON.parse(localStorage.getItem('system_patches') || '[]');
+      } catch {
+        parsedPatches = [];
+      }
+
+      const syncedKeys: Record<string, string> = {};
+      SYNC_KEYS.forEach((k) => {
+        try {
+          const val = localStorage.getItem(k);
+          if (val !== null) {
+            syncedKeys[k] = val;
+          }
+        } catch {}
+      });
+
+      const backupData = {
+        teachers,
+        students,
+        classes,
+        parents,
+        grades,
+        attendance,
+        announcements,
+        messages,
+        excuses,
+        directorPassword,
+        system_patches: parsedPatches,
+        syncedKeys,
+        backupDate: new Date().toISOString()
+      };
+      const jsonStr = JSON.stringify(backupData);
+      const dateTag = new Date().toISOString().split('T')[0];
+      const fileName = `نسخة_احتياطية_المدرسة_الدولية_${dateTag}.json`;
+      const blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8' });
+      const sizeKb = blob.size / 1024;
+      const sizeFormatted = sizeKb >= 1024 ? `${(sizeKb / 1024).toFixed(2)} MB` : `${Math.max(1, Math.round(sizeKb))} KB`;
+      const blobUrl = URL.createObjectURL(blob);
+
+      setLastBackupFile((prev) => {
+        if (prev?.blobUrl) {
+          try { URL.revokeObjectURL(prev.blobUrl); } catch {}
+        }
+        return { fileName, sizeFormatted, jsonStr, blobUrl };
+      });
+
+      const downloadAnchor = document.createElement('a');
+      downloadAnchor.href = blobUrl;
+      downloadAnchor.download = fileName;
+      downloadAnchor.rel = 'noopener';
+      downloadAnchor.style.display = 'none';
+      document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      setTimeout(() => {
+        try { downloadAnchor.remove(); } catch {}
+      }, 250);
+    } catch (err: any) {
+      alert(`تعذر تجهيز النسخة الاحتياطية: ${err?.message || 'خطأ غير متوقع'}`);
+    }
+  };
+
+  const handleShareBackupFile = async () => {
+    if (!lastBackupFile) return;
+    try {
+      const file = new File([lastBackupFile.jsonStr], lastBackupFile.fileName, { type: 'application/json' });
+      if (typeof navigator !== 'undefined' && typeof (navigator as any).canShare === 'function' && (navigator as any).canShare({ files: [file] })) {
+        await (navigator as any).share({
+          files: [file],
+          title: 'نسخة احتياطية - المدرسة الدولية',
+          text: `نسخة احتياطية كاملة (${lastBackupFile.sizeFormatted})`
+        });
+        return;
+      }
+    } catch (err: any) {
+      if (err?.name === 'AbortError') return;
+    }
+    triggerClipboardExport(
+      '📋 حفظ / نسخ كود النسخة الاحتياطية',
+      'إذا منع المتصفح تنزيل الملف مباشرة، يمكنك نسخ الكود الاحتياطي كاملاً من المربع أدناه ولصقه في تطبيق الملاحظات أو استعادته لاحقاً:',
+      lastBackupFile.jsonStr
+    );
   };
 
   const handleRestoreBackupFromText = (pastedJsonText: string) => {
@@ -5944,56 +6138,29 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     try {
       const backup = JSON.parse(pastedJsonText.trim());
       if (confirm('هل أنت متأكد من استعادة النسخة الاحتياطية؟ سيؤدي ذلك إلى استبدال كافة البيانات الحالية بالبيانات الملصقة.')) {
-        if (backup.teachers) setTeachers(backup.teachers);
-        if (backup.students) setStudents(backup.students);
-        if (backup.classes) setClasses(backup.classes);
-        if (backup.parents) setParents(backup.parents);
-        if (backup.grades) setGrades(backup.grades);
-        if (backup.attendance) setAttendance(backup.attendance);
-        if (backup.announcements) setAnnouncements(backup.announcements);
-        if (backup.messages) setMessages(backup.messages);
-        if (backup.excuses) setExcuses(backup.excuses);
-        if (backup.directorPassword && changeDirectorPassword) {
-          changeDirectorPassword(backup.directorPassword);
-        }
-        if (backup.system_patches) {
-          localStorage.setItem('system_patches', JSON.stringify(backup.system_patches));
-        }
+        applyRestoredBackupObject(backup);
         setPastedBackupData('');
         setShowPastedBackupInput(false);
         alert('تم استعادة النسخة الاحتياطية بنجاح وتحديث كافة البيانات! 🔄');
       }
-    } catch (err) {
+    } catch {
       alert('فشلت قراءة كود النسخة الاحتياطية. يرجى التأكد من صحة النص البرمجي الاحتياطي ولصقه كاملاً.');
     }
   };
 
   const handleRestoreBackup = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (evt) => {
       try {
         const backup = JSON.parse(evt.target?.result as string);
         if (confirm('هل أنت متأكد من استعادة النسخة الاحتياطية؟ سيؤدي ذلك إلى استبدال كافة البيانات الحالية بالبيانات المرفوعة.')) {
-          if (backup.teachers) setTeachers(backup.teachers);
-          if (backup.students) setStudents(backup.students);
-          if (backup.classes) setClasses(backup.classes);
-          if (backup.parents) setParents(backup.parents);
-          if (backup.grades) setGrades(backup.grades);
-          if (backup.attendance) setAttendance(backup.attendance);
-          if (backup.announcements) setAnnouncements(backup.announcements);
-          if (backup.messages) setMessages(backup.messages);
-          if (backup.excuses) setExcuses(backup.excuses);
-          if (backup.directorPassword && changeDirectorPassword) {
-            changeDirectorPassword(backup.directorPassword);
-          }
-          if (backup.system_patches) {
-            localStorage.setItem('system_patches', JSON.stringify(backup.system_patches));
-          }
+          applyRestoredBackupObject(backup);
           alert('تم استعادة النسخة الاحتياطية بنجاح وتحديث كافة البيانات! 🔄');
         }
-      } catch (err) {
+      } catch {
         alert('فشلت قراءة الملف. يرجى التأكد من اختيار ملف نسخة احتياطية صالح بتنسيق JSON.');
       }
     };
@@ -14356,11 +14523,45 @@ ${sampleEval}
                     <button
                       type="button"
                       onClick={handleDownloadBackup}
-                      className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-extrabold text-xs px-3.5 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 border border-indigo-200"
+                      className="bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-xs px-3.5 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-sm shadow-indigo-200"
                       title="تنزيل نسخة احتياطية كاملة لكافة بيانات المدرسة"
                     >
-                      <Download className="w-4 h-4 text-indigo-600" />
+                      <Download className="w-4 h-4 text-indigo-100" />
                       <span>حفظ نسخة احتياطية 💾</span>
+                    </button>
+                    <label
+                      className="bg-amber-50 hover:bg-amber-100 text-amber-800 font-extrabold text-xs px-3.5 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 border border-amber-200"
+                      title="رفع واستعادة ملف نسخة احتياطية (.json)"
+                    >
+                      <Upload className="w-4 h-4 text-amber-600" />
+                      <span>استعادة نسخة احتياطية 📥</span>
+                      <input
+                        type="file"
+                        accept=".json,application/json"
+                        onChange={handleRestoreBackup}
+                        className="hidden"
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setShowPastedBackupInput(prev => !prev)}
+                      className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs px-3 py-2.5 rounded-xl transition cursor-pointer"
+                    >
+                      📋 لصق نسخة نصية
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleUploadLocalDataToCloud}
+                      disabled={isUploadingLocalToCloud}
+                      className="bg-sky-600 hover:bg-sky-700 disabled:opacity-60 text-white font-extrabold text-xs px-3.5 py-2.5 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-sm shadow-sky-200"
+                      title="رفع كافة البيانات الموجودة على هذا الجهاز إلى قاعدة البيانات السحابية النشطة"
+                    >
+                      {isUploadingLocalToCloud ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Database className="w-4 h-4 text-sky-100" />
+                      )}
+                      <span>{isUploadingLocalToCloud ? 'جاري الرفع للسحابة...' : 'رفع البيانات الحالية للسحابة ☁️'}</span>
                     </button>
                   </div>
                   <div className="text-right">
@@ -14372,6 +14573,86 @@ ${sampleEval}
                     </p>
                   </div>
                 </div>
+
+                {cloudUploadResult && (
+                  <div className={`rounded-2xl p-3.5 text-xs font-bold text-right border ${cloudUploadResult.startsWith('✅') ? 'bg-emerald-50 border-emerald-200 text-emerald-900' : 'bg-amber-50 border-amber-200 text-amber-900'}`}>
+                    {cloudUploadResult}
+                  </div>
+                )}
+
+                {lastBackupFile && (
+                  <div className="bg-indigo-50/80 border border-indigo-200 rounded-2xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-right">
+                    <div className="space-y-0.5">
+                      <div className="text-xs font-extrabold text-indigo-950">
+                        ✅ تم تجهيز ملف النسخة الاحتياطية الكاملة ({lastBackupFile.sizeFormatted})
+                      </div>
+                      <div className="text-[11px] text-indigo-700 font-mono truncate max-w-xs sm:max-w-md" dir="ltr">
+                        {lastBackupFile.fileName}
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <a
+                        href={lastBackupFile.blobUrl}
+                        download={lastBackupFile.fileName}
+                        className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[11px] px-3 py-1.5 rounded-xl transition flex items-center gap-1"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>تنزيل الملف</span>
+                      </a>
+                      <button
+                        type="button"
+                        onClick={handleShareBackupFile}
+                        className="bg-white hover:bg-indigo-100 text-indigo-700 border border-indigo-200 font-bold text-[11px] px-3 py-1.5 rounded-xl transition cursor-pointer flex items-center gap-1"
+                      >
+                        <Share2 className="w-3.5 h-3.5" />
+                        <span>حفظ / مشاركة على الهاتف</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => triggerClipboardExport(
+                          '📋 كود النسخة الاحتياطية الكامل',
+                          'يمكنك نسخ كود النسخة الاحتياطية كاملاً من المربع أدناه وحفظه كملف نصي أو في الملاحظات:',
+                          lastBackupFile.jsonStr
+                        )}
+                        className="bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 font-bold text-[11px] px-3 py-1.5 rounded-xl transition cursor-pointer"
+                      >
+                        📋 نسخ كنص
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {showPastedBackupInput && (
+                  <div className="bg-amber-50/70 border border-amber-200 rounded-2xl p-4 space-y-2.5 text-right">
+                    <label className="block text-xs font-extrabold text-amber-950">
+                      ألصق كود النسخة الاحتياطية (JSON) لاستعادة كافة بيانات المدرسة:
+                    </label>
+                    <textarea
+                      value={pastedBackupData}
+                      onChange={e => setPastedBackupData(e.target.value)}
+                      rows={4}
+                      dir="ltr"
+                      placeholder='{"teachers": [...], "students": [...]}'
+                      className="w-full rounded-xl border border-amber-300 bg-white p-2.5 text-xs font-mono text-slate-700 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                    />
+                    <div className="flex justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => { setShowPastedBackupInput(false); setPastedBackupData(''); }}
+                        className="px-3 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer"
+                      >
+                        إلغاء
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleRestoreBackupFromText(pastedBackupData)}
+                        className="px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-xl cursor-pointer"
+                      >
+                        استعادة الآن 🔄
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 {/* Category Selection Tabs */}
                 <div className="flex flex-wrap gap-1.5 justify-end border-b border-slate-100 pb-3">
@@ -18136,6 +18417,65 @@ ${smartUrl}
               </div>
             );
           })()}
+        </AnimatePresence>
+
+        {/* Clipboard & Backup Text Export Fallback Modal */}
+        <AnimatePresence>
+          {showClipboardModal && (
+            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-[9999]">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="bg-white rounded-3xl max-w-lg w-full p-5 shadow-2xl border border-slate-100 space-y-3.5 text-right"
+                style={{ direction: 'rtl' }}
+              >
+                <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                  <h3 className="font-extrabold text-sm text-slate-800">{clipboardModalTitle}</h3>
+                  <button
+                    type="button"
+                    onClick={() => setShowClipboardModal(false)}
+                    className="p-1.5 text-slate-400 hover:text-slate-600 rounded-xl hover:bg-slate-50 cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+                <p className="text-xs text-slate-600 leading-relaxed">{clipboardModalBody}</p>
+                {clipboardModalSuccess && (
+                  <div className="text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2">
+                    ✅ تم النسخ إلى الحافظة بنجاح!
+                  </div>
+                )}
+                <textarea
+                  readOnly
+                  value={clipboardModalText.length > 150000 ? `${clipboardModalText.slice(0, 150000)}\n... (النص طويل جداً، استخدم زر النسخ بالأسفل)` : clipboardModalText}
+                  onFocus={(e) => e.currentTarget.select()}
+                  rows={5}
+                  dir="ltr"
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50 p-2.5 text-[11px] font-mono text-slate-700"
+                />
+                <div className="flex items-center justify-end gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const ok = await copyToClipboard(clipboardModalText);
+                      setClipboardModalSuccess(ok);
+                    }}
+                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl cursor-pointer"
+                  >
+                    📋 نسخ الكل الآن
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowClipboardModal(false)}
+                    className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl cursor-pointer"
+                  >
+                    إغلاق
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
         </AnimatePresence>
 
         {/* Floating Copy Toast Notification */}
