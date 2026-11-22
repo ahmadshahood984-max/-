@@ -4,7 +4,7 @@
  */
 
 import { db, getDocCacheFirst, writeFirestoreDocFast } from './firebase';
-import { collection, doc, getDocFromServer, getDocsFromCache, getDocsFromServer, onSnapshot, setDoc } from 'firebase/firestore';
+import { collection, doc, documentId, enableNetwork, getDocsFromCache, getDocsFromServer, onSnapshot, query, setDoc, where } from 'firebase/firestore';
 import { trackFirestoreRead, trackFirestoreWrite } from './firestoreTracker';
 import { sanitizeAndDeduplicateStudents } from './studentDeduplicator';
 import {
@@ -22,7 +22,7 @@ import {
   pushLiveRelayKey,
   reconnectLiveRelayIfNeeded
 } from './liveRelayClient';
-import { syncSentGradeSheetsToConsolidatedCollection, flushPendingGradeBatches } from './studentGradesQuery';
+import { flushPendingGradeBatches } from './studentGradesQuery';
 import {
   requestPersistentStorage,
   saveToOfflineVault,
@@ -212,149 +212,220 @@ const latestCollectionSnapshots = new Map<string, { data: any; fromCache: boolea
 const debouncedCloudWriteTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const DEBOUNCED_TYPING_KEYS = new Set<string>(['school_grades', 'school_monthly_evaluations']);
 
-// Single-document cross-device Sync Pulse (`school_live_data/_sync_pulse`)
-// Gives instant PC <-> Phone live parity for Director & Teacher portals using only 1 tiny signal doc
+// Real-time Firestore `onSnapshot` listeners for instant PC <-> Phone / Android APK sync
 const SYNC_PULSE_DOC_ID = '_sync_pulse';
-const SYNC_DEVICE_TAB_ID = `dev_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-const appBootTimestamp = Date.now();
-const pendingPulseKeys = new Set<string>();
-let syncPulseTimer: ReturnType<typeof setTimeout> | null = null;
-let syncPulseUnsubscribe: (() => void) | null = null;
-let lastHandledPulseNonce = '';
-let lastHandledPulseUpdatedAt = 0;
+let schoolLiveDataColUnsubscribe: (() => void) | null = null;
+let schoolLiveDataReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let parentScopedUnsubscribes: Array<() => void> = [];
+let parentScopedReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-function scheduleCrossDeviceSyncPulse(changedKey: string) {
-  if (!changedKey || changedKey === SYNC_PULSE_DOC_ID) return;
-  if (!db || isFirestoreWriteQuotaExceeded()) return;
+export function notifyCrossDeviceKeyChanged(_changedKey: string): void {
+  // Handled natively by real-time Firestore `onSnapshot` on `school_live_data` and `grade_reports`
+  if (typeof window !== 'undefined' && (_changedKey === 'grade_reports' || _changedKey === 'school_sent_grade_sheets')) {
+    invalidateReadCache('grade_reports:all');
+  }
+}
+
+function stopSchoolLiveDataCollectionListener(): void {
+  if (schoolLiveDataReconnectTimer) {
+    clearTimeout(schoolLiveDataReconnectTimer);
+    schoolLiveDataReconnectTimer = null;
+  }
+  if (schoolLiveDataColUnsubscribe) {
+    try {
+      schoolLiveDataColUnsubscribe();
+    } catch {}
+    schoolLiveDataColUnsubscribe = null;
+  }
+}
+
+function stopParentScopedRealtimeListeners(): void {
+  if (parentScopedReconnectTimer) {
+    clearTimeout(parentScopedReconnectTimer);
+    parentScopedReconnectTimer = null;
+  }
+  if (parentScopedUnsubscribes.length > 0) {
+    parentScopedUnsubscribes.forEach((unsub) => {
+      try {
+        unsub();
+      } catch {}
+    });
+    parentScopedUnsubscribes = [];
+  }
+}
+
+function startSchoolLiveDataCollectionListener(): void {
+  if (schoolLiveDataColUnsubscribe || !db || isStudentOrParentPortal()) return;
+  if (isFirestoreReadQuotaExceeded()) return;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
 
-  pendingPulseKeys.add(changedKey);
-  if (syncPulseTimer !== null) return;
-
-  syncPulseTimer = setTimeout(() => {
-    syncPulseTimer = null;
-    if (pendingPulseKeys.size === 0 || !db || isFirestoreWriteQuotaExceeded()) {
-      pendingPulseKeys.clear();
-      return;
-    }
-    const keysBatch = Array.from(pendingPulseKeys);
-    pendingPulseKeys.clear();
-
-    const now = Date.now();
-    const nonce = `${SYNC_DEVICE_TAB_ID}_${now}_${Math.random().toString(36).slice(2, 6)}`;
-    lastHandledPulseNonce = nonce;
-    lastHandledPulseUpdatedAt = Math.max(lastHandledPulseUpdatedAt, now);
-
-    setDoc(doc(db, 'school_live_data', SYNC_PULSE_DOC_ID), {
-      keys: keysBatch,
-      updatedAt: now,
-      senderId: SYNC_DEVICE_TAB_ID,
-      nonce
-    }).catch(() => {});
-  }, 250);
-}
-
-export function notifyCrossDeviceKeyChanged(changedKey: string): void {
-  scheduleCrossDeviceSyncPulse(changedKey);
-}
-
-function handleIncomingSyncPulseData(pulseData: any, fromCache: boolean): void {
-  if (!pulseData || typeof pulseData !== 'object') return;
-  if (fromCache) return;
-  if (pulseData.senderId === SYNC_DEVICE_TAB_ID) return;
-
-  const nonce = typeof pulseData.nonce === 'string' ? pulseData.nonce : '';
-  const updatedAt = Number(pulseData.updatedAt) || 0;
-  if (nonce && nonce === lastHandledPulseNonce) return;
-  if (!nonce && updatedAt > 0 && updatedAt <= lastHandledPulseUpdatedAt) return;
-
-  // Ignore historical pulses written before this tab booted (initial boot already syncs fresh from server)
-  if (lastHandledPulseUpdatedAt === 0 && updatedAt > 0 && updatedAt < appBootTimestamp - 2000) {
-    lastHandledPulseNonce = nonce;
-    lastHandledPulseUpdatedAt = updatedAt;
-    return;
+  if (schoolLiveDataReconnectTimer) {
+    clearTimeout(schoolLiveDataReconnectTimer);
+    schoolLiveDataReconnectTimer = null;
   }
 
-  if (nonce) lastHandledPulseNonce = nonce;
-  if (updatedAt > lastHandledPulseUpdatedAt) lastHandledPulseUpdatedAt = updatedAt;
-
-  const rawKeys: string[] = Array.isArray(pulseData.keys) ? pulseData.keys : [];
-  const isParent = isStudentOrParentPortal();
-  const allowedKeysPool = isParent ? PARENT_REALTIME_KEYS : SYNC_KEYS;
-  const syncKeysChanged = rawKeys.filter((k) => allowedKeysPool.includes(k));
-  const gradeReportsChanged =
-    rawKeys.includes('grade_reports') || rawKeys.includes('school_sent_grade_sheets');
-
-  if (syncKeysChanged.length > 0) {
-    syncLivePortalDataFromServer({
-      keys: syncKeysChanged,
-      bypassCache: true,
-      forceServer: true
-    }).catch(() => {});
-  }
-
-  if (gradeReportsChanged && typeof window !== 'undefined') {
-    invalidateReadCache('grade_reports:all');
-    window.dispatchEvent(new CustomEvent('school_grade_reports_pulse'));
-    if (isParent) {
-      window.dispatchEvent(new CustomEvent('school_force_parent_refresh'));
-    }
-  }
-}
-
-function startSyncPulseListener(): void {
-  if (syncPulseUnsubscribe || !db || isStudentOrParentPortal()) return;
-  if (isFirestoreReadQuotaExceeded()) return;
+  let isInitialSnapshot = true;
   try {
-    syncPulseUnsubscribe = onSnapshot(
-      doc(db, 'school_live_data', SYNC_PULSE_DOC_ID),
-      (snap) => {
-        if (!snap.exists()) return;
-        const fromCache = !!snap.metadata?.fromCache;
-        if (!fromCache) {
-          trackFirestoreRead(1, 'نبض المزامنة المباشرة بين الأجهزة');
+    schoolLiveDataColUnsubscribe = onSnapshot(
+      collection(db, 'school_live_data'),
+      (snapshot) => {
+        const changes = snapshot.docChanges();
+        let serverReadsCount = 0;
+        let receivedRemoteServerUpdate = false;
+
+        changes.forEach((change) => {
+          if (change.type === 'removed') return;
+          const key = change.doc.id;
+          if (!key || key === SYNC_PULSE_DOC_ID || !SYNC_KEYS.includes(key)) return;
+
+          const fromCache = !!change.doc.metadata?.fromCache;
+          const hasPendingWrites = !!change.doc.metadata?.hasPendingWrites;
+          const docData = change.doc.data();
+
+          latestCollectionSnapshots.set(key, { data: docData, fromCache });
+
+          if (!fromCache && !hasPendingWrites) {
+            serverReadsCount += 1;
+            markReadCacheFresh(`school_live_data:${key}`);
+            if (!isInitialSnapshot) {
+              receivedRemoteServerUpdate = true;
+            }
+          }
+
+          processRemoteSnapshotDoc(key, docData, fromCache);
+        });
+
+        if (serverReadsCount > 0) {
+          trackFirestoreRead(
+            serverReadsCount,
+            isInitialSnapshot ? 'مزامنة مبدئية مباشرة' : 'تحديث فوري بين الأجهزة'
+          );
         }
-        handleIncomingSyncPulseData(snap.data(), fromCache);
+
+        if (!isInitialSnapshot && receivedRemoteServerUpdate && typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('school_live_sync_completed', {
+            detail: { ok: true, ts: Date.now(), source: 'realtime_snapshot' }
+          }));
+        }
+
+        isInitialSnapshot = false;
       },
       (err) => {
+        if (schoolLiveDataColUnsubscribe) {
+          try {
+            schoolLiveDataColUnsubscribe();
+          } catch {}
+          schoolLiveDataColUnsubscribe = null;
+        }
         if (isQuotaError(err)) {
           markFirestoreReadQuotaExceeded(err);
+          return;
+        }
+        const msg = String((err as any)?.message || err || '').toLowerCase();
+        if (msg.includes('permission') || msg.includes('missing or insufficient')) {
+          return;
+        }
+        if (!schoolLiveDataReconnectTimer && typeof window !== 'undefined') {
+          schoolLiveDataReconnectTimer = setTimeout(() => {
+            schoolLiveDataReconnectTimer = null;
+            if (!isStudentOrParentPortal()) {
+              startSchoolLiveDataCollectionListener();
+            }
+          }, 6000);
         }
       }
     );
   } catch {
-    // ignore non-critical listener init errors
+    schoolLiveDataColUnsubscribe = null;
   }
 }
 
-function stopSyncPulseListener(): void {
-  if (syncPulseUnsubscribe) {
-    try {
-      syncPulseUnsubscribe();
-    } catch {}
-    syncPulseUnsubscribe = null;
-  }
-}
-
-let lastPulseResumeCheckAt = 0;
-
-async function checkSyncPulseOnResume(): Promise<void> {
-  if (!db || isFirestoreReadQuotaExceeded()) return;
+function startParentScopedRealtimeListeners(): void {
+  if (parentScopedUnsubscribes.length > 0 || !db || !isStudentOrParentPortal()) return;
+  if (isFirestoreReadQuotaExceeded()) return;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
-  const now = Date.now();
-  if (now - lastPulseResumeCheckAt < 10000) return;
-  lastPulseResumeCheckAt = now;
+
+  if (parentScopedReconnectTimer) {
+    clearTimeout(parentScopedReconnectTimer);
+    parentScopedReconnectTimer = null;
+  }
+
   try {
-    const snap = await Promise.race([
-      getDocFromServer(doc(db, 'school_live_data', SYNC_PULSE_DOC_ID)),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000))
-    ]);
-    if (snap && snap.exists()) {
-      trackFirestoreRead(1, 'فحص تحديثات الأجهزة عند العودة');
-      handleIncomingSyncPulseData(snap.data(), false);
+    const chunks: string[][] = [];
+    for (let i = 0; i < PARENT_REALTIME_KEYS.length; i += 30) {
+      chunks.push(PARENT_REALTIME_KEYS.slice(i, i + 30));
     }
-  } catch (err: any) {
-    if (isQuotaError(err)) markFirestoreReadQuotaExceeded(err);
+
+    chunks.forEach((keyChunk) => {
+      let isInitialChunkSnapshot = true;
+      const q = query(collection(db, 'school_live_data'), where(documentId(), 'in', keyChunk));
+      const unsub = onSnapshot(
+        q,
+        (snapshot) => {
+          let serverReadsCount = 0;
+          let receivedRemoteUpdate = false;
+
+          snapshot.docChanges().forEach((change) => {
+            if (change.type === 'removed') return;
+            const key = change.doc.id;
+            if (!key || !PARENT_REALTIME_KEYS.includes(key)) return;
+
+            const fromCache = !!change.doc.metadata?.fromCache;
+            const hasPendingWrites = !!change.doc.metadata?.hasPendingWrites;
+            const docData = change.doc.data();
+
+            latestCollectionSnapshots.set(key, { data: docData, fromCache });
+
+            if (!fromCache && !hasPendingWrites) {
+              serverReadsCount += 1;
+              markReadCacheFresh(`school_live_data:${key}`);
+              if (!isInitialChunkSnapshot) {
+                receivedRemoteUpdate = true;
+              }
+            }
+
+            processRemoteSnapshotDoc(key, docData, fromCache);
+          });
+
+          if (serverReadsCount > 0) {
+            trackFirestoreRead(
+              serverReadsCount,
+              isInitialChunkSnapshot ? 'جلب إعدادات ولي الأمر المباشرة' : 'تحديث فوري لإعدادات المدرسة'
+            );
+          }
+
+          if (!isInitialChunkSnapshot && receivedRemoteUpdate && typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('school_live_sync_completed', {
+              detail: { ok: true, ts: Date.now(), source: 'parent_realtime_snapshot' }
+            }));
+          }
+
+          isInitialChunkSnapshot = false;
+        },
+        (err) => {
+          stopParentScopedRealtimeListeners();
+          if (isQuotaError(err)) {
+            markFirestoreReadQuotaExceeded(err);
+            return;
+          }
+          const msg = String((err as any)?.message || err || '').toLowerCase();
+          if (msg.includes('permission') || msg.includes('missing or insufficient')) {
+            return;
+          }
+          if (!parentScopedReconnectTimer && typeof window !== 'undefined') {
+            parentScopedReconnectTimer = setTimeout(() => {
+              parentScopedReconnectTimer = null;
+              if (isStudentOrParentPortal()) {
+                startParentScopedRealtimeListeners();
+              }
+            }, 6000);
+          }
+        }
+      );
+      parentScopedUnsubscribes.push(unsub);
+    });
+  } catch {
+    stopParentScopedRealtimeListeners();
   }
 }
 
@@ -369,8 +440,11 @@ const originalRemoveItem = localStorage.removeItem.bind(localStorage);
  */
 export function saveLocalSeedWithoutCloudWrite(key: string, value: string): void {
   isRemoteSyncing = true;
-  safeSetLocalItem(key, value);
-  isRemoteSyncing = false;
+  try {
+    safeSetLocalItem(key, value);
+  } finally {
+    isRemoteSyncing = false;
+  }
 }
 
 /**
@@ -381,8 +455,11 @@ export function saveSyncedLocalOnly(key: string, value: string): void {
   const existing = safeGetLocalItem(key);
   if (existing === value) return;
   isRemoteSyncing = true;
-  safeSetLocalItem(key, value);
-  isRemoteSyncing = false;
+  try {
+    safeSetLocalItem(key, value);
+  } finally {
+    isRemoteSyncing = false;
+  }
   lastSyncedValues.set(key, value);
   setKeySyncMeta(key, Date.now(), false);
   saveToOfflineVault(key, value, Date.now(), false).catch(() => {});
@@ -406,12 +483,19 @@ function safeSetLocalItem(key: string, value: string): void {
   }
 }
 
+let inMemorySyncMetaCache: Record<string, LocalKeySyncMeta> | null = null;
+
 function loadLocalSyncMeta(): Record<string, LocalKeySyncMeta> {
+  if (inMemorySyncMetaCache) return inMemorySyncMetaCache;
   try {
     const raw = safeGetLocalItem(LOCAL_SYNC_META_KEY);
-    if (raw) return JSON.parse(raw) || {};
+    if (raw) {
+      inMemorySyncMetaCache = JSON.parse(raw) || {};
+      return inMemorySyncMetaCache!;
+    }
   } catch {}
-  return {};
+  inMemorySyncMetaCache = {};
+  return inMemorySyncMetaCache;
 }
 
 export function getOfflineSyncStatus(): OfflineSyncStatus {
@@ -455,7 +539,10 @@ function setKeySyncMeta(key: string, updatedAt: number, pendingSync: boolean) {
   try {
     const all = loadLocalSyncMeta();
     all[key] = { updatedAt, pendingSync };
-    safeSetLocalItem(LOCAL_SYNC_META_KEY, JSON.stringify(all));
+    inMemorySyncMetaCache = all;
+    const serialized = JSON.stringify(all);
+    safeSetLocalItem(LOCAL_SYNC_META_KEY, serialized);
+    saveToOfflineVault(LOCAL_SYNC_META_KEY, serialized, updatedAt, false).catch(() => {});
   } catch {}
   if (!pendingSync) {
     lastSyncedTimestamp = Math.max(lastSyncedTimestamp || 0, updatedAt);
@@ -775,10 +862,13 @@ try {
     realtimeChannel.onmessage = (event) => {
       if (event?.data?.key && event?.data?.value) {
         const { key, value } = event.data;
-        if (localStorage.getItem(key) !== value) {
+        if (safeGetLocalItem(key) !== value) {
           isRemoteSyncing = true;
-          originalSetItem(key, value);
-          isRemoteSyncing = false;
+          try {
+            safeSetLocalItem(key, value);
+          } finally {
+            isRemoteSyncing = false;
+          }
           safeDispatchStorageUpdate(key, value);
         }
       }
@@ -820,6 +910,29 @@ export async function hydrateFromOfflineVault(): Promise<boolean> {
     for (const item of items) {
       if (!item || !item.key || typeof item.value !== 'string') continue;
 
+      if (item.key === LOCAL_SYNC_META_KEY) {
+        try {
+          const parsedVaultMeta = JSON.parse(item.value);
+          if (parsedVaultMeta && typeof parsedVaultMeta === 'object') {
+            const currentMeta = loadLocalSyncMeta();
+            let mergedChanged = false;
+            Object.entries(parsedVaultMeta).forEach(([k, v]: [string, any]) => {
+              if (!v || typeof v !== 'object') return;
+              const cur = currentMeta[k];
+              if (!cur || (Number(v.updatedAt) || 0) > (Number(cur.updatedAt) || 0)) {
+                currentMeta[k] = v;
+                mergedChanged = true;
+              }
+            });
+            if (mergedChanged) {
+              inMemorySyncMetaCache = currentMeta;
+              safeSetLocalItem(LOCAL_SYNC_META_KEY, JSON.stringify(currentMeta));
+            }
+          }
+        } catch {}
+        continue;
+      }
+
       if (item.key === DELETED_STUDENTS_KEY) {
         const existing = safeGetLocalItem(DELETED_STUDENTS_KEY);
         if (!existing) {
@@ -838,8 +951,11 @@ export async function hydrateFromOfflineVault(): Promise<boolean> {
 
       if ((isVaultNewer && localVal !== item.value) || (isLocalMissingOrEmpty && vaultHasData)) {
         isRemoteSyncing = true;
-        safeSetLocalItem(item.key, item.value);
-        isRemoteSyncing = false;
+        try {
+          safeSetLocalItem(item.key, item.value);
+        } finally {
+          isRemoteSyncing = false;
+        }
         setKeySyncMeta(item.key, item.updatedAt, item.pendingSync);
         safeDispatchStorageUpdate(item.key, item.value);
         restoredAny = true;
@@ -961,7 +1077,7 @@ export async function persistDirectToFirestore(
       'school_live_data',
       key,
       { data: cloudPayload, updatedAt: now },
-      { merge: true, sdkGraceMs: 4000, restTimeoutMs: 9000 }
+      { merge: true, sdkGraceMs: 1500, restTimeoutMs: 7500 }
     )
       .then(() => {
         if (inFlightDirectWrites.get(key) === valueString) {
@@ -979,11 +1095,8 @@ export async function persistDirectToFirestore(
         trackFirestoreWrite(1, `حفظ مباشر (${key})`);
         initialLoadCompletedKeys.add(key);
         markReadCacheFresh(`school_live_data:${key}`);
-        scheduleCrossDeviceSyncPulse(key);
+        notifyCrossDeviceKeyChanged(key);
 
-        if (key === 'school_sent_grade_sheets' && Array.isArray(data)) {
-          syncSentGradeSheetsToConsolidatedCollection(data).catch(() => {});
-        }
         if (key === 'school_students' && Array.isArray(data)) {
           syncStudentsDirectoryToFirestore(data).catch(() => {});
         }
@@ -1180,10 +1293,12 @@ export async function flushPendingLocalSyncKeys(): Promise<boolean> {
           const now = Math.max(Date.now(), targetUpdatedAt);
 
           inFlightDirectWrites.set(key, raw);
-          await Promise.race([
-            setDoc(doc(db, 'school_live_data', key), { data: cloudPayload, updatedAt: now }, { merge: true }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 10000))
-          ]);
+          await writeFirestoreDocFast(
+            'school_live_data',
+            key,
+            { data: cloudPayload, updatedAt: now },
+            { merge: true, sdkGraceMs: 1500, restTimeoutMs: 7500 }
+          );
           if (inFlightDirectWrites.get(key) === raw) {
             inFlightDirectWrites.delete(key);
           }
@@ -1195,7 +1310,7 @@ export async function flushPendingLocalSyncKeys(): Promise<boolean> {
           }
           await markVaultKeySynced(key, now);
           trackFirestoreWrite(1, `مزامنة معلّقة (${key})`);
-          scheduleCrossDeviceSyncPulse(key);
+          notifyCrossDeviceKeyChanged(key);
         } catch (err: any) {
           if (inFlightDirectWrites.get(key) === raw) {
             inFlightDirectWrites.delete(key);
@@ -1282,8 +1397,11 @@ export async function fetchStudentsOnlyDirectly(forceServer: boolean = false): P
         const str = JSON.stringify(merged);
         if (safeGetLocalItem('school_students') !== str) {
           isRemoteSyncing = true;
-          safeSetLocalItem('school_students', str);
-          isRemoteSyncing = false;
+          try {
+            safeSetLocalItem('school_students', str);
+          } finally {
+            isRemoteSyncing = false;
+          }
           saveToOfflineVault('school_students', str, remoteUpdatedAt || Date.now(), false).catch(() => {});
           safeDispatchStorageUpdate('school_students', str);
           broadcastLocalUpdate('school_students', str);
@@ -1383,8 +1501,11 @@ export async function forceRefreshDataFromFirestore(options?: {
           const mergedStr = JSON.stringify(merged);
           if (localVal !== mergedStr) {
             isRemoteSyncing = true;
-            safeSetLocalItem(key, mergedStr);
-            isRemoteSyncing = false;
+            try {
+              safeSetLocalItem(key, mergedStr);
+            } finally {
+              isRemoteSyncing = false;
+            }
             safeDispatchStorageUpdate(key, mergedStr);
             broadcastLocalUpdate(key, mergedStr);
           }
@@ -1393,7 +1514,7 @@ export async function forceRefreshDataFromFirestore(options?: {
             await setDoc(docRef, { data: prepareFirestorePayload(key, merged), updatedAt: now }, { merge: true });
             setKeySyncMeta(key, now, false);
             trackFirestoreWrite(1, `دمج ورفع تعديل محلي (${key})`);
-            scheduleCrossDeviceSyncPulse(key);
+            notifyCrossDeviceKeyChanged(key);
           }
         } catch {}
         initialLoadCompletedKeys.add(key);
@@ -1406,7 +1527,7 @@ export async function forceRefreshDataFromFirestore(options?: {
             await setDoc(docRef, { data: prepareFirestorePayload(key, localParsed), updatedAt: now }, { merge: true });
             setKeySyncMeta(key, now, false);
             trackFirestoreWrite(1, `رفع تعديل محلي أحدث (${key})`);
-            scheduleCrossDeviceSyncPulse(key);
+            notifyCrossDeviceKeyChanged(key);
           } catch {}
         }
         initialLoadCompletedKeys.add(key);
@@ -1522,8 +1643,11 @@ export async function forceRefreshDataFromFirestore(options?: {
 
     if (localVal !== valueString) {
       isRemoteSyncing = true;
-      safeSetLocalItem(key, valueString);
-      isRemoteSyncing = false;
+      try {
+        safeSetLocalItem(key, valueString);
+      } finally {
+        isRemoteSyncing = false;
+      }
       lastSyncedValues.set(key, valueString);
       setKeySyncMeta(key, remoteUpdatedAt || Date.now(), false);
       saveToOfflineVault(key, valueString, remoteUpdatedAt || Date.now(), false).catch(() => {});
@@ -1651,7 +1775,7 @@ function processRemoteSnapshotDoc(key: string, docData: any, fromCache: boolean)
 
   const remoteUpdatedAt = Number(docData.updatedAt) || 0;
   const localMeta = getKeySyncMeta(key);
-  const localVal = localStorage.getItem(key);
+  const localVal = safeGetLocalItem(key);
   const isMergeableKey =
     key === 'school_messages' ||
     key === 'school_sent_grade_sheets' ||
@@ -1670,6 +1794,7 @@ function processRemoteSnapshotDoc(key: string, docData: any, fromCache: boolean)
   }
 
   let payload = docData.data;
+  let keepPendingAfterApply = !!localMeta.pendingSync;
 
   // If local edits are genuinely pending offline sync:
   // - For mergeable keys, merge remote additions WITHOUT losing local pending items!
@@ -1690,6 +1815,9 @@ function processRemoteSnapshotDoc(key: string, docData: any, fromCache: boolean)
       if (!isLocalEmpty && !serverIsClearlyNewer) {
         initialLoadCompletedKeys.add(key);
         return;
+      }
+      if (serverIsClearlyNewer) {
+        keepPendingAfterApply = false;
       }
     }
   }
@@ -1737,20 +1865,25 @@ function processRemoteSnapshotDoc(key: string, docData: any, fromCache: boolean)
     ? JSON.stringify(payload)
     : String(payload);
 
-  if (!localMeta.pendingSync) {
+  if (!keepPendingAfterApply) {
     lastSyncedValues.set(key, valueString);
   }
 
   if (localVal !== valueString) {
     isRemoteSyncing = true;
-    safeSetLocalItem(key, valueString);
-    isRemoteSyncing = false;
-    setKeySyncMeta(key, remoteUpdatedAt || Date.now(), !!localMeta.pendingSync);
-    saveToOfflineVault(key, valueString, remoteUpdatedAt || Date.now(), !!localMeta.pendingSync).catch(() => {});
+    try {
+      safeSetLocalItem(key, valueString);
+    } finally {
+      isRemoteSyncing = false;
+    }
+    setKeySyncMeta(key, remoteUpdatedAt || Date.now(), keepPendingAfterApply);
+    saveToOfflineVault(key, valueString, remoteUpdatedAt || Date.now(), keepPendingAfterApply).catch(() => {});
 
     // Dispatch custom window event immediately so React states update without delay
     safeDispatchStorageUpdate(key, valueString);
     broadcastLocalUpdate(key, valueString);
+  } else if (keepPendingAfterApply !== !!localMeta.pendingSync) {
+    setKeySyncMeta(key, remoteUpdatedAt || Date.now(), keepPendingAfterApply);
   }
   initialLoadCompletedKeys.add(key);
 }
@@ -1775,6 +1908,13 @@ function attachRealtimeListenersForKeys(keysToListen: string[]) {
 
 export function ensureRealtimeSyncHealthy(): void {
   reconnectLiveRelayIfNeeded();
+  if (isStudentOrParentPortal()) {
+    stopSchoolLiveDataCollectionListener();
+    startParentScopedRealtimeListeners();
+  } else {
+    stopParentScopedRealtimeListeners();
+    startSchoolLiveDataCollectionListener();
+  }
 }
 
 function applyRelayKeyUpdate(key: string, valueString: string, updatedAt: number, fromLiveSse: boolean = false): void {
@@ -1803,19 +1943,21 @@ function applyRelayKeyUpdate(key: string, valueString: string, updatedAt: number
 }
 
 /**
- * Ensures full sync key registry is ready when switching into Director or Teacher portals (1-doc pulse listener).
+ * Ensures full sync key registry and live Firestore collection stream are active for Director/Teacher portals.
  */
 export function ensureAllRealtimeListeners() {
+  stopParentScopedRealtimeListeners();
   attachRealtimeListenersForKeys(SYNC_KEYS);
-  startSyncPulseListener();
+  startSchoolLiveDataCollectionListener();
 }
 
 /**
- * Ensures Parent/Student public config key registry is ready without attaching bulk listeners or sync pulse.
+ * Ensures Parent/Student scoped public config keys and targeted live stream are active without reading private bulk docs.
  */
 export function ensureParentRealtimeListeners() {
-  stopSyncPulseListener();
+  stopSchoolLiveDataCollectionListener();
   attachRealtimeListenersForKeys(PARENT_REALTIME_KEYS);
+  startParentScopedRealtimeListeners();
 }
 
 let lastLiveServerSyncAt = 0;
@@ -1911,13 +2053,15 @@ export function startDeferredFirebaseSync() {
   });
 
   if (isStudentOrParentPortal()) {
-    stopSyncPulseListener();
+    stopSchoolLiveDataCollectionListener();
     attachRealtimeListenersForKeys(PARENT_REALTIME_KEYS);
+    startParentScopedRealtimeListeners();
     return;
   }
 
+  stopParentScopedRealtimeListeners();
   attachRealtimeListenersForKeys(SYNC_KEYS);
-  startSyncPulseListener();
+  startSchoolLiveDataCollectionListener();
 }
 
 export function setupFirebaseSync(options?: { deferNetwork?: boolean }) {
@@ -1925,26 +2069,63 @@ export function setupFirebaseSync(options?: { deferNetwork?: boolean }) {
   setupInitialized = true;
 
   if (typeof window !== 'undefined') {
-    window.addEventListener('online', () => {
+    let lastHiddenAt = 0;
+    let lastRestoreSyncAt = 0;
+
+    const handleForegroundOrNetworkRestore = (source: 'online' | 'resume') => {
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+      const now = Date.now();
+      if (now - lastRestoreSyncAt < 3000) return;
+      lastRestoreSyncAt = now;
+
+      const hiddenDuration = lastHiddenAt > 0 ? now - lastHiddenAt : 0;
+      const shouldForceFreshSync = source === 'online' || hiddenDuration >= 15000;
+      if (source === 'resume') {
+        lastHiddenAt = 0;
+      }
+
+      if (db) {
+        enableNetwork(db).catch(() => {});
+      }
       emitOfflineSyncStatus();
       ensureRealtimeSyncHealthy();
-      syncLivePortalDataFromServer({ minIntervalMs: DEFAULT_FIRESTORE_CACHE_TTL_MS }).catch(() => {});
+      if (!isFirestoreWriteQuotaExceeded()) {
+        flushPendingLocalSyncKeys().catch(() => {});
+      }
+      fetchLiveRelaySnapshot().catch(() => {});
+
+      if (shouldForceFreshSync) {
+        syncLivePortalDataFromServer({ bypassCache: true, forceServer: true }).catch(() => {});
+      } else {
+        syncLivePortalDataFromServer({ forceServer: true }).catch(() => {});
+      }
+
+      window.dispatchEvent(new CustomEvent('school_app_resumed', {
+        detail: { source, forceRefresh: shouldForceFreshSync, ts: now }
+      }));
+    };
+
+    window.addEventListener('online', () => {
+      handleForegroundOrNetworkRestore('online');
     });
     window.addEventListener('offline', () => {
       emitOfflineSyncStatus();
     });
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible' && navigator.onLine !== false) {
-        ensureRealtimeSyncHealthy();
-        fetchLiveRelaySnapshot().catch(() => {});
-        // Check 1-doc sync pulse on resume (1 read) so Director/Teacher sees PC updates immediately even within 5 min
-        checkSyncPulseOnResume().catch(() => {});
-        // Also sync any keys whose 5-minute TTL expired while app was in background (0 reads if still fresh)
-        syncLivePortalDataFromServer({ forceServer: true }).catch(() => {});
-        window.dispatchEvent(new CustomEvent('school_app_resumed'));
+      if (document.visibilityState === 'hidden') {
+        lastHiddenAt = Date.now();
+      } else if (document.visibilityState === 'visible') {
+        handleForegroundOrNetworkRestore('resume');
       }
     });
-    // Zero-Firestore-read health watchdog on visible tabs (SSE Live Relay only)
+    window.addEventListener('pageshow', () => {
+      handleForegroundOrNetworkRestore('resume');
+    });
+    window.addEventListener('focus', () => {
+      handleForegroundOrNetworkRestore('resume');
+    });
+
+    // Keep live relay + Firestore listeners healthy while app stays open on PC or APK
     setInterval(() => {
       if (document.visibilityState === 'visible' && navigator.onLine !== false) {
         ensureRealtimeSyncHealthy();
@@ -2013,10 +2194,14 @@ export function setupFirebaseSync(options?: { deferNetwork?: boolean }) {
           }
 
           if (db && !isFirestoreWriteQuotaExceeded()) {
-            const docRef = doc(db, 'school_live_data', key);
             const cloudPayload = prepareFirestorePayload(key, parsedData);
             inFlightDirectWrites.set(key, targetValue);
-            const interceptorPromise = setDoc(docRef, { data: cloudPayload, updatedAt: ts }, { merge: true }).then(() => {
+            const interceptorPromise = writeFirestoreDocFast(
+              'school_live_data',
+              key,
+              { data: cloudPayload, updatedAt: ts },
+              { merge: true, sdkGraceMs: 1500, restTimeoutMs: 7500 }
+            ).then(() => {
               if (inFlightDirectWrites.get(key) === targetValue) {
                 inFlightDirectWrites.delete(key);
               }
@@ -2032,7 +2217,7 @@ export function setupFirebaseSync(options?: { deferNetwork?: boolean }) {
               trackFirestoreWrite(1, `تحديث تلقائي (${key})`);
               initialLoadCompletedKeys.add(key);
               markReadCacheFresh(`school_live_data:${key}`);
-              scheduleCrossDeviceSyncPulse(key);
+              notifyCrossDeviceKeyChanged(key);
               if (key === 'school_students' && Array.isArray(parsedData)) {
                 syncStudentsDirectoryToFirestore(parsedData).catch(() => {});
               }

@@ -9,6 +9,7 @@ import {
   getDocs,
   getDocsFromCache,
   getDocsFromServer,
+  onSnapshot,
   type QuerySnapshot
 } from 'firebase/firestore';
 import {
@@ -166,7 +167,7 @@ export async function submitGradeReportToFirestore(sheet: SentGradeSheet): Promi
     GRADE_REPORTS_COLLECTION,
     reportId,
     payload,
-    { merge: false, sdkGraceMs: 3500, restTimeoutMs: 9000 }
+    { merge: false, sdkGraceMs: 1500, restTimeoutMs: 7000 }
   ).then(() => {
     trackFirestoreWrite(1, `رفع كشف درجات (${sheet.className || reportId})`);
   });
@@ -234,7 +235,7 @@ export async function updateGradeReportInFirestore(sheet: SentGradeSheet): Promi
     GRADE_REPORTS_COLLECTION,
     reportId,
     payload,
-    { merge: true, sdkGraceMs: 3500, restTimeoutMs: 9000 }
+    { merge: true, sdkGraceMs: 1500, restTimeoutMs: 7000 }
   ).then(() => {
     trackFirestoreWrite(1, `اعتماد/تحديث كشف درجات (${sheet.className || reportId})`);
   });
@@ -288,7 +289,7 @@ export async function deleteGradeReportFromFirestore(reportId: string): Promise<
   }
 
   try {
-    await deleteFirestoreDocFast(GRADE_REPORTS_COLLECTION, reportId, { sdkGraceMs: 3000, restTimeoutMs: 8000 });
+    await deleteFirestoreDocFast(GRADE_REPORTS_COLLECTION, reportId, { sdkGraceMs: 1500, restTimeoutMs: 7000 });
     trackFirestoreWrite(1, `حذف كشف درجات (${reportId})`);
     invalidateReadCache(GRADE_REPORTS_CACHE_KEY);
     notifyCrossDeviceKeyChanged('grade_reports');
@@ -440,9 +441,8 @@ export async function fetchGradeReportsFromFirestore(options?: { force?: boolean
 }
 
 /**
- * Subscribes to grade report updates via ZERO-Firestore-read Live Relay SSE
- * and performs at most ONE on-demand cached fetch (5-minute TTL) instead of a continuous
- * collection-wide `onSnapshot` listener.
+ * Subscribes to grade report updates via real-time Firestore `onSnapshot` on `grade_reports`
+ * combined with Live Relay SSE so Teacher <-> Director grade sheets sync immediately across PC and Phone APK.
  */
 export function subscribeGradeReportsRealtime(
   onReports: (reports: SentGradeSheet[]) => void,
@@ -451,6 +451,8 @@ export function subscribeGradeReportsRealtime(
   let latestFirestoreReports: SentGradeSheet[] = loadCachedGradeReportsFromLocal();
   let latestRelayReports: SentGradeSheet[] = getCachedRelayGradeReports();
   let disposed = false;
+  let unsubFirestore: (() => void) | null = null;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   const emitCombined = () => {
     if (disposed) return;
@@ -460,7 +462,7 @@ export function subscribeGradeReportsRealtime(
     }
   };
 
-  // Instant zero-read updates via SSE Live Relay
+  // Instant updates via SSE Live Relay (when Express server is available)
   const unsubRelay = subscribeLiveRelayGradeReports(() => {
     latestRelayReports = getCachedRelayGradeReports();
     emitCombined();
@@ -470,7 +472,6 @@ export function subscribeGradeReportsRealtime(
     emitCombined();
   }
 
-  // On-demand fetch ONLY if 5-minute cache expired (0 reads within 5-minute window)
   const triggerReportsFetch = (force: boolean) => {
     fetchGradeReportsFromFirestore({ force })
       .then((reports) => {
@@ -483,20 +484,108 @@ export function subscribeGradeReportsRealtime(
       });
   };
 
-  triggerReportsFetch(false);
+  const attachFirestoreListener = () => {
+    if (disposed || unsubFirestore || !db || isFirestoreReadQuotaExceeded()) return;
+    let isInitialSnap = true;
+    try {
+      const colRef = collection(db, GRADE_REPORTS_COLLECTION);
+      unsubFirestore = onSnapshot(
+        colRef,
+        (snap) => {
+          if (disposed) return;
+          const fromCache = !!snap.metadata?.fromCache;
+          if (!fromCache) {
+            if (isInitialSnap) {
+              if (snap.size > 0) {
+                trackFirestoreRead(snap.size, 'مزامنة مبدئية لكشوفات الدرجات');
+              }
+            } else {
+              const serverChanges = snap.docChanges().filter(
+                (c) => !c.doc.metadata?.fromCache && !c.doc.metadata?.hasPendingWrites
+              ).length;
+              if (serverChanges > 0) {
+                trackFirestoreRead(serverChanges, 'تحديث فوري لكشوفات الدرجات');
+              }
+            }
+            markReadCacheFresh(GRADE_REPORTS_CACHE_KEY);
+          }
+          isInitialSnap = false;
+
+          latestFirestoreReports = mapSnapshotToGradeReports(snap);
+          const merged = mergeGradeReportLists(latestFirestoreReports, latestRelayReports);
+          saveCachedGradeReportsToLocal(merged);
+          emitCombined();
+        },
+        (err) => {
+          if (unsubFirestore) {
+            try {
+              unsubFirestore();
+            } catch {}
+            unsubFirestore = null;
+          }
+          if (isQuotaError(err)) {
+            markFirestoreReadQuotaExceeded(err);
+            triggerReportsFetch(false);
+            return;
+          }
+          if (onError) onError(err);
+          const msg = String((err as any)?.message || err || '').toLowerCase();
+          if (msg.includes('permission') || msg.includes('missing or insufficient')) {
+            return;
+          }
+          if (!reconnectTimer && !disposed) {
+            reconnectTimer = setTimeout(() => {
+              reconnectTimer = null;
+              attachFirestoreListener();
+            }, 6000);
+          }
+        }
+      );
+    } catch {
+      triggerReportsFetch(false);
+    }
+  };
+
+  if (db && !isFirestoreReadQuotaExceeded()) {
+    attachFirestoreListener();
+  } else {
+    triggerReportsFetch(false);
+  }
 
   const handleReportsPulse = () => {
     triggerReportsFetch(true);
   };
+  const handleAppResumed = (evt: Event) => {
+    const force = Boolean((evt as CustomEvent<{ forceRefresh?: boolean }>)?.detail?.forceRefresh);
+    if (!unsubFirestore) {
+      attachFirestoreListener();
+    }
+    if (force) {
+      triggerReportsFetch(true);
+    }
+  };
+
   if (typeof window !== 'undefined') {
     window.addEventListener('school_grade_reports_pulse', handleReportsPulse);
+    window.addEventListener('school_app_resumed', handleAppResumed);
   }
 
   return () => {
     disposed = true;
     unsubRelay();
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    if (unsubFirestore) {
+      try {
+        unsubFirestore();
+      } catch {}
+      unsubFirestore = null;
+    }
     if (typeof window !== 'undefined') {
       window.removeEventListener('school_grade_reports_pulse', handleReportsPulse);
+      window.removeEventListener('school_app_resumed', handleAppResumed);
     }
   };
 }

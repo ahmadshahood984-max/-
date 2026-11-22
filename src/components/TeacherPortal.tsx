@@ -260,6 +260,7 @@ export default function TeacherPortal({
       reloadTeacherSyncedData();
     };
     window.addEventListener('school_live_sync_completed', handleLiveSyncCompleted);
+    window.addEventListener('school_app_resumed', handleLiveSyncCompleted);
 
     const unsubGradeReports = subscribeGradeReportsRealtime((reports) => {
       mergeDirectReports(reports);
@@ -268,6 +269,7 @@ export default function TeacherPortal({
     return () => {
       window.removeEventListener('school_storage_update', handleStorageUpdate);
       window.removeEventListener('school_live_sync_completed', handleLiveSyncCompleted);
+      window.removeEventListener('school_app_resumed', handleLiveSyncCompleted);
       unsubGradeReports();
     };
   }, []);
@@ -730,8 +732,6 @@ export default function TeacherPortal({
           totalScore += totalForSub;
           scoredCount++;
           studentScoresList.push({ subject: sub, score: totalForSub, maxScore: numericMaxGrade || 100 });
-        } else {
-          studentScoresList.push({ subject: sub, score: null, maxScore: numericMaxGrade || 100 });
         }
       });
 
@@ -752,6 +752,10 @@ export default function TeacherPortal({
       const teacherDirectiveText = evalForMonth?.teacherText !== undefined ? evalForMonth.teacherText : (evalForMonth?.text || '');
       const directorDirectiveText = evalForMonth?.directorText || '';
 
+      if (studentScoresList.length === 0 && !teacherDirectiveText.trim() && !directorDirectiveText.trim()) {
+        continue;
+      }
+
       const studentParent = parents.find(p => p.childrenIds.includes(student.id) || p.id === student.parentId);
 
       studentsSummary.push({
@@ -770,6 +774,11 @@ export default function TeacherPortal({
       });
     }
 
+    if (studentsSummary.length === 0) {
+      alert(`لا توجد درجات أو ملاحظات مدخلة لطلاب صف (${targetClass.name}) لشهر (${currentEvaluationMonth}) بعد.\nيرجى إدخال الدرجات المطلوبة أولاً ثم إعادة الإرسال.`);
+      return;
+    }
+
     const sheetRecord: SentGradeSheet = {
       id: 'gs_teacher_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
       title: `كشف درجات ${targetClass.name} - شهر ${currentEvaluationMonth}`,
@@ -781,7 +790,7 @@ export default function TeacherPortal({
       sentBy: `المعلم: ${activeTeacher?.name || 'معلم الصف'}`,
       teacherId: selectedTeacherId,
       status: 'submitted',
-      studentCount: classStudents.length,
+      studentCount: studentsSummary.length,
       studentsSummary
     };
 
@@ -813,8 +822,8 @@ export default function TeacherPortal({
 
       const deliveredViaRelay = Boolean((savedSheet as any)?.__deliveredViaRelay);
       const deliveryDesc = deliveredViaRelay
-        ? `🎉 تم بنجاح حفظ وإرسال كشف الدرجات مباشرة إلى بوابة المدير العام عبر القناة الفورية للمنصة!\n\n🏫 الصف: ${targetClass.name}\n📅 الشهر: ${currentEvaluationMonth}\n👨‍🎓 عدد الطلاب: ${classStudents.length} طالب\n\n✅ سيظهر الكشف فوراً في لوحة المدير العام بانتظار الاعتماد والإرسال لأولياء الأمور! 🚀`
-        : `🎉 تم بنجاح رفع وإرسال كشف الدرجات مباشرة إلى السحابة (Firestore) وإلى المدير العام!\n\n🏫 الصف: ${targetClass.name}\n📅 الشهر: ${currentEvaluationMonth}\n👨‍🎓 عدد الطلاب: ${classStudents.length} طالب\n\n✅ سيظهر الكشف فوراً في لوحة المدير العام بانتظار الاعتماد والإرسال لأولياء الأمور! 🚀`;
+        ? `🎉 تم بنجاح حفظ وإرسال كشف الدرجات مباشرة إلى بوابة المدير العام عبر القناة الفورية للمنصة!\n\n🏫 الصف: ${targetClass.name}\n📅 الشهر: ${currentEvaluationMonth}\n👨‍🎓 الطلاب المرسَل لهم (حسب المدخل): ${studentsSummary.length} طالب\n\n✅ سيظهر الكشف فوراً في لوحة المدير العام بانتظار الاعتماد والإرسال لأولياء الأمور! 🚀`
+        : `🎉 تم بنجاح رفع وإرسال كشف الدرجات مباشرة إلى السحابة (Firestore) وإلى المدير العام!\n\n🏫 الصف: ${targetClass.name}\n📅 الشهر: ${currentEvaluationMonth}\n👨‍🎓 الطلاب المرسَل لهم (حسب المدخل): ${studentsSummary.length} طالب\n\n✅ سيظهر الكشف فوراً في لوحة المدير العام بانتظار الاعتماد والإرسال لأولياء الأمور! 🚀`;
 
       setSheetSuccessMessage(
         deliveredViaRelay

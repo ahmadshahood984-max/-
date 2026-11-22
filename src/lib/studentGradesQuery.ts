@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { db, deleteFirestoreDocFast, getDocCacheFirst, writeFirestoreDocFast } from './firebase';
+import { commitFirestoreBatchViaRest, db, deleteFirestoreDocFast, getDocCacheFirst, writeFirestoreDocFast } from './firebase';
 import { 
   doc, 
   setDoc, 
@@ -18,7 +18,7 @@ import {
   markFirestoreReadQuotaExceeded,
   isQuotaError
 } from './quotaManager';
-import { enqueuePendingGradeBatch, getPendingGradeBatches, removePendingGradeBatch } from './offlineVault';
+import { enqueuePendingGradeBatch, getPendingGradeBatches, removePendingGradeBatch, getVaultItem, setVaultItem } from './offlineVault';
 import { isReadCacheFresh, markReadCacheFresh } from './readCache';
 
 /**
@@ -453,25 +453,39 @@ async function commitConsolidatedBatchToFirestore(
       }
     });
 
-    const batchPromise = batch.commit();
-    const outcome = await Promise.race([
-      batchPromise.then(() => 'sdk_ok' as const),
-      new Promise<'grace_elapsed'>((resolve) => setTimeout(() => resolve('grace_elapsed'), 4500))
-    ]);
+    let sdkBatchSucceeded = false;
+    let sdkBatchError: unknown = null;
+    const sdkBatchPromise = batch.commit().then(() => {
+      sdkBatchSucceeded = true;
+    });
+    // Prevent unhandled rejection if REST fallback completes first
+    sdkBatchPromise.catch(() => {});
 
-    if (outcome !== 'sdk_ok') {
-      // Fallback to direct REST API writes in small paced waves so we never trip per-second 429 limits
-      for (let j = 0; j < chunkPayloads.length; j += 4) {
-        const wave = chunkPayloads.slice(j, j + 4);
-        await Promise.all(
-          wave.map(({ cleanId, payload, merge }) =>
-            writeFirestoreDocFast('students_grades', cleanId, payload, { merge, sdkGraceMs: 500, restTimeoutMs: 8000 })
-          )
-        );
-        if (j + 4 < chunkPayloads.length) {
-          await new Promise((resolve) => setTimeout(resolve, 50));
-        }
+    try {
+      await Promise.race([
+        sdkBatchPromise,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('batch_timeout')), 2000))
+      ]);
+    } catch (err) {
+      sdkBatchError = err;
+    }
+
+    if (!sdkBatchSucceeded) {
+      // Never run REST fallback if Firestore already returned a quota/429 or permission error
+      const errMsg = String((sdkBatchError as any)?.message || sdkBatchError || '').toLowerCase();
+      if (isQuotaError(sdkBatchError) || errMsg.includes('permission') || errMsg.includes('missing or insufficient')) {
+        throw sdkBatchError;
       }
+      // Single-round-trip Firestore REST :commit for the entire chunk (typically < 500ms)
+      await commitFirestoreBatchViaRest(
+        chunkPayloads.map(({ cleanId, payload, merge }) => ({
+          collectionName: 'students_grades',
+          docId: cleanId,
+          data: payload,
+          merge
+        })),
+        8500
+      );
     }
 
     trackFirestoreWrite(chunk.length, `حفظ دفعة درجات (${chunk.length} طالب)`);
@@ -479,35 +493,55 @@ async function commitConsolidatedBatchToFirestore(
   return true;
 }
 
+let isFlushingGradeBatches = false;
+
 /**
  * Flushes any consolidated student grade batches saved while offline.
+ * Deduplicates queued batches by studentId so multiple offline edits only write once per student.
  */
 export async function flushPendingGradeBatches(): Promise<number> {
-  if (!db || isFirestoreWriteQuotaExceeded()) return 0;
+  if (!db || isFirestoreWriteQuotaExceeded() || isFlushingGradeBatches) return 0;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return 0;
 
+  isFlushingGradeBatches = true;
   let flushed = 0;
   try {
     const batches = await getPendingGradeBatches();
-    for (const item of batches) {
-      if (isFirestoreWriteQuotaExceeded()) break;
-      try {
-        const ok = await Promise.race([
-          commitConsolidatedBatchToFirestore(item.records),
-          new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 6000))
-        ]);
-        if (ok) {
-          await removePendingGradeBatch(item.id);
-          flushed++;
-        }
-      } catch (err: any) {
-        if (isQuotaError(err)) {
-          markFirestoreWriteQuotaExceeded(err);
-          break;
+    if (!batches || batches.length === 0) return 0;
+
+    // Sort oldest -> newest so latest record per student wins
+    const sorted = [...batches].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+    const latestByStudent = new Map<string, typeof batches[number]['records'][number]>();
+    const batchIds: string[] = [];
+
+    for (const item of sorted) {
+      batchIds.push(item.id);
+      for (const rec of item.records || []) {
+        const cleanId = normalizeId(rec?.studentId);
+        if (cleanId) {
+          latestByStudent.set(cleanId, rec);
         }
       }
     }
-  } catch {}
+
+    const dedupedRecords = Array.from(latestByStudent.values());
+    if (dedupedRecords.length === 0) {
+      await Promise.all(batchIds.map((id) => removePendingGradeBatch(id)));
+      return 0;
+    }
+
+    const ok = await commitConsolidatedBatchToFirestore(dedupedRecords);
+    if (ok) {
+      await Promise.all(batchIds.map((id) => removePendingGradeBatch(id)));
+      flushed = batchIds.length;
+    }
+  } catch (err: any) {
+    if (isQuotaError(err)) {
+      markFirestoreWriteQuotaExceeded(err);
+    }
+  } finally {
+    isFlushingGradeBatches = false;
+  }
   return flushed;
 }
 
@@ -583,10 +617,10 @@ export async function batchSaveStudentsGradesConsolidated(
         return false;
       });
 
-    // Wait up to 8s for real Firestore confirmation so callers never falsely report success
+    // Wait up to 11s (2s SDK + single REST batch commit) for real Firestore confirmation
     const committed = await Promise.race([
       commitPromise,
-      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 8000))
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 11000))
     ]);
     return committed;
   } catch (err: any) {
@@ -668,30 +702,63 @@ export async function saveSingleStudentGradesConsolidated(
 
 const CONSOLIDATED_SIGS_STORAGE_KEY = 'school_consolidated_synced_sigs_v1';
 const lastSyncedConsolidatedSignatures = new Map<string, string>();
+let sigsHydratedFromVault = false;
+
+function compactHash(input: string): string {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9e3779b9;
+  for (let i = 0; i < input.length; i++) {
+    const c = input.charCodeAt(i);
+    h1 ^= c;
+    h1 = Math.imul(h1, 0x01000193);
+    h2 ^= c + i;
+    h2 = Math.imul(h2, 0x85ebca6b);
+  }
+  return `${(h1 >>> 0).toString(36)}_${(h2 >>> 0).toString(36)}`;
+}
+
+function hydrateSignaturesFromJson(rawSigs: string | null) {
+  if (!rawSigs) return;
+  try {
+    const parsed = JSON.parse(rawSigs);
+    if (parsed && typeof parsed === 'object') {
+      Object.entries(parsed).forEach(([k, v]) => {
+        if (typeof v === 'string' && !lastSyncedConsolidatedSignatures.has(k)) {
+          lastSyncedConsolidatedSignatures.set(k, v);
+        }
+      });
+    }
+  } catch {}
+}
+
 try {
   if (typeof window !== 'undefined' && window.localStorage) {
-    const rawSigs = window.localStorage.getItem(CONSOLIDATED_SIGS_STORAGE_KEY);
-    if (rawSigs) {
-      const parsed = JSON.parse(rawSigs);
-      if (parsed && typeof parsed === 'object') {
-        Object.entries(parsed).forEach(([k, v]) => {
-          if (typeof v === 'string') lastSyncedConsolidatedSignatures.set(k, v);
-        });
-      }
-    }
+    hydrateSignaturesFromJson(window.localStorage.getItem(CONSOLIDATED_SIGS_STORAGE_KEY));
   }
 } catch {}
 
+async function ensureSignaturesHydratedFromVault(): Promise<void> {
+  if (sigsHydratedFromVault) return;
+  sigsHydratedFromVault = true;
+  try {
+    const vaultRaw = await getVaultItem(CONSOLIDATED_SIGS_STORAGE_KEY);
+    hydrateSignaturesFromJson(vaultRaw);
+  } catch {}
+}
+
 function persistConsolidatedSignaturesToStorage(): void {
+  const obj: Record<string, string> = {};
+  lastSyncedConsolidatedSignatures.forEach((v, k) => {
+    // Store compact hash values to keep storage footprint tiny (<5KB)
+    obj[k] = v.length > 32 ? compactHash(v) : v;
+  });
+  const serialized = JSON.stringify(obj);
   try {
     if (typeof window !== 'undefined' && window.localStorage) {
-      const obj: Record<string, string> = {};
-      lastSyncedConsolidatedSignatures.forEach((v, k) => {
-        obj[k] = v;
-      });
-      window.localStorage.setItem(CONSOLIDATED_SIGS_STORAGE_KEY, JSON.stringify(obj));
+      window.localStorage.setItem(CONSOLIDATED_SIGS_STORAGE_KEY, serialized);
     }
   } catch {}
+  setVaultItem(CONSOLIDATED_SIGS_STORAGE_KEY, serialized).catch(() => {});
 }
 
 function computeSubjectsSignature(subjects: any): string {
@@ -709,7 +776,7 @@ function computeSubjectsSignature(subjects: any): string {
         }
       });
     }
-    return JSON.stringify(normalized);
+    return compactHash(JSON.stringify(normalized));
   } catch {
     return String(Date.now());
   }
@@ -717,12 +784,12 @@ function computeSubjectsSignature(subjects: any): string {
 
 function computeRecordSignature(rec: { subjects: any; teacherNotes?: string; directorNotes?: string; month?: string }): string {
   try {
-    return JSON.stringify({
+    return compactHash(JSON.stringify({
       m: rec.month || '',
       s: computeSubjectsSignature(rec.subjects),
       tn: rec.teacherNotes || '',
       dn: rec.directorNotes || ''
-    });
+    }));
   } catch {
     return String(Date.now());
   }
@@ -784,15 +851,29 @@ export async function seedGradesToStudentCollection(grades: Grade[]): Promise<vo
   }
 }
 
+let consolidatedSyncChain: Promise<boolean> = Promise.resolve(true);
+
 /**
  * Sync student summaries from SentGradeSheet records into consolidated single-document records,
  * skipping previously synced identical student snapshots to avoid redundant Firestore writes.
  */
-export async function syncSentGradeSheetsToConsolidatedCollection(
+export function syncSentGradeSheetsToConsolidatedCollection(
+  sheets: SentGradeSheet[],
+  options?: { onlyStudentIds?: string[] }
+): Promise<boolean> {
+  const run = consolidatedSyncChain.then(() =>
+    runSyncSentGradeSheetsToConsolidatedCollection(sheets, options)
+  );
+  consolidatedSyncChain = run.catch(() => false);
+  return run;
+}
+
+async function runSyncSentGradeSheetsToConsolidatedCollection(
   sheets: SentGradeSheet[],
   options?: { onlyStudentIds?: string[] }
 ): Promise<boolean> {
   if (!Array.isArray(sheets) || sheets.length === 0) return true;
+  await ensureSignaturesHydratedFromVault();
   const scopedIds = options?.onlyStudentIds && options.onlyStudentIds.length > 0
     ? new Set(options.onlyStudentIds.map(normalizeId).filter(Boolean))
     : null;
@@ -943,7 +1024,7 @@ export async function syncSentGradeSheetsToConsolidatedCollection(
   perStudentMerged.forEach((rec, cleanId) => {
     if (scopedIds && !scopedIds.has(cleanId)) return;
     const sigKey = `${cleanId}_${rec.month || ''}`;
-    const sig = computeRecordSignature(rec) + `_sh:${JSON.stringify((rec.approvedSheets || []).map((s) => `${s.id}:${s.status}`))}`;
+    const sig = compactHash(computeRecordSignature(rec) + `_sh:${JSON.stringify((rec.approvedSheets || []).map((s) => `${s.id}:${s.status}`))}`);
     if (lastSyncedConsolidatedSignatures.get(sigKey) !== sig) {
       pendingSheetSigUpdates.push({ sigKey, sig });
       records.push(rec);

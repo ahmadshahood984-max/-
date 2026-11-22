@@ -83,7 +83,7 @@ import { GradeCellInput } from './GradeCellInput';
 import { applyGradePartUpdate, computeGradeTotal, hasSubGradeParts } from '../lib/gradeSplitUtils';
 import { motion, AnimatePresence } from 'motion/react';
 import { loadXlsx } from '../lib/xlsxLoader';
-import { db } from '../lib/firebase';
+import { db, writeFirestoreDocFast } from '../lib/firebase';
 import { collection, addDoc, setDoc, deleteDoc, doc, serverTimestamp, writeBatch, getDocs } from 'firebase/firestore';
 import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead, checkDailyRollover, fetchCentralizedConsumptionOnce, resetCentralizedFirestoreConsumption, calibrateCentralConsumptionBaseline, getTimeUntilFirebaseQuotaReset, probeFirestoreWriteAvailability, SPARK_DAILY_READ_LIMIT, SPARK_DAILY_WRITE_LIMIT, SPARK_STORAGE_LIMIT_MB, QUOTA_WARNING_RATIO, FIREBASE_PROJECT_ID, FIREBASE_DATABASE_ID } from '../lib/firestoreTracker';
 import { calculateStorageUsageReport, measureLiveCloudStorageAudit, StorageUsageReport } from '../lib/storageUsage';
@@ -520,27 +520,31 @@ export default function DirectorPortal({
       }
 
       const liveMessagesSyncPromise = persistDirectToFirestore('school_messages', nextMessages);
-      const notifWritePromise = Promise.race([
-        setDoc(doc(db, 'notifications', newMsg.id), {
+      const notifWritePromise = writeFirestoreDocFast(
+        'notifications',
+        newMsg.id,
+        {
           ...newMsg,
-          timestamp: serverTimestamp(),
+          updatedAt: Date.now(),
           status: 'unread'
-        }).then(() => {
+        },
+        { merge: false, sdkGraceMs: 1200, restTimeoutMs: 6000 }
+      )
+        .then(() => {
           trackFirestoreWrite(1);
-        }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1200))
-      ]).catch(async (writeErr: any) => {
-        if (isQuotaError(writeErr)) {
-          markFirestoreQuotaExceeded(writeErr);
-        } else {
-          console.warn('Notification write queued for offline retry:', writeErr);
-        }
-        await queueOfflineNotification(newMsg.id, {
-          ...newMsg,
-          status: 'unread',
-          createdAtMs: Date.now()
+        })
+        .catch(async (writeErr: any) => {
+          if (isQuotaError(writeErr)) {
+            markFirestoreQuotaExceeded(writeErr);
+          } else {
+            console.warn('Notification write queued for offline retry:', writeErr);
+          }
+          await queueOfflineNotification(newMsg.id, {
+            ...newMsg,
+            status: 'unread',
+            createdAtMs: Date.now()
+          });
         });
-      });
 
       await liveMessagesSyncPromise;
       void notifWritePromise;
@@ -1258,19 +1262,33 @@ export default function DirectorPortal({
         else computedEstimation = 'ضعيف';
       }
 
+      const enteredScoresOnly = totalOnlyScores.filter(
+        sc => sc.score !== null && sc.score !== undefined && !Number.isNaN(Number(sc.score))
+      );
+      const hasNotes = Boolean((stSummary.teacherNotes || '').trim() || (stSummary.directorNotes || '').trim());
+      if (enteredScoresOnly.length === 0 && !hasNotes) {
+        continue;
+      }
+
       updatedSummaryList.push({
         ...stSummary,
         average: computedAvg,
         estimation: computedEstimation,
-        scores: totalOnlyScores
+        scores: enteredScoresOnly
       });
     }
 
-    // Update the sheet status to 'approved' with total-only scores for parents
+    if (updatedSummaryList.length === 0) {
+      alert('لا توجد درجات أو ملاحظات مدخلة في هذا الكشف للاعتماد والإرسال.');
+      return;
+    }
+
+    // Update the sheet status to 'approved' with total-only entered scores for parents
     const updatedSheet: SentGradeSheet = {
       ...sheet,
       status: 'approved',
       sentBy: sheet.sentBy?.includes('(معتمد)') ? sheet.sentBy : `${sheet.sentBy} (معتمد من الإدارة ✅)`,
+      studentCount: updatedSummaryList.length,
       studentsSummary: updatedSummaryList
     };
 
@@ -1313,18 +1331,14 @@ export default function DirectorPortal({
       reportResult = resReport;
       batchSyncedOk = Boolean(resConsolidated);
       persistGradeReportBatchDirect({
-        grades,
         ...(hadAutoGradeMsgs ? { messages: cleanedMessages } : {}),
-        sentSheets: updatedSentSheets,
-        monthlyEvaluations
+        sentSheets: updatedSentSheets
       }).catch(() => false);
     } catch (error: any) {
       if (isFirestoreQuotaError(error) || isQuotaError(error) || isFirestoreQuotaExceeded()) {
         const syncedBatch = await persistGradeReportBatchDirect({
-          grades,
           ...(hadAutoGradeMsgs ? { messages: cleanedMessages } : {}),
           sentSheets: updatedSentSheets,
-          monthlyEvaluations,
           currentMonth: sheet.month
         });
         if (syncedBatch) {
@@ -1344,7 +1358,7 @@ export default function DirectorPortal({
       return;
     }
 
-    alert(`🎉 تم بنجاح اعتماد كشف درجات المعلم وإتاحته لأولياء الأمور على جميع الأجهزة والمتصفحات!\n\n🏫 الصف: ${sheet.className}\n📅 الشهر: ${sheet.month}\n👨‍🎓 عدد الطلاب: ${sheet.studentCount} طالب وطالبة\n\n✅ تم التثبيت في السحابة (Firestore) وإظهاره في بوابات أولياء الأمور مباشرة! 🚀`);
+    alert(`🎉 تم بنجاح اعتماد كشف درجات المعلم وإتاحته لأولياء الأمور على جميع الأجهزة والمتصفحات!\n\n🏫 الصف: ${sheet.className}\n📅 الشهر: ${sheet.month}\n👨‍🎓 عدد الطلاب المرسَل لهم (حسب المدخل): ${updatedSummaryList.length} طالب وطالبة\n\n✅ تم التثبيت في السحابة (Firestore) وإظهاره في بوابات أولياء الأمور مباشرة! 🚀`);
   };
 
   const handleSendMonthlyWhatsApp = (
@@ -4992,6 +5006,13 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
         const teacherDirectiveText = evalForStudentMonth?.teacherText || evalForStudentMonth?.text || '';
         const directorDirectiveText = evalForStudentMonth?.directorText || '';
 
+        const enteredScoresList = studentScoresList.filter(
+          sc => sc.score !== null && sc.score !== undefined && !Number.isNaN(Number(sc.score))
+        );
+        if (enteredScoresList.length === 0 && !teacherDirectiveText.trim() && !directorDirectiveText.trim()) {
+          continue;
+        }
+
         const studentParent = parents.find(p => p.childrenIds.includes(student.id) || p.id === student.parentId);
         const receiverParentId = studentParent?.id || student.parentId || 'parent';
         const receiverParentName = studentParent?.name || student.parentName || 'ولي الأمر';
@@ -5006,13 +5027,18 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
           parentPhone: studentParent?.phone || student.parentPhone || '',
           average: avgFormatted,
           estimation: estimation,
-          scores: studentScoresList,
+          scores: enteredScoresList,
           teacherNotes: teacherDirectiveText,
           directorNotes: directorDirectiveText
         });
       }
 
-      // 2. Build SentGradeSheet record
+      if (studentsSummary.length === 0) {
+        alert(`لا توجد درجات أو ملاحظات مدخلة لطلاب صف (${scopeTitle}) لشهر (${currentEvaluationMonth}) بعد.\nيرجى إدخال الدرجات المطلوبة أولاً ثم إعادة الإرسال.`);
+        return;
+      }
+
+      // 2. Build SentGradeSheet record containing ONLY entered students/subjects of this class
       const sheetRecord: SentGradeSheet = {
         id: 'gs_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
         title: `كشف درجات ${scopeTitle} - شهر ${currentEvaluationMonth}`,
@@ -5023,7 +5049,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
         dateSent: nowIso,
         sentBy: 'المدير العام (إدارة المدرسة)',
         status: 'approved',
-        studentCount: targetStudents.length,
+        studentCount: studentsSummary.length,
         studentsSummary
       };
 
@@ -5081,7 +5107,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
         const criticalResults = await Promise.all([
           submitGradeReportToFirestore(sheetRecord),
           syncSentGradeSheetsToConsolidatedCollection(allApprovedForConsolidated, {
-            onlyStudentIds: targetStudents.map(s => s.id)
+            onlyStudentIds: studentsSummary.map(s => s.studentId)
           }),
           persistDirectToFirestore('school_evaluation_current_month', currentEvaluationMonth, { timeoutMs: 4000 }),
           ...newlyApprovedTeacherSheets.map(s => updateGradeReportInFirestore(s))
@@ -5089,20 +5115,16 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
         mainReportResult = criticalResults[0];
         batchSyncedOk = Boolean(criticalResults[1]);
 
-        // Archive keys sync right after critical writes succeed without blocking the Director UI
+        // Persist updated sheet list (and cleaned messages only if auto-messages were cleaned)
         persistGradeReportBatchDirect({
-          grades,
           ...(hadAutoGradeMsgs ? { messages: cleanedMessages } : {}),
-          sentSheets: updatedSentSheets,
-          monthlyEvaluations
+          sentSheets: updatedSentSheets
         }).catch(() => false);
       } catch (error: any) {
         if (isFirestoreQuotaError(error) || isQuotaError(error) || isFirestoreQuotaExceeded()) {
           const syncedBatch = await persistGradeReportBatchDirect({
-            grades,
             ...(hadAutoGradeMsgs ? { messages: cleanedMessages } : {}),
             sentSheets: updatedSentSheets,
-            monthlyEvaluations,
             currentMonth: currentEvaluationMonth
           }).catch(() => false);
           if (syncedBatch) {
@@ -5122,7 +5144,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
         return;
       }
 
-      alert(`🎉 تم بنجاح حفظ واعتماد وإرسال كشف الدرجات لشهر (${currentEvaluationMonth}) إلى أولياء الأمور على جميع الأجهزة والمتصفحات!\n\n📊 إجمالي الطلاب المستلمين: ${targetStudents.length} طالب وطالبة\n🏫 الصف: ${scopeTitle}\n\n✅ تم التثبيت السحابي في Firestore وإظهار الدرجات في بوابات أولياء الأمور مباشرة! ⚡`);
+      alert(`🎉 تم بنجاح حفظ واعتماد وإرسال كشف الدرجات لشهر (${currentEvaluationMonth}) حسب الدرجات المدخلة!\n\n📊 الطلاب المرسَل لهم: ${studentsSummary.length} من أصل ${targetStudents.length} طالب وطالبة\n🏫 الصف: ${scopeTitle}\n\n✅ تم التثبيت السحابي في Firestore وإظهار الدرجات في بوابات أولياء الأمور مباشرة! ⚡`);
     } finally {
       setIsSendingClassGrades(false);
     }

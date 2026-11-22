@@ -921,8 +921,9 @@ export default function ParentPortal({
       fetchAllParentDataFromFirestore(true).catch(() => {});
     };
 
-    const handleAppResumed = () => {
-      fetchAllParentDataFromFirestore(false).catch(() => {});
+    const handleAppResumed = (evt: Event) => {
+      const forceRefresh = Boolean((evt as CustomEvent<{ forceRefresh?: boolean }>)?.detail?.forceRefresh);
+      fetchAllParentDataFromFirestore(forceRefresh).catch(() => {});
     };
 
     window.addEventListener('school_storage_update', handleStorageUpdate);
@@ -948,6 +949,7 @@ export default function ParentPortal({
     if (!cleanChildId || isFirestoreReadQuotaExceeded()) return;
 
     let unsub: (() => void) | undefined;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     let disposed = false;
 
     const childIdentifiers = new Set(
@@ -964,11 +966,12 @@ export default function ParentPortal({
       );
     };
 
-    (async () => {
+    const attachChildGradeListener = async () => {
+      if (disposed || unsub || isFirestoreReadQuotaExceeded()) return;
       try {
         const { doc, onSnapshot } = await import('firebase/firestore');
         const { db } = await import('../lib/firebase');
-        if (!db || disposed) return;
+        if (!db || disposed || unsub) return;
 
         let initialEvent = true;
         unsub = onSnapshot(doc(db, 'students_grades', cleanChildId), (snap) => {
@@ -1001,11 +1004,74 @@ export default function ParentPortal({
           }
 
           const rec = snap.data() as any;
-          if (Array.isArray(rec.approvedSheets)) {
-            const approvedOnly = rec.approvedSheets.filter(isApprovedSentSheet);
+          const approvedOnly: SentGradeSheet[] = Array.isArray(rec.approvedSheets)
+            ? rec.approvedSheets.filter(isApprovedSentSheet)
+            : [];
+
+          let extraSyntheticSheet: SentGradeSheet | null = null;
+          if (rec.subjects && typeof rec.subjects === 'object' && Object.keys(rec.subjects).length > 0) {
+            const subjectEntries = Object.entries(rec.subjects) as Array<[
+              string,
+              { score?: number | null; maxScore?: number } | undefined
+            ]>;
+            const hasScoredSub = subjectEntries.some(
+              ([, sub]) => sub && sub.score !== null && sub.score !== undefined
+            );
+            if (hasScoredSub) {
+              const recMonth = String(rec.evaluationMonth || rec.term || DEFAULT_EVALUATION_MONTH).trim();
+              const alreadyHasStudentMonth = approvedOnly.some(
+                sh =>
+                  sh.classId !== 'cohort' &&
+                  String(sh.month || '').trim() === recMonth &&
+                  Array.isArray(sh.studentsSummary) &&
+                  sh.studentsSummary.some(
+                    s =>
+                      (
+                        String(s.studentId || '').trim() === String(rec.studentId || cleanChildId).trim() ||
+                        (rec.unifiedNo && String(s.unifiedNo || '').trim() === String(rec.unifiedNo).trim())
+                      ) &&
+                      Array.isArray(s.scores) &&
+                      s.scores.some(sc => sc.score !== null && sc.score !== undefined)
+                  )
+              );
+              if (!alreadyHasStudentMonth) {
+                extraSyntheticSheet = {
+                  id: `consolidated_${rec.studentId || cleanChildId}_${recMonth}`,
+                  title: `كشف درجات ${rec.className || 'الطالب'} - شهر ${recMonth}`,
+                  month: recMonth,
+                  classId: rec.classId || activeChild?.classId || '',
+                  className: rec.className || '',
+                  dateSent: new Date(rec.updatedAt || Date.now()).toISOString(),
+                  sentBy: 'المدير العام (إدارة المدرسة)',
+                  status: 'approved',
+                  studentCount: 1,
+                  studentsSummary: [{
+                    studentId: rec.studentId || cleanChildId,
+                    studentName: rec.studentName || activeChild?.name || '',
+                    unifiedNo: rec.unifiedNo || activeChild?.unifiedNo || '',
+                    rollNo: rec.rollNo || activeChild?.rollNo || '',
+                    parentId: selectedParentId || 'parent',
+                    parentName: activeParent?.name || 'ولي الأمر',
+                    average: rec.percentage ? `${rec.percentage}%` : '---',
+                    estimation: rec.estimation || '---',
+                    scores: subjectEntries.map(([subject, detail]) => ({
+                      subject,
+                      score: detail?.score !== null && detail?.score !== undefined ? Number(detail.score) : null,
+                      maxScore: Number(detail?.maxScore) || 100
+                    })),
+                    teacherNotes: rec.teacherNotes || '',
+                    directorNotes: rec.directorNotes || ''
+                  }]
+                };
+              }
+            }
+          }
+
+          if (Array.isArray(rec.approvedSheets) || extraSyntheticSheet) {
+            const incomingForChild = extraSyntheticSheet ? [extraSyntheticSheet, ...approvedOnly] : approvedOnly;
             setSentGradeSheets(prev => {
               const otherChildrenSheets = prev.filter(sh => !sheetBelongsOnlyToActiveChild(sh));
-              const nextMerged = deduplicateGradeSheets([...approvedOnly, ...otherChildrenSheets]);
+              const nextMerged = deduplicateGradeSheets([...incomingForChild, ...otherChildrenSheets]);
               saveSyncedLocalOnly('school_sent_grade_sheets', JSON.stringify(nextMerged));
               return nextMerged;
             });
@@ -1049,15 +1115,41 @@ export default function ParentPortal({
               return next;
             });
           }
-        }, () => {});
+        }, (err: any) => {
+          if (isQuotaError(err)) {
+            markFirestoreReadQuotaExceeded(err);
+            return;
+          }
+          if (unsub) {
+            try { unsub(); } catch {}
+            unsub = undefined;
+          }
+          const code = String(err?.code || '').toLowerCase();
+          if (code === 'permission-denied' || disposed) return;
+          if (reconnectTimer) clearTimeout(reconnectTimer);
+          reconnectTimer = setTimeout(() => {
+            if (!disposed) void attachChildGradeListener();
+          }, 6000);
+        });
       } catch {}
-    })();
+    };
+
+    const handleChildResume = () => {
+      if (!disposed && !unsub) {
+        void attachChildGradeListener();
+      }
+    };
+
+    void attachChildGradeListener();
+    window.addEventListener('school_app_resumed', handleChildResume);
 
     return () => {
       disposed = true;
+      window.removeEventListener('school_app_resumed', handleChildResume);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       if (unsub) unsub();
     };
-  }, [activeChild?.id, activeChild?.unifiedNo, activeChild?.rollNo, loggedInStudentId, isApprovedSentSheet]);
+  }, [activeChild?.id, activeChild?.unifiedNo, activeChild?.rollNo, activeChild?.classId, activeChild?.name, loggedInStudentId, isApprovedSentSheet, selectedParentId]);
 
   // Track read state for various categories per parent
   const [readGradeIds, setReadGradeIds] = useState<string[]>(() => {
@@ -1803,8 +1895,130 @@ ${url}
     window.addEventListener('offline', updateOnlineStatus);
     updateOnlineStatus(); // Check initial
 
-    // ON-DEMAND FETCH WITH 5-MIN TTL CACHE:
-    // Fetches ONLY notifications scoped to this specific student/parent/class (never full DB scans).
+    let notifUnsub: (() => void) | undefined;
+    let notifReconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    let disposed = false;
+
+    const buildScopedNotificationReceivers = () =>
+      Array.from(new Set([
+        selectedParentId,
+        activeChild?.parentId,
+        activeChild?.id,
+        activeChild?.unifiedNo,
+        activeChild?.rollNo,
+        activeChild?.classId ? `all_class_${activeChild.classId}` : '',
+        'all',
+        'all_cohort_parents',
+        'all_everyone'
+      ].filter(Boolean) as string[])).slice(0, 10);
+
+    const applyIncomingNotificationSnapshot = (snapshot: any) => {
+      if (!snapshot || snapshot.empty) return;
+      setIsFirebaseLive(true);
+      const incomingMsgs: Message[] = [];
+      snapshot.forEach((docSnap: any) => {
+        const data = docSnap.data();
+        const titleOrBody = `${data.title || ''} ${data.content || ''} ${data.body || ''}`;
+        if (titleOrBody.includes('تجربة إشعار') || titleOrBody.includes('فحص دوري للإشعارات')) {
+          return;
+        }
+        incomingMsgs.push({
+          id: data.id || docSnap.id,
+          senderId: data.senderId,
+          senderName: data.senderName,
+          senderRole: data.senderRole,
+          receiverId: data.receiverId,
+          receiverName: data.receiverName,
+          receiverRole: data.receiverRole,
+          content: data.content,
+          date: data.date || new Date().toISOString(),
+          read: data.read || false,
+          studentId: data.studentId
+        });
+      });
+
+      if (setMessages && incomingMsgs.length > 0) {
+        setMessages(prev => {
+          const map = new Map<string, Message>();
+          prev.forEach(m => map.set(m.id, m));
+          incomingMsgs.forEach(m => map.set(m.id, m));
+          const updated = Array.from(map.values());
+          saveSyncedLocalOnly('school_messages', JSON.stringify(updated));
+          return updated;
+        });
+      }
+    };
+
+    // REAL-TIME SCOPED LISTENER:
+    // Streams ONLY notifications for this parent/student/class/broadcasts so Director & Teacher
+    // messages and grade alerts appear immediately (< 1s) across devices and Android APK.
+    const attachRealtimeNotifications = async () => {
+      if (disposed || notifUnsub || isFirestoreReadQuotaExceeded()) return;
+      try {
+        const { collection, query, limit, where, onSnapshot } = await import('firebase/firestore');
+        const { db } = await import('../lib/firebase');
+        const { trackFirestoreRead } = await import('../lib/firestoreTracker');
+
+        if (!db || disposed || notifUnsub) {
+          if (!db) setIsFirebaseLive(false);
+          return;
+        }
+
+        const notificationReceivers = buildScopedNotificationReceivers();
+        const q = notificationReceivers.length > 0
+          ? query(
+              collection(db, 'notifications'),
+              where('receiverId', 'in', notificationReceivers),
+              limit(50)
+            )
+          : query(
+              collection(db, 'notifications'),
+              limit(25)
+            );
+
+        let initialServerSnapshot = true;
+        notifUnsub = onSnapshot(
+          q,
+          (snapshot) => {
+            if (disposed) return;
+            setIsFirebaseLive(true);
+            if (!snapshot.metadata.fromCache && !snapshot.metadata.hasPendingWrites) {
+              const count = initialServerSnapshot
+                ? snapshot.size || 1
+                : Math.max(1, snapshot.docChanges().length || 1);
+              initialServerSnapshot = false;
+              trackFirestoreRead(count, `بث إشعارات ولي الأمر (${count})`);
+            }
+            applyIncomingNotificationSnapshot(snapshot);
+          },
+          (err: any) => {
+            if (isQuotaError(err)) {
+              markFirestoreReadQuotaExceeded(err);
+              setIsFirebaseLive(false);
+              return;
+            }
+            if (notifUnsub) {
+              try { notifUnsub(); } catch {}
+              notifUnsub = undefined;
+            }
+            setIsFirebaseLive(false);
+            const code = String(err?.code || '').toLowerCase();
+            if (code === 'permission-denied' || disposed) return;
+            if (notifReconnectTimer) clearTimeout(notifReconnectTimer);
+            notifReconnectTimer = setTimeout(() => {
+              if (!disposed) void attachRealtimeNotifications();
+            }, 6000);
+          }
+        );
+      } catch (err: any) {
+        if (isQuotaError(err)) {
+          markFirestoreReadQuotaExceeded(err);
+        }
+        setIsFirebaseLive(false);
+      }
+    };
+
+    // ON-DEMAND REFRESH (manual button / resume fallback if listener was detached)
     const fetchNotificationsOnDemand = async (forceServer: boolean = false) => {
       if (isFirestoreReadQuotaExceeded()) {
         setIsFirebaseLive(false);
@@ -1812,14 +2026,15 @@ ${url}
         return;
       }
 
+      if (!notifUnsub) {
+        void attachRealtimeNotifications();
+        if (!forceServer) return;
+      }
+
       const notifCacheKey = `parent_notifications:${selectedParentId || 'anon'}:${activeChild?.id || ''}`;
       if (!forceServer && isReadCacheFresh(notifCacheKey)) {
         return;
       }
-      const shouldHitNotifServer =
-        forceServer ||
-        needsInitialSessionServerSync(notifCacheKey) ||
-        !isReadCacheFresh(notifCacheKey);
 
       try {
         const { collection, query, limit, where } = await import('firebase/firestore');
@@ -1831,18 +2046,7 @@ ${url}
           return;
         }
 
-        // Fetch scoped specifically to notifications for this parent/student/class/broadcasts
-        const notificationReceivers = Array.from(new Set([
-          selectedParentId,
-          activeChild?.id,
-          activeChild?.unifiedNo,
-          activeChild?.rollNo,
-          activeChild?.classId ? `all_class_${activeChild.classId}` : '',
-          'all',
-          'all_cohort_parents',
-          'all_everyone'
-        ].filter(Boolean) as string[])).slice(0, 10);
-
+        const notificationReceivers = buildScopedNotificationReceivers();
         const q = notificationReceivers.length > 0
           ? query(
               collection(db, 'notifications'),
@@ -1855,49 +2059,14 @@ ${url}
             );
 
         const { snap: snapshot, fromCache } = await getDocsCacheFirst(q, {
-          forceServer: isFirestoreReadQuotaExceeded() ? false : shouldHitNotifServer,
+          forceServer: isFirestoreReadQuotaExceeded() ? false : forceServer,
           timeoutMs: 2500
         });
         if (snapshot && !fromCache) {
           trackFirestoreRead(snapshot.size || 1, `قراءة إشعارات ولي الأمر (${snapshot.size || 1})`);
         }
         markReadCacheFresh(notifCacheKey);
-
-        if (snapshot && !snapshot.empty) {
-          setIsFirebaseLive(true);
-          const incomingMsgs: Message[] = [];
-          snapshot.forEach((docSnap) => {
-            const data = docSnap.data();
-            const titleOrBody = `${data.title || ''} ${data.content || ''} ${data.body || ''}`;
-            if (titleOrBody.includes('تجربة إشعار') || titleOrBody.includes('فحص دوري للإشعارات')) {
-              return;
-            }
-            incomingMsgs.push({
-              id: data.id || docSnap.id,
-              senderId: data.senderId,
-              senderName: data.senderName,
-              senderRole: data.senderRole,
-              receiverId: data.receiverId,
-              receiverName: data.receiverName,
-              receiverRole: data.receiverRole,
-              content: data.content,
-              date: data.date || new Date().toISOString(),
-              read: data.read || false,
-              studentId: data.studentId
-            });
-          });
-
-          if (setMessages && incomingMsgs.length > 0) {
-            setMessages(prev => {
-              const map = new Map<string, Message>();
-              prev.forEach(m => map.set(m.id, m));
-              incomingMsgs.forEach(m => map.set(m.id, m));
-              const updated = Array.from(map.values());
-              saveSyncedLocalOnly('school_messages', JSON.stringify(updated));
-              return updated;
-            });
-          }
-        }
+        applyIncomingNotificationSnapshot(snapshot);
       } catch (err: any) {
         if (isQuotaError(err)) {
           markFirestoreReadQuotaExceeded(err);
@@ -1907,26 +2076,40 @@ ${url}
     };
 
     const handleLiveNotificationRefresh = () => {
-      fetchNotificationsOnDemand(false);
+      if (!notifUnsub) {
+        void attachRealtimeNotifications();
+      }
+    };
+
+    const handleAppResumeNotifications = (ev: Event) => {
+      const detail = (ev as CustomEvent)?.detail;
+      if (!notifUnsub) {
+        void attachRealtimeNotifications();
+      } else if (detail?.forceRefresh) {
+        void fetchNotificationsOnDemand(true);
+      }
     };
 
     const handleForceNotificationRefresh = () => {
-      fetchNotificationsOnDemand(true);
+      void fetchNotificationsOnDemand(true);
     };
 
-    fetchNotificationsOnDemand(false);
+    void attachRealtimeNotifications();
     window.addEventListener('school_live_sync_completed', handleLiveNotificationRefresh);
-    window.addEventListener('school_app_resumed', handleLiveNotificationRefresh);
+    window.addEventListener('school_app_resumed', handleAppResumeNotifications);
     window.addEventListener('school_force_parent_refresh', handleForceNotificationRefresh);
 
     return () => {
+      disposed = true;
       window.removeEventListener('online', updateOnlineStatus);
       window.removeEventListener('offline', updateOnlineStatus);
       window.removeEventListener('school_live_sync_completed', handleLiveNotificationRefresh);
-      window.removeEventListener('school_app_resumed', handleLiveNotificationRefresh);
+      window.removeEventListener('school_app_resumed', handleAppResumeNotifications);
       window.removeEventListener('school_force_parent_refresh', handleForceNotificationRefresh);
+      if (notifReconnectTimer) clearTimeout(notifReconnectTimer);
+      if (notifUnsub) notifUnsub();
     };
-  }, [setMessages, selectedParentId, activeChild?.id, activeChild?.unifiedNo, activeChild?.classId]);
+  }, [setMessages, selectedParentId, activeChild?.id, activeChild?.parentId, activeChild?.unifiedNo, activeChild?.rollNo, activeChild?.classId]);
 
   // Handle opening message from external notification click or service worker message
   React.useEffect(() => {

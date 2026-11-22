@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { db } from './firebase';
-import { collection, setDoc, doc, getDoc, getCountFromServer, serverTimestamp } from 'firebase/firestore';
+import { db, writeFirestoreDocFast } from './firebase';
+import { collection, doc, getDoc, getCountFromServer } from 'firebase/firestore';
 import { trackFirestoreRead, trackFirestoreWrite } from './firestoreTracker';
 import { safeShowNotification } from './notificationHelper';
 import {
@@ -103,7 +103,7 @@ export async function sendParentPushNotification(
   if (!payload.skipFirestoreRecord && !isFirestoreWriteQuotaExceeded()) {
     try {
       if (db && !isFirestoreWriteQuotaExceeded()) {
-        await setDoc(doc(db, 'notifications', msgId), {
+        await writeFirestoreDocFast('notifications', msgId, {
           id: msgId,
           receiverId: parentId,
           receiverRole: 'parent',
@@ -116,11 +116,11 @@ export async function sendParentPushNotification(
           studentId: payload.studentId || null,
           studentName: payload.studentName || null,
           category: payload.category || 'grades',
-          timestamp: serverTimestamp(),
+          updatedAt: Date.now(),
           date: new Date().toISOString(),
           read: false,
           status: 'unread'
-        });
+        }, { merge: false, sdkGraceMs: 1200, restTimeoutMs: 6000 });
         trackFirestoreWrite(1, `حفظ إشعار (${parentId})`);
         success = true;
       }
@@ -234,7 +234,7 @@ export async function sendBroadcastPushNotification(
   if (!payload.skipFirestoreRecord && db && !isFirestoreWriteQuotaExceeded()) {
     try {
       const broadcastReceiverId = payload.targetReceiverId || 'all_cohort_parents';
-      await setDoc(doc(db, 'notifications', msgId), {
+      await writeFirestoreDocFast('notifications', msgId, {
         id: msgId,
         receiverId: broadcastReceiverId,
         receiverRole: 'parent',
@@ -245,11 +245,11 @@ export async function sendBroadcastPushNotification(
         senderName: payload.senderName || 'إدارة المدرسة (المدير)',
         senderRole: 'director',
         category: 'announcement',
-        timestamp: serverTimestamp(),
+        updatedAt: Date.now(),
         date: new Date().toISOString(),
         read: false,
         status: 'unread'
-      });
+      }, { merge: false, sdkGraceMs: 1200, restTimeoutMs: 6000 });
       trackFirestoreWrite(1, 'إرسال تعميم جماعي');
     } catch (err: any) {
       if (isQuotaError(err)) {
@@ -260,7 +260,13 @@ export async function sendBroadcastPushNotification(
     }
   }
 
-  // 2. Warm server key cache once then dispatch FCM pushes concurrently in chunks of 15
+  // 2. Skip scanning 180+ parent FCM docs if 0 devices registered FCM tokens
+  const deviceCount = await getRegisteredPushDevicesCount().catch(() => 0);
+  if (deviceCount === 0) {
+    return { total: uniqueParentIds.length, sent: 0 };
+  }
+
+  // Warm server key cache once then dispatch FCM pushes concurrently in chunks of 15
   await getCachedFcmServerKey().catch(() => '');
   let sentCount = 0;
   const CHUNK_SIZE = 15;

@@ -286,3 +286,44 @@ export async function removePendingNotification(id: string): Promise<void> {
     }
   });
 }
+
+export async function clearPendingGradeBatches(): Promise<void> {
+  const db = await openVaultDB();
+  if (!db) return;
+
+  return new Promise<void>((resolve) => {
+    try {
+      const tx = db.transaction(STORE_GRADE_BATCHES, 'readwrite');
+      tx.objectStore(STORE_GRADE_BATCHES).clear();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+      tx.onabort = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+
+export async function getVaultItem(key: string): Promise<string | null> {
+  const db = await openVaultDB();
+  if (!db) return null;
+
+  return new Promise<string | null>((resolve) => {
+    try {
+      const tx = db.transaction(STORE_KV, 'readonly');
+      const req = tx.objectStore(STORE_KV).get(key);
+      req.onsuccess = () => {
+        const res = req.result as VaultKVRecord | undefined;
+        resolve(typeof res?.value === 'string' ? res.value : null);
+      };
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+export async function setVaultItem(key: string, value: string): Promise<void> {
+  await saveToOfflineVault(key, value, Date.now(), false);
+}
+

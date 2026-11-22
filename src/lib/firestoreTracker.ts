@@ -31,6 +31,7 @@ import {
   getUtcDateStr
 } from './quotaManager';
 import { isReadCacheFresh, markReadCacheFresh } from './readCache';
+import { clearPendingGradeBatches } from './offlineVault';
 
 export const FIREBASE_PROJECT_ID = firebaseConfigJson.projectId || 'madrasa-international';
 export const FIREBASE_DATABASE_ID =
@@ -176,12 +177,12 @@ try {
   if (typeof localStorage !== 'undefined') {
     const targetSig = `${FIREBASE_PROJECT_ID}:${FIREBASE_DATABASE_ID}`;
     const prevTarget = localStorage.getItem(ACTIVE_FIREBASE_TARGET_KEY);
-    if (prevTarget && prevTarget !== targetSig) {
+    if (!prevTarget || prevTarget !== targetSig) {
       localStorage.removeItem(METRICS_KEY);
       localStorage.removeItem(PENDING_DELTAS_KEY);
+      localStorage.removeItem('school_consolidated_synced_sigs_v1');
       resetFirestoreQuotaBreaker();
-    }
-    if (prevTarget !== targetSig) {
+      clearPendingGradeBatches().catch(() => {});
       localStorage.setItem(ACTIVE_FIREBASE_TARGET_KEY, targetSig);
     }
   }
@@ -1200,7 +1201,7 @@ export async function probeFirestoreWriteAvailability(): Promise<{
       return {
         ok: false,
         isQuotaError: true,
-        message: `⚠️ خادم Firebase لا يزال يرفض الكتابة بسبب حصة المشروع المشترك (${FIREBASE_PROJECT_ID}) أو ضغط الكتابة: ${rawMsg}`
+        message: `⚠️ خادم Firebase لا يزال يرفض الكتابة بسبب حصة المشروع (${FIREBASE_PROJECT_ID}) أو ضغط الكتابة اللحظي: ${rawMsg}`
       };
     }
     return {
