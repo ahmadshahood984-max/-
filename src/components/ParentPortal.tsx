@@ -63,7 +63,10 @@ import {
   deduplicateGradeSheetsPreservingTeachers,
   saveSyncedLocalOnly,
   safeDispatchStorageUpdate,
-  persistDirectToFirestore
+  persistDirectToFirestore,
+  filterOutDeletedMonthsFromSheets,
+  getDeletedEvaluationMonthsMap,
+  isGradeMessageDeletedByMonth
 } from '../lib/firebaseSync';
 import {
   fetchConsolidatedStudentRecord,
@@ -406,13 +409,17 @@ export default function ParentPortal({
     return sheet.status === 'approved' || !sheet.teacherId;
   }, []);
 
+  const [deletedEvaluationMonths, setDeletedEvaluationMonths] = useState<Record<string, number>>(() =>
+    getDeletedEvaluationMonthsMap()
+  );
+
   const [sentGradeSheets, setSentGradeSheets] = useState<SentGradeSheet[]>(() => {
     try {
       const saved = localStorage.getItem('school_sent_grade_sheets');
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          return deduplicateGradeSheets(parsed);
+          return filterOutDeletedMonthsFromSheets(deduplicateGradeSheets(parsed));
         }
       }
     } catch {}
@@ -431,7 +438,7 @@ export default function ParentPortal({
   // STRICT GATING: Parents NEVER see raw draft school_grades; only grades inside Director-approved SentGradeSheets
   const effectiveGrades = React.useMemo(() => {
     const map = new Map<string, Grade>();
-    const approvedSheets = sentGradeSheets
+    const approvedSheets = filterOutDeletedMonthsFromSheets(sentGradeSheets, deletedEvaluationMonths)
       .filter(isApprovedSentSheet)
       .sort((a, b) => {
         const aCohort = a.classId === 'cohort' ? 1 : 0;
@@ -477,7 +484,7 @@ export default function ParentPortal({
       });
     });
     return Array.from(map.values());
-  }, [sentGradeSheets, isApprovedSentSheet]);
+  }, [sentGradeSheets, isApprovedSentSheet, deletedEvaluationMonths]);
 
   const effectiveMessages = React.useMemo(() => {
     const isTestOrFakeMsg = (m: Message) => {
@@ -614,23 +621,36 @@ export default function ParentPortal({
           .map(x => String(x || '').trim())
           .filter(Boolean)
       );
-      const sheetBelongsOnlyToResolvedStudent = (sh: SentGradeSheet) => {
-        if (!Array.isArray(sh.studentsSummary) || sh.studentsSummary.length === 0) return false;
-        return sh.studentsSummary.every(sm =>
-          targetStudentIdsForCleanup.has(String(sm.studentId || '').trim()) ||
-          targetStudentIdsForCleanup.has(String(sm.unifiedNo || '').trim()) ||
-          targetStudentIdsForCleanup.has(String(sm.rollNo || '').trim())
-        );
+      const pruneTargetStudentFromSheets = (list: SentGradeSheet[]): SentGradeSheet[] => {
+        const out: SentGradeSheet[] = [];
+        for (const sh of list) {
+          if (!sh || !Array.isArray(sh.studentsSummary) || sh.studentsSummary.length === 0) continue;
+          const remainingSummary = sh.studentsSummary.filter(sm =>
+            !targetStudentIdsForCleanup.has(String(sm.studentId || '').trim()) &&
+            !targetStudentIdsForCleanup.has(String(sm.unifiedNo || '').trim()) &&
+            !targetStudentIdsForCleanup.has(String(sm.rollNo || '').trim())
+          );
+          if (remainingSummary.length === sh.studentsSummary.length) {
+            out.push(sh);
+          } else if (remainingSummary.length > 0) {
+            out.push({ ...sh, studentCount: remainingSummary.length, studentsSummary: remainingSummary });
+          }
+        }
+        return out;
       };
+
+      const delMonthsMap = getDeletedEvaluationMonthsMap();
+      setDeletedEvaluationMonths(delMonthsMap);
+      mergedSheetsAcc = filterOutDeletedMonthsFromSheets(mergedSheetsAcc, delMonthsMap);
 
       if (consolidatedRec) {
         if (Array.isArray(consolidatedRec.approvedSheets)) {
-          const approvedOnly = consolidatedRec.approvedSheets.filter(isApprovedSentSheet);
-          const approvedIds = new Set(approvedOnly.map(s => s.id).filter(Boolean));
-          // Keep sheets belonging to other siblings, and replace resolved student's sheets with server's authoritative approvedSheets
-          const otherStudentLocalSheets = mergedSheetsAcc.filter(
-            sh => !sheetBelongsOnlyToResolvedStudent(sh) || (sh.id && approvedIds.has(sh.id))
+          const approvedOnly = filterOutDeletedMonthsFromSheets(
+            consolidatedRec.approvedSheets.filter(isApprovedSentSheet),
+            delMonthsMap
           );
+          // Keep sheets belonging to other siblings, and replace resolved student's entries with server's authoritative approvedSheets
+          const otherStudentLocalSheets = pruneTargetStudentFromSheets(mergedSheetsAcc);
           if (approvedOnly.length > 0) {
             const classMonths = new Set(
               approvedOnly.filter(s => s.classId !== 'cohort').map(s => String(s.month || '').trim()).filter(Boolean)
@@ -745,8 +765,8 @@ export default function ParentPortal({
           }
         }
       } else if (resolvedStudentId && isConsolidatedRecordConfirmedMissingOnServer(resolvedStudentId)) {
-        // Server confirmed no consolidated document exists for this student (e.g., Director deleted the sheet)
-        mergedSheetsAcc = mergedSheetsAcc.filter(sh => !sheetBelongsOnlyToResolvedStudent(sh));
+        // Server confirmed no consolidated document exists for this student (e.g., Director deleted the sheet/month)
+        mergedSheetsAcc = pruneTargetStudentFromSheets(mergedSheetsAcc);
         const noteTargetId = resolvedStudentId || targetStudentId;
         if (noteTargetId) {
           setMonthlyEvaluations(prev => {
@@ -762,10 +782,10 @@ export default function ParentPortal({
         }
       }
 
-      const deduped = deduplicateGradeSheets(mergedSheetsAcc);
+      const deduped = filterOutDeletedMonthsFromSheets(deduplicateGradeSheets(mergedSheetsAcc), delMonthsMap);
       saveSyncedLocalOnly('school_sent_grade_sheets', JSON.stringify(deduped));
       setSentGradeSheets(prev => {
-        const preservedOtherSiblings = prev.filter(sh => !sheetBelongsOnlyToResolvedStudent(sh));
+        const preservedOtherSiblings = filterOutDeletedMonthsFromSheets(pruneTargetStudentFromSheets(prev), delMonthsMap);
         return deduplicateGradeSheets([...deduped, ...preservedOtherSiblings]);
       });
 
@@ -820,12 +840,15 @@ export default function ParentPortal({
       const customPass = localStorage.getItem('school_custom_pass_grade') || localStorage.getItem('school_parent_custom_pass_grade');
       if (customPass) setCustomPassGrade(customPass.startsWith('"') ? (() => { try { return JSON.parse(customPass); } catch { return customPass; } })() : customPass);
 
+      const delMap = getDeletedEvaluationMonthsMap();
+      setDeletedEvaluationMonths(delMap);
+
       const savedSent = localStorage.getItem('school_sent_grade_sheets');
       if (savedSent) {
         try {
           const parsedSent = JSON.parse(savedSent);
           if (Array.isArray(parsedSent)) {
-            setSentGradeSheets(deduplicateGradeSheets(parsedSent));
+            setSentGradeSheets(filterOutDeletedMonthsFromSheets(deduplicateGradeSheets(parsedSent), delMap));
           }
         } catch {}
       }
@@ -901,9 +924,30 @@ export default function ParentPortal({
         try {
           const parsed = JSON.parse(value);
           if (Array.isArray(parsed)) {
-            setSentGradeSheets(deduplicateGradeSheets(parsed));
+            setSentGradeSheets(filterOutDeletedMonthsFromSheets(deduplicateGradeSheets(parsed)));
           }
         } catch {}
+      } else if (key === 'school_deleted_evaluation_months') {
+        const delMap = getDeletedEvaluationMonthsMap();
+        setDeletedEvaluationMonths(delMap);
+        setSentGradeSheets(prev => {
+          const next = filterOutDeletedMonthsFromSheets(prev, delMap);
+          saveSyncedLocalOnly('school_sent_grade_sheets', JSON.stringify(next));
+          return next;
+        });
+        setMonthlyEvaluations(prev => {
+          const next = { ...prev };
+          let changed = false;
+          for (const k of Object.keys(next)) {
+            const m = String(next[k]?.month || '').trim() || (k.includes('_') ? k.slice(k.indexOf('_') + 1).trim() : '');
+            if (m && delMap[m]) {
+              delete next[k];
+              changed = true;
+            }
+          }
+          if (changed) saveSyncedLocalOnly('school_monthly_evaluations', JSON.stringify(next));
+          return changed ? next : prev;
+        });
       } else if (key === 'school_monthly_evaluations' && typeof value === 'string') {
         try { setMonthlyEvaluations(JSON.parse(value)); } catch {}
       } else if (key === 'school_evaluation_current_month' && typeof value === 'string') {
@@ -914,6 +958,8 @@ export default function ParentPortal({
     };
 
     const handleLiveSyncCompleted = () => {
+      const delMap = getDeletedEvaluationMonthsMap();
+      setDeletedEvaluationMonths(delMap);
       reloadAllParentSyncedKeys();
     };
 
@@ -957,13 +1003,22 @@ export default function ParentPortal({
         .map(x => String(x || '').trim())
         .filter(Boolean)
     );
-    const sheetBelongsOnlyToActiveChild = (sh: SentGradeSheet) => {
-      if (!Array.isArray(sh.studentsSummary) || sh.studentsSummary.length === 0) return false;
-      return sh.studentsSummary.every(sm =>
-        childIdentifiers.has(String(sm.studentId || '').trim()) ||
-        childIdentifiers.has(String(sm.unifiedNo || '').trim()) ||
-        childIdentifiers.has(String(sm.rollNo || '').trim())
-      );
+    const pruneActiveChildFromSheets = (list: SentGradeSheet[]): SentGradeSheet[] => {
+      const out: SentGradeSheet[] = [];
+      for (const sh of list) {
+        if (!sh || !Array.isArray(sh.studentsSummary) || sh.studentsSummary.length === 0) continue;
+        const remainingSummary = sh.studentsSummary.filter(sm =>
+          !childIdentifiers.has(String(sm.studentId || '').trim()) &&
+          !childIdentifiers.has(String(sm.unifiedNo || '').trim()) &&
+          !childIdentifiers.has(String(sm.rollNo || '').trim())
+        );
+        if (remainingSummary.length === sh.studentsSummary.length) {
+          out.push(sh);
+        } else if (remainingSummary.length > 0) {
+          out.push({ ...sh, studentCount: remainingSummary.length, studentsSummary: remainingSummary });
+        }
+      }
+      return out;
     };
 
     const attachChildGradeListener = async () => {
@@ -986,7 +1041,7 @@ export default function ParentPortal({
           if (!snap.exists()) {
             // Document deleted by Director — immediately clear this student's sent sheets & evaluations
             setSentGradeSheets(prev => {
-              const filtered = prev.filter(sh => !sheetBelongsOnlyToActiveChild(sh));
+              const filtered = pruneActiveChildFromSheets(prev);
               saveSyncedLocalOnly('school_sent_grade_sheets', JSON.stringify(filtered));
               return filtered;
             });
@@ -1003,10 +1058,12 @@ export default function ParentPortal({
             return;
           }
 
+          const delMonthsMap = getDeletedEvaluationMonthsMap();
           const rec = snap.data() as any;
-          const approvedOnly: SentGradeSheet[] = Array.isArray(rec.approvedSheets)
-            ? rec.approvedSheets.filter(isApprovedSentSheet)
-            : [];
+          const approvedOnly: SentGradeSheet[] = filterOutDeletedMonthsFromSheets(
+            Array.isArray(rec.approvedSheets) ? rec.approvedSheets.filter(isApprovedSentSheet) : [],
+            delMonthsMap
+          );
 
           let extraSyntheticSheet: SentGradeSheet | null = null;
           if (rec.subjects && typeof rec.subjects === 'object' && Object.keys(rec.subjects).length > 0) {
@@ -1017,8 +1074,9 @@ export default function ParentPortal({
             const hasScoredSub = subjectEntries.some(
               ([, sub]) => sub && sub.score !== null && sub.score !== undefined
             );
-            if (hasScoredSub) {
-              const recMonth = String(rec.evaluationMonth || rec.term || DEFAULT_EVALUATION_MONTH).trim();
+            const recMonth = String(rec.evaluationMonth || rec.term || DEFAULT_EVALUATION_MONTH).trim();
+            const isRecMonthDeleted = Boolean(delMonthsMap[recMonth] && delMonthsMap[recMonth] >= (Number(rec.updatedAt) || 0));
+            if (hasScoredSub && !isRecMonthDeleted) {
               const alreadyHasStudentMonth = approvedOnly.some(
                 sh =>
                   sh.classId !== 'cohort' &&
@@ -1070,7 +1128,7 @@ export default function ParentPortal({
           if (Array.isArray(rec.approvedSheets) || extraSyntheticSheet) {
             const incomingForChild = extraSyntheticSheet ? [extraSyntheticSheet, ...approvedOnly] : approvedOnly;
             setSentGradeSheets(prev => {
-              const otherChildrenSheets = prev.filter(sh => !sheetBelongsOnlyToActiveChild(sh));
+              const otherChildrenSheets = filterOutDeletedMonthsFromSheets(pruneActiveChildFromSheets(prev), delMonthsMap);
               const nextMerged = deduplicateGradeSheets([...incomingForChild, ...otherChildrenSheets]);
               saveSyncedLocalOnly('school_sent_grade_sheets', JSON.stringify(nextMerged));
               return nextMerged;
@@ -2652,7 +2710,11 @@ ${url}
             setCurrentEvaluationMonth(value.startsWith('"') ? parsed : value);
             break;
           case 'school_sent_grade_sheets':
-            setSentGradeSheets(prev => deduplicateGradeSheets([...prev.filter(isApprovedSentSheet), ...(Array.isArray(parsed) ? parsed : [])]));
+            setSentGradeSheets(filterOutDeletedMonthsFromSheets(deduplicateGradeSheets(Array.isArray(parsed) ? parsed : [])));
+            break;
+          case 'school_deleted_evaluation_months':
+            setDeletedEvaluationMonths(getDeletedEvaluationMonthsMap());
+            setSentGradeSheets(prev => filterOutDeletedMonthsFromSheets(prev));
             break;
           case 'school_custom_subjects':
             if (Array.isArray(parsed) && parsed.length > 0) setCustomSubjects(parsed);
@@ -4334,7 +4396,7 @@ ${url}
                         };
 
                         // 1. Get ONLY Director-approved certified grade sheets for this student (preferring class-specific over any legacy cohort sheet)
-                        const rawApprovedForStudent = sentGradeSheets.filter(sheet =>
+                        const rawApprovedForStudent = filterOutDeletedMonthsFromSheets(sentGradeSheets, deletedEvaluationMonths).filter(sheet =>
                           isApprovedSentSheet(sheet) &&
                           Array.isArray(sheet.studentsSummary) &&
                           sheet.studentsSummary.some(s => doesSummaryContainStudent(s, activeChild))
@@ -4361,11 +4423,12 @@ ${url}
                             return aTeacher - bTeacher;
                           });
 
-                        // 2. Also allow official Director-sent grade_report messages (never raw teacher drafts)
+                        // 2. Also allow official Director-sent grade_report messages (never raw teacher drafts or deleted months)
                         const studentGradeMessages = effectiveMessages.filter(m =>
                           m.senderRole === 'director' &&
                           isMessageForThisStudent(m) &&
-                          (m.category === 'grade_report' || isTeacherGradeMessage(m))
+                          (m.category === 'grade_report' || isTeacherGradeMessage(m)) &&
+                          !isGradeMessageDeletedByMonth(m.content, m.date, deletedEvaluationMonths)
                         );
 
                         // If the Director has NOT clicked "Send to Parents" yet, do NOT expose any draft grades or report card

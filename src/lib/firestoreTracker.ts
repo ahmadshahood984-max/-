@@ -623,6 +623,16 @@ export async function flushConsumptionToFirestore(): Promise<void> {
     m.dailyHistory = mergeBuckets(m.dailyHistory, finalUtcBuckets);
     saveMetrics(m);
   } catch (err: any) {
+    if (isQuotaError(err)) {
+      markFirestoreWriteQuotaExceeded(err);
+      // Do not keep small telemetry-only counters queued repeatedly when server writes are locked
+      if (deltaWrites <= 5) {
+        persistPendingDeltas();
+        return;
+      }
+    } else {
+      console.warn('[Firestore Tracker] Notice flushing central consumption:', err?.message || err);
+    }
     // Restore unsent deltas so nothing is ever lost on transient network errors
     pendingState = {
       quotaDate: today,
@@ -633,11 +643,6 @@ export async function flushConsumptionToFirestore(): Promise<void> {
       lastOperation: opLabel || pendingState.lastOperation
     };
     persistPendingDeltas();
-    if (isQuotaError(err)) {
-      markFirestoreWriteQuotaExceeded(err);
-    } else {
-      console.warn('[Firestore Tracker] Notice flushing central consumption:', err?.message || err);
-    }
   } finally {
     isFlushing = false;
   }
@@ -1188,7 +1193,20 @@ export async function probeFirestoreWriteAvailability(): Promise<{
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 6000))
     ]);
 
-    trackFirestoreWrite(1, 'اختبار فحص الكتابة السحابية (ناجح)');
+    // Probe itself updated system_stats/consumption directly — clear telemetry pending queue cleanly
+    pendingState.reads = 0;
+    pendingState.writes = 0;
+    pendingState.realtimeReads = 0;
+    persistPendingDeltas();
+
+    const m = loadFirestoreMetrics();
+    m.writes += 1;
+    m.firestoreWrites = (m.firestoreWrites || 0) + 1;
+    m.lifetimeWrites = (m.lifetimeWrites || 0) + 1;
+    m.lastOperation = 'اختبار فحص الكتابة السحابية (ناجح)';
+    m.lastUpdatedAt = Date.now();
+    saveMetrics(m);
+
     return {
       ok: true,
       isQuotaError: false,
@@ -1201,7 +1219,7 @@ export async function probeFirestoreWriteAvailability(): Promise<{
       return {
         ok: false,
         isQuotaError: true,
-        message: `⚠️ خادم Firebase لا يزال يرفض الكتابة بسبب حصة المشروع (${FIREBASE_PROJECT_ID}) أو ضغط الكتابة اللحظي: ${rawMsg}`
+        message: `⚠️ خادم Firebase لا يزال يرفض الكتابة بسبب استنفاد حصة مشروع (${FIREBASE_PROJECT_ID}) اليومية (20,000 كتابة لكل المشروع حتى منتصف الليل PT): ${rawMsg}`
       };
     }
     return {

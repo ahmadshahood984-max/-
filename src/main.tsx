@@ -1,4 +1,3 @@
-import {StrictMode} from 'react';
 import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
@@ -19,12 +18,8 @@ window.addEventListener('beforeinstallprompt', (e) => {
 (window as any).getDeferredPrompt = () => deferredPrompt;
 (window as any).clearDeferredPrompt = () => { deferredPrompt = null; };
 
-// Render UI immediately without waiting for network or IndexedDB
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-);
+// Render UI immediately without double-mounting real-time Firestore listeners
+createRoot(document.getElementById('root')!).render(<App />);
 
 // Start background IndexedDB vault hydration, Firestore listeners, stale cache cleanup & SW after first paint
 const scheduleAfterFirstPaint = () => {

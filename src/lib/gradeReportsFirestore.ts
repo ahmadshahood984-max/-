@@ -36,14 +36,23 @@ import {
   getCachedRelayGradeReports,
   getDeletedRelayGradeReportIds,
   pushLiveRelayGradeReport,
+  recordDeletedGradeReportIdsLocally,
   subscribeLiveRelayGradeReports
 } from './liveRelayClient';
 import { isReadCacheFresh, markReadCacheFresh, invalidateReadCache, needsInitialSessionServerSync } from './readCache';
 import { notifyCrossDeviceKeyChanged } from './firebaseSync';
+import { getVaultItem, setVaultItem } from './offlineVault';
 
 export const GRADE_REPORTS_COLLECTION = 'grade_reports';
 const GRADE_REPORTS_CACHE_KEY = 'grade_reports:all';
 const GRADE_REPORTS_LOCAL_KEY = 'school_grade_reports_cache_v1';
+
+// Free ~1MB+ of browser 5MB localStorage by migrating duplicate grade_reports cache strictly to IndexedDB Vault
+try {
+  if (typeof window !== 'undefined' && window.localStorage) {
+    window.localStorage.removeItem(GRADE_REPORTS_LOCAL_KEY);
+  }
+} catch {}
 
 export class FirestoreQuotaExceededError extends Error {
   public readonly isQuota = true;
@@ -323,29 +332,35 @@ function mapSnapshotToGradeReports(snap: QuerySnapshot): SentGradeSheet[] {
 
 let activeGradeReportsFetchPromise: Promise<SentGradeSheet[]> | null = null;
 let lastGradeReportsFetchResult: SentGradeSheet[] | null = null;
+let vaultCacheHydrated = false;
+
+function hydrateGradeReportsCacheFromVault(): void {
+  if (vaultCacheHydrated) return;
+  vaultCacheHydrated = true;
+  getVaultItem(GRADE_REPORTS_LOCAL_KEY)
+    .then((raw) => {
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0 && (!lastGradeReportsFetchResult || lastGradeReportsFetchResult.length === 0)) {
+        lastGradeReportsFetchResult = parsed;
+      }
+    })
+    .catch(() => {});
+}
+
+hydrateGradeReportsCacheFromVault();
 
 function loadCachedGradeReportsFromLocal(): SentGradeSheet[] {
   if (lastGradeReportsFetchResult && lastGradeReportsFetchResult.length > 0) {
     return lastGradeReportsFetchResult;
   }
-  try {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      const raw = window.localStorage.getItem(GRADE_REPORTS_LOCAL_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) return parsed;
-      }
-    }
-  } catch {}
   return [];
 }
 
 function saveCachedGradeReportsToLocal(list: SentGradeSheet[]): void {
   lastGradeReportsFetchResult = list;
   try {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      window.localStorage.setItem(GRADE_REPORTS_LOCAL_KEY, JSON.stringify(list));
-    }
+    setVaultItem(GRADE_REPORTS_LOCAL_KEY, JSON.stringify(list)).catch(() => {});
   } catch {}
 }
 
@@ -422,7 +437,7 @@ export async function fetchGradeReportsFromFirestore(options?: { force?: boolean
       const msg = String(serverErr?.message || serverErr || '').toLowerCase();
       const isPermissionErr = msg.includes('permission') || msg.includes('missing or insufficient');
       if (isPermissionErr) {
-        handleFirestoreError(serverErr, OperationType.GET, GRADE_REPORTS_COLLECTION);
+        console.warn(`[Firestore] Permission notice reading ${GRADE_REPORTS_COLLECTION}:`, msg);
       }
 
       const [cached, relayList] = await Promise.all([readCacheFallback(), relayPromise]);
@@ -454,22 +469,22 @@ export function subscribeGradeReportsRealtime(
   let unsubFirestore: (() => void) | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-  const emitCombined = () => {
+  const emitCombined = (allowEmpty: boolean = false) => {
     if (disposed) return;
     const combined = mergeGradeReportLists(latestFirestoreReports, latestRelayReports);
-    if (combined.length > 0) {
+    if (combined.length > 0 || allowEmpty) {
       onReports(combined);
     }
   };
 
   // Instant updates via SSE Live Relay (when Express server is available)
-  const unsubRelay = subscribeLiveRelayGradeReports(() => {
+  const unsubRelay = subscribeLiveRelayGradeReports((evt) => {
     latestRelayReports = getCachedRelayGradeReports();
-    emitCombined();
+    emitCombined(evt?.type === 'delete');
   });
 
   if (latestFirestoreReports.length > 0 || latestRelayReports.length > 0) {
-    emitCombined();
+    emitCombined(false);
   }
 
   const triggerReportsFetch = (force: boolean) => {
@@ -477,7 +492,7 @@ export function subscribeGradeReportsRealtime(
       .then((reports) => {
         if (disposed) return;
         latestFirestoreReports = reports;
-        emitCombined();
+        emitCombined(true);
       })
       .catch((err) => {
         if (onError) onError(err);
@@ -494,6 +509,16 @@ export function subscribeGradeReportsRealtime(
         (snap) => {
           if (disposed) return;
           const fromCache = !!snap.metadata?.fromCache;
+          const removedIds: string[] = [];
+          snap.docChanges().forEach((c) => {
+            if (c.type === 'removed' && c.doc?.id) {
+              removedIds.push(c.doc.id);
+            }
+          });
+          if (removedIds.length > 0) {
+            recordDeletedGradeReportIdsLocally(removedIds);
+          }
+
           if (!fromCache) {
             if (isInitialSnap) {
               if (snap.size > 0) {
@@ -509,12 +534,13 @@ export function subscribeGradeReportsRealtime(
             }
             markReadCacheFresh(GRADE_REPORTS_CACHE_KEY);
           }
+          const wasInitial = isInitialSnap;
           isInitialSnap = false;
 
           latestFirestoreReports = mapSnapshotToGradeReports(snap);
           const merged = mergeGradeReportLists(latestFirestoreReports, latestRelayReports);
           saveCachedGradeReportsToLocal(merged);
-          emitCombined();
+          emitCombined(!wasInitial || removedIds.length > 0 || !fromCache);
         },
         (err) => {
           if (unsubFirestore) {

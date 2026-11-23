@@ -14,35 +14,54 @@ import {
   markFirestoreWriteQuotaExceeded
 } from './quotaManager';
 import { isReadCacheFresh, markReadCacheFresh } from './readCache';
+import { getVaultItem, setVaultItem } from './offlineVault';
 import { Student } from '../types';
 
 export const STUDENTS_COLLECTION = 'students';
 const DIR_SIGS_STORAGE_KEY = 'school_students_dir_sigs_v1';
 
-const syncedStudentSignatures = new Map<string, string>();
+// Free browser 5MB localStorage by keeping student directory signatures strictly in IndexedDB Vault
 try {
   if (typeof window !== 'undefined' && window.localStorage) {
-    const raw = window.localStorage.getItem(DIR_SIGS_STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object') {
-        Object.entries(parsed).forEach(([k, v]) => {
-          if (typeof v === 'string') syncedStudentSignatures.set(k, v);
-        });
-      }
-    }
+    window.localStorage.removeItem(DIR_SIGS_STORAGE_KEY);
   }
 } catch {}
 
+const syncedStudentSignatures = new Map<string, string>();
+let dirSigsHydrated = false;
+let dirSigsHydrationPromise: Promise<void> | null = null;
+
+async function ensureDirSigsHydrated(): Promise<void> {
+  if (dirSigsHydrated) return;
+  if (dirSigsHydrationPromise) return dirSigsHydrationPromise;
+  dirSigsHydrationPromise = getVaultItem(DIR_SIGS_STORAGE_KEY)
+    .then((raw) => {
+      dirSigsHydrated = true;
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        Object.entries(parsed).forEach(([k, v]) => {
+          if (typeof v === 'string' && !syncedStudentSignatures.has(k)) {
+            syncedStudentSignatures.set(k, v);
+          }
+        });
+      }
+    })
+    .catch(() => {
+      dirSigsHydrated = true;
+    });
+  return dirSigsHydrationPromise;
+}
+
+void ensureDirSigsHydrated();
+
 function persistDirectorySignatures(): void {
   try {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      const out: Record<string, string> = {};
-      syncedStudentSignatures.forEach((v, k) => {
-        out[k] = v;
-      });
-      window.localStorage.setItem(DIR_SIGS_STORAGE_KEY, JSON.stringify(out));
-    }
+    const out: Record<string, string> = {};
+    syncedStudentSignatures.forEach((v, k) => {
+      out[k] = v;
+    });
+    setVaultItem(DIR_SIGS_STORAGE_KEY, JSON.stringify(out)).catch(() => {});
   } catch {}
 }
 
@@ -104,8 +123,12 @@ export async function syncStudentsDirectoryToFirestore(students: Student[]): Pro
   if (!db || isFirestoreWriteQuotaExceeded()) return;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
 
+  await ensureDirSigsHydrated();
   const { classMap, teacherMap } = buildLookupMetadata();
-  const changedDocs: Array<{ id: string; data: Record<string, any> }> = [];
+  // Wait until classes are loaded so we never write 184 docs with empty className and overwrite them 1s later
+  if (classMap.size === 0) return;
+
+  const changedDocs: Array<{ id: string; sig: string; data: Record<string, any> }> = [];
 
   for (const st of students) {
     if (!st || !st.id) continue;
@@ -143,9 +166,9 @@ export async function syncStudentsDirectoryToFirestore(students: Student[]): Pro
       continue;
     }
 
-    syncedStudentSignatures.set(cleanId, sig);
     changedDocs.push({
       id: cleanId,
+      sig,
       data: {
         ...payload,
         updatedAt: Date.now()
@@ -157,12 +180,16 @@ export async function syncStudentsDirectoryToFirestore(students: Student[]): Pro
 
   try {
     for (let i = 0; i < changedDocs.length; i += 400) {
+      if (isFirestoreWriteQuotaExceeded()) break;
       const chunk = changedDocs.slice(i, i + 400);
       const batch = writeBatch(db);
       chunk.forEach((item) => {
         batch.set(doc(db, STUDENTS_COLLECTION, item.id), item.data, { merge: true });
       });
       await batch.commit();
+      chunk.forEach((item) => {
+        syncedStudentSignatures.set(item.id, item.sig);
+      });
       trackFirestoreWrite(chunk.length, `تحديث فهرس الطلاب (${chunk.length})`);
     }
     persistDirectorySignatures();

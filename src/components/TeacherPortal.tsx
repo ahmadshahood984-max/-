@@ -60,8 +60,12 @@ import {
   mergeAndPersistSentGradeSheet,
   mergeAndPersistGrades,
   syncLivePortalDataFromServer,
-  FAST_LIVE_SYNC_KEYS
+  FAST_LIVE_SYNC_KEYS,
+  filterOutDeletedMonthsFromSheets,
+  getDeletedEvaluationMonthsMap,
+  isItemDeletedByEvaluationMonth
 } from '../lib/firebaseSync';
+import { getDeletedRelayGradeReportIds } from '../lib/liveRelayClient';
 import {
   submitGradeReportToFirestore,
   fetchGradeReportsFromFirestore,
@@ -74,7 +78,6 @@ import { printElementById } from '../lib/printUtils';
 import { GradeSheetSignatures } from './GradeSheetSignatures';
 import { GradeCellInput } from './GradeCellInput';
 import { applyGradePartUpdate, computeGradeTotal, hasSubGradeParts } from '../lib/gradeSplitUtils';
-import { syncStudentsDirectoryToFirestore } from '../lib/parentStudentQuery';
 import { motion, AnimatePresence } from 'motion/react';
 
 interface TeacherPortalProps {
@@ -147,7 +150,7 @@ export default function TeacherPortal({
   });
   const [sentGradeSheets, setSentGradeSheets] = useState<SentGradeSheet[]>(() => {
     const saved = localStorage.getItem('school_sent_grade_sheets');
-    return saved ? JSON.parse(saved) : [];
+    return saved ? filterOutDeletedMonthsFromSheets(JSON.parse(saved)) : [];
   });
   const [currentEvaluationMonth, setCurrentEvaluationMonth] = useState<string>(() => {
     const raw = localStorage.getItem('school_evaluation_current_month');
@@ -187,7 +190,24 @@ export default function TeacherPortal({
       } else if (key === 'school_monthly_evaluations' && value) {
         try { setMonthlyEvaluations(JSON.parse(value)); } catch (err) {}
       } else if (key === 'school_sent_grade_sheets' && value) {
-        try { setSentGradeSheets(deduplicateGradeSheetsPreservingTeachers(JSON.parse(value))); } catch (err) {}
+        try { setSentGradeSheets(filterOutDeletedMonthsFromSheets(deduplicateGradeSheetsPreservingTeachers(JSON.parse(value)))); } catch (err) {}
+      } else if (key === 'school_deleted_evaluation_months') {
+        const delMap = getDeletedEvaluationMonthsMap();
+        setSentGradeSheets(prev => filterOutDeletedMonthsFromSheets(prev, delMap));
+        setMonthlyEvaluations(prev => {
+          const next = { ...prev };
+          let changed = false;
+          for (const k of Object.keys(next)) {
+            const val = next[k];
+            const m = String(val?.month || '').trim() || (k.includes('_') ? k.slice(k.indexOf('_') + 1).trim() : '');
+            if (m && delMap[m]) {
+              delete next[k];
+              changed = true;
+            }
+          }
+          if (changed) saveSyncedLocalOnly('school_monthly_evaluations', JSON.stringify(next));
+          return changed ? next : prev;
+        });
       } else if (key === 'school_evaluation_current_month' && value) {
         try {
           setCurrentEvaluationMonth(value.startsWith('"') ? JSON.parse(value) : value);
@@ -207,13 +227,36 @@ export default function TeacherPortal({
       }
     };
     const reloadTeacherSyncedData = () => {
+      const delMap = getDeletedEvaluationMonthsMap();
+      const deletedReportIds = getDeletedRelayGradeReportIds();
+      const isReportAlive = (sh: SentGradeSheet) => {
+        if (!sh?.id) return false;
+        const delTs = deletedReportIds.get(sh.id) || 0;
+        const shTs = Number((sh as any).updatedAt) || new Date(sh.dateSent || 0).getTime() || 0;
+        if (delTs > shTs) return false;
+        return !isItemDeletedByEvaluationMonth(sh.month, shTs, delMap);
+      };
       try {
         const savedSheets = localStorage.getItem('school_sent_grade_sheets');
-        if (savedSheets) setSentGradeSheets(deduplicateGradeSheetsPreservingTeachers(JSON.parse(savedSheets)));
+        if (savedSheets) {
+          const parsed = JSON.parse(savedSheets);
+          if (Array.isArray(parsed)) {
+            setSentGradeSheets(deduplicateGradeSheetsPreservingTeachers(parsed.filter(isReportAlive)));
+          }
+        }
       } catch {}
       try {
         const savedEval = localStorage.getItem('school_monthly_evaluations');
-        if (savedEval) setMonthlyEvaluations(JSON.parse(savedEval));
+        if (savedEval) {
+          const parsedEval = JSON.parse(savedEval);
+          if (parsedEval && typeof parsedEval === 'object') {
+            for (const k of Object.keys(parsedEval)) {
+              const m = String(parsedEval[k]?.month || '').trim() || (k.includes('_') ? k.slice(k.indexOf('_') + 1).trim() : '');
+              if (m && delMap[m]) delete parsedEval[k];
+            }
+            setMonthlyEvaluations(parsedEval);
+          }
+        }
       } catch {}
       try {
         const savedMonth = localStorage.getItem('school_evaluation_current_month');
@@ -242,18 +285,28 @@ export default function TeacherPortal({
       .catch(() => {});
 
     const mergeDirectReports = (directReports: SentGradeSheet[]) => {
-      if (!Array.isArray(directReports) || directReports.length === 0) return;
+      if (!Array.isArray(directReports)) return;
+      const delMap = getDeletedEvaluationMonthsMap();
+      const deletedReportIds = getDeletedRelayGradeReportIds();
+      const isReportAlive = (sh: SentGradeSheet) => {
+        if (!sh?.id) return false;
+        const delTs = deletedReportIds.get(sh.id) || 0;
+        const shTs = Number((sh as any).updatedAt) || new Date(sh.dateSent || 0).getTime() || 0;
+        if (delTs > shTs) return false;
+        return !isItemDeletedByEvaluationMonth(sh.month, shTs, delMap);
+      };
+      const cleanDirect = directReports.filter(isReportAlive);
       let existingLocal: SentGradeSheet[] = [];
       try {
         const raw = localStorage.getItem('school_sent_grade_sheets');
         if (raw) {
           const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed)) existingLocal = parsed;
+          if (Array.isArray(parsed)) existingLocal = parsed.filter(isReportAlive);
         }
       } catch {}
-      const mergedLocal = deduplicateGradeSheetsPreservingTeachers([...directReports, ...existingLocal]);
+      const mergedLocal = deduplicateGradeSheetsPreservingTeachers([...cleanDirect, ...existingLocal]);
       saveSyncedLocalOnly('school_sent_grade_sheets', JSON.stringify(mergedLocal));
-      setSentGradeSheets(prev => deduplicateGradeSheetsPreservingTeachers([...directReports, ...prev]));
+      setSentGradeSheets(prev => deduplicateGradeSheetsPreservingTeachers([...cleanDirect, ...prev.filter(isReportAlive)]));
     };
 
     const handleLiveSyncCompleted = () => {
@@ -287,11 +340,7 @@ export default function TeacherPortal({
     }
   }, [selectedTeacherId]);
 
-  useEffect(() => {
-    if (Array.isArray(students) && students.length > 0) {
-      void syncStudentsDirectoryToFirestore(students);
-    }
-  }, [students]);
+  // Directory index sync is managed centrally by DirectorPortal to avoid redundant 184-doc rewrites per teacher login
 
   const isMessageToCurrentTeacher = (m: Message) => {
     if (!m) return false;

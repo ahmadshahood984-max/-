@@ -74,6 +74,24 @@ export function getDeletedRelayGradeReportIds(): Map<string, number> {
   return deletedGradeReportIds;
 }
 
+export function recordDeletedGradeReportIdsLocally(ids: string[], deletedAt: number = Date.now()): void {
+  if (!Array.isArray(ids) || ids.length === 0) return;
+  let changed = false;
+  for (const rawId of ids) {
+    const id = String(rawId || '').trim();
+    if (!id) continue;
+    const prev = deletedGradeReportIds.get(id) || 0;
+    if (deletedAt > prev) {
+      deletedGradeReportIds.set(id, deletedAt);
+      cachedRelayGradeReports.delete(id);
+      changed = true;
+    }
+  }
+  if (changed) {
+    persistDeletedGradeReportIds();
+  }
+}
+
 function emitGradeReportEvent(event: {
   type: 'upsert' | 'delete' | 'snapshot';
   report?: SentGradeSheet;

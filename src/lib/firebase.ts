@@ -7,10 +7,7 @@ import { initializeApp } from 'firebase/app';
 import { 
   initializeFirestore,
   getFirestore,
-  persistentLocalCache, 
-  persistentMultipleTabManager, 
   memoryLocalCache,
-  CACHE_SIZE_UNLIMITED,
   doc,
   getDoc,
   getDocFromCache,
@@ -46,30 +43,35 @@ try {
   // ignore
 }
 
+// Purge any corrupted legacy Firestore SDK IndexedDB persistence stores (prevents v12 ca9/b815 watch assertions)
+// Durable offline storage is handled safely by `offlineVault.ts` (`school_offline_vault_db`).
+if (typeof window !== 'undefined' && typeof indexedDB !== 'undefined' && typeof indexedDB.databases === 'function') {
+  indexedDB.databases()
+    .then((dbs) => {
+      dbs.forEach((entry) => {
+        if (entry?.name && entry.name.startsWith('firestore/')) {
+          try {
+            indexedDB.deleteDatabase(entry.name);
+          } catch {}
+        }
+      });
+    })
+    .catch(() => {});
+}
+
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 
-// Initialize Cloud Firestore with auto-detected streaming/long-polling and unlimited IndexedDB persistent cache
-// Student grades and school data are cached locally in the browser across sessions (0 server reads on reopen)
+// Initialize Cloud Firestore with memoryLocalCache + long-polling auto-detection
+// to eliminate multi-tab WatchChangeAggregator (ID: ca9 / b815) assertion crashes.
 let firestoreInstance: Firestore;
 try {
   firestoreInstance = initializeFirestore(app, {
     experimentalAutoDetectLongPolling: true,
-    localCache: persistentLocalCache({
-      cacheSizeBytes: CACHE_SIZE_UNLIMITED,
-      tabManager: persistentMultipleTabManager()
-    })
+    localCache: memoryLocalCache()
   }, databaseId);
-} catch (cacheErr) {
-  console.warn('[Firestore] IndexedDB persistentLocalCache unavailable, falling back to memoryLocalCache:', cacheErr);
-  try {
-    firestoreInstance = initializeFirestore(app, {
-      experimentalAutoDetectLongPolling: true,
-      localCache: memoryLocalCache()
-    }, databaseId);
-  } catch {
-    firestoreInstance = getFirestore(app, databaseId);
-  }
+} catch {
+  firestoreInstance = getFirestore(app, databaseId);
 }
 
 export const db = firestoreInstance;
@@ -179,22 +181,21 @@ async function testConnection() {
   }
 
   // If SDK WebChannel/Long-Polling reported offline transiently during startup,
-  // verify actual Firebase configuration reachability via Firestore REST API before logging config error.
+  // verify actual Firebase configuration reachability via Firestore REST API before logging warning.
   if (lastError instanceof Error && lastError.message.includes('the client is offline')) {
     try {
       const restUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(firebaseConfig.projectId)}/databases/${encodeURIComponent(databaseId)}/documents/test/connection?key=${encodeURIComponent(firebaseConfig.apiKey)}`;
       const res = await fetch(restUrl, { method: 'GET', cache: 'no-store' });
-      if (res.status === 200 || res.status === 404) {
-        console.warn('[Firestore] Startup transport took extra time while Firebase configuration is valid.');
+      if (res.status === 200 || res.status === 404 || res.status === 429 || res.status === 403) {
+        console.warn('[Firestore] Startup transport check completed via REST (status ' + res.status + ').');
         return;
       }
     } catch {
-      // If offline/unreachable while navigator.onLine is false, do not report config failure
       if (typeof navigator !== 'undefined' && navigator.onLine === false) {
         return;
       }
     }
-    console.error('Please check your Firebase configuration.');
+    console.warn('[Firestore] Startup connection check delayed; will rely on live listeners and REST fallback.');
   }
 }
 testConnection();

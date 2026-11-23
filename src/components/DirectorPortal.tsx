@@ -84,10 +84,10 @@ import { applyGradePartUpdate, computeGradeTotal, hasSubGradeParts } from '../li
 import { motion, AnimatePresence } from 'motion/react';
 import { loadXlsx } from '../lib/xlsxLoader';
 import { db, writeFirestoreDocFast } from '../lib/firebase';
-import { collection, addDoc, setDoc, deleteDoc, doc, serverTimestamp, writeBatch, getDocs } from 'firebase/firestore';
+import { collection, addDoc, setDoc, deleteDoc, doc, serverTimestamp, writeBatch, getDocs, query, where } from 'firebase/firestore';
 import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead, checkDailyRollover, fetchCentralizedConsumptionOnce, resetCentralizedFirestoreConsumption, calibrateCentralConsumptionBaseline, getTimeUntilFirebaseQuotaReset, probeFirestoreWriteAvailability, SPARK_DAILY_READ_LIMIT, SPARK_DAILY_WRITE_LIMIT, SPARK_STORAGE_LIMIT_MB, QUOTA_WARNING_RATIO, FIREBASE_PROJECT_ID, FIREBASE_DATABASE_ID } from '../lib/firestoreTracker';
 import { calculateStorageUsageReport, measureLiveCloudStorageAudit, StorageUsageReport } from '../lib/storageUsage';
-import { persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate, saveSyncedLocalOnly, recordDeletedStudentIds, queueOfflineNotification, deduplicateGradeSheetsPreservingTeachers, syncLivePortalDataFromServer, flushPendingLocalSyncKeys, FAST_LIVE_SYNC_KEYS, SYNC_KEYS } from '../lib/firebaseSync';
+import { persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate, saveSyncedLocalOnly, recordDeletedStudentIds, queueOfflineNotification, deduplicateGradeSheetsPreservingTeachers, syncLivePortalDataFromServer, flushPendingLocalSyncKeys, FAST_LIVE_SYNC_KEYS, SYNC_KEYS, filterOutDeletedMonthsFromSheets, getDeletedEvaluationMonthsMap, isItemDeletedByEvaluationMonth, isGradeMessageDeletedByMonth } from '../lib/firebaseSync';
 import {
   submitGradeReportToFirestore,
   updateGradeReportInFirestore,
@@ -97,7 +97,7 @@ import {
   extractFirestoreErrorMessage,
   isFirestoreQuotaError
 } from '../lib/gradeReportsFirestore';
-import { getDeletedRelayGradeReportIds } from '../lib/liveRelayClient';
+import { getDeletedRelayGradeReportIds, recordDeletedGradeReportIdsLocally } from '../lib/liveRelayClient';
 import {
   isFirestoreQuotaExceeded,
   isFirestoreWriteQuotaExceeded,
@@ -2105,8 +2105,29 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
             setCurrentEvaluationMonth(value.startsWith('"') ? parsed : value);
             break;
           case 'school_sent_grade_sheets':
-            setSentGradeSheets(deduplicateGradeSheets(parsed));
+            setSentGradeSheets(filterOutDeletedMonthsFromSheets(deduplicateGradeSheets(parsed)));
             break;
+          case 'school_deleted_evaluation_months': {
+            const delMap = getDeletedEvaluationMonthsMap();
+            setSentGradeSheets(prev => filterOutDeletedMonthsFromSheets(prev, delMap));
+            setGrades(prev => prev.filter(g => {
+              const ts = g?.date ? new Date(g.date).getTime() || 0 : 0;
+              return !isItemDeletedByEvaluationMonth(g?.examName, ts, delMap);
+            }));
+            setMonthlyEvaluations(prev => {
+              const next = { ...prev };
+              let changed = false;
+              for (const k of Object.keys(next)) {
+                const m = String(next[k]?.month || '').trim() || (k.includes('_') ? k.slice(k.indexOf('_') + 1).trim() : '');
+                if (m && delMap[m]) {
+                  delete next[k];
+                  changed = true;
+                }
+              }
+              return changed ? next : prev;
+            });
+            break;
+          }
           case 'school_grades':
             setGrades(parsed);
             break;
@@ -2253,11 +2274,20 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       setWelcomeMsgs(getStoredWelcomeMessages());
       const savedSent = localStorage.getItem('school_sent_grade_sheets');
       if (savedSent) {
-        try { setSentGradeSheets(deduplicateGradeSheets(JSON.parse(savedSent))); } catch (e) {}
+        try { setSentGradeSheets(filterOutDeletedMonthsFromSheets(deduplicateGradeSheets(JSON.parse(savedSent)))); } catch (e) {}
       }
       const savedGrades = localStorage.getItem('school_grades');
       if (savedGrades) {
-        try { setGrades(JSON.parse(savedGrades)); } catch (e) {}
+        try {
+          const parsedGrades = JSON.parse(savedGrades);
+          if (Array.isArray(parsedGrades)) {
+            const delMap = getDeletedEvaluationMonthsMap();
+            setGrades(parsedGrades.filter(g => {
+              const ts = g?.date ? new Date(g.date).getTime() || 0 : 0;
+              return !isItemDeletedByEvaluationMonth(g?.examName, ts, delMap);
+            }));
+          }
+        } catch (e) {}
       }
     };
     reloadFromLocalStorage();
@@ -2267,34 +2297,34 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
 
     // Directly subscribe & fetch all grade reports (including pending 'submitted' reports) from Firestore `grade_reports`
     const applyDirectGradeReports = (directReports: SentGradeSheet[]) => {
-      if (!Array.isArray(directReports) || directReports.length === 0) return;
+      if (!Array.isArray(directReports)) return;
 
       const deletedMap = getDeletedRelayGradeReportIds();
+      const deletedMonthsMap = getDeletedEvaluationMonthsMap();
+      const isReportAlive = (sh: SentGradeSheet | null | undefined) => {
+        if (!sh?.id) return false;
+        const delTs = deletedMap.get(sh.id) || 0;
+        const shTs = Number((sh as any).updatedAt) || new Date(sh.dateSent || 0).getTime() || 0;
+        if (delTs > shTs) return false;
+        return !isItemDeletedByEvaluationMonth(sh.month, shTs, deletedMonthsMap);
+      };
+
+      const aliveDirect = directReports.filter(isReportAlive);
       let existingLocalSheets: SentGradeSheet[] = [];
       try {
         const raw = localStorage.getItem('school_sent_grade_sheets');
         if (raw) {
           const parsed = JSON.parse(raw);
           if (Array.isArray(parsed)) {
-            existingLocalSheets = parsed.filter(sh => {
-              if (!sh?.id) return false;
-              const delTs = deletedMap.get(sh.id) || 0;
-              const shTs = Number((sh as any).updatedAt) || new Date(sh.dateSent || 0).getTime() || 0;
-              return delTs <= shTs;
-            });
+            existingLocalSheets = parsed.filter(isReportAlive);
           }
         }
       } catch {}
-      const mergedLocalSheets = deduplicateGradeSheetsPreservingTeachers([...directReports, ...existingLocalSheets]);
+      const mergedLocalSheets = deduplicateGradeSheetsPreservingTeachers([...aliveDirect, ...existingLocalSheets]);
       saveSyncedLocalOnly('school_sent_grade_sheets', JSON.stringify(mergedLocalSheets));
       setSentGradeSheets(prev => {
-        const cleanPrev = prev.filter(sh => {
-          if (!sh?.id) return false;
-          const delTs = deletedMap.get(sh.id) || 0;
-          const shTs = Number((sh as any).updatedAt) || new Date(sh.dateSent || 0).getTime() || 0;
-          return delTs <= shTs;
-        });
-        return deduplicateGradeSheetsPreservingTeachers([...directReports, ...cleanPrev]);
+        const cleanPrev = prev.filter(isReportAlive);
+        return deduplicateGradeSheetsPreservingTeachers([...aliveDirect, ...cleanPrev]);
       });
 
       // Hydrate any missing student+subject+month scores from submitted/approved reports into local `grades`
@@ -2307,7 +2337,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
             currentGrades.map(g => `${String(g.studentId || '').trim()}__${String(g.subject || '').trim()}__${String(g.examName || '').trim()}`)
           );
           const additions: Grade[] = [];
-          directReports.forEach(report => {
+          aliveDirect.forEach(report => {
             const month = String(report.month || '').trim();
             if (!month || !Array.isArray(report.studentsSummary)) return;
             report.studentsSummary.forEach(st => {
@@ -4878,9 +4908,21 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     if (!savedEvaluationMonths.includes(trimmed)) {
       updated = [...savedEvaluationMonths, trimmed];
       setSavedEvaluationMonths(updated);
-      localStorage.setItem('school_saved_evaluation_months', JSON.stringify(updated));
+      const serializedMonths = JSON.stringify(updated);
+      saveSyncedLocalOnly('school_saved_evaluation_months', serializedMonths);
+      saveSyncedLocalOnly('school_evaluation_saved_months', serializedMonths);
       persistDirectToFirestore('school_saved_evaluation_months', updated);
-      safeDispatchStorageUpdate('school_saved_evaluation_months', JSON.stringify(updated));
+      persistDirectToFirestore('school_evaluation_saved_months', updated);
+      safeDispatchStorageUpdate('school_saved_evaluation_months', serializedMonths);
+    }
+    const existingDeleted = getDeletedEvaluationMonthsMap();
+    if (existingDeleted[trimmed]) {
+      const nextDeleted = { ...existingDeleted };
+      delete nextDeleted[trimmed];
+      const delSerialized = JSON.stringify(nextDeleted);
+      saveSyncedLocalOnly('school_deleted_evaluation_months', delSerialized);
+      persistDirectToFirestore('school_deleted_evaluation_months', nextDeleted);
+      safeDispatchStorageUpdate('school_deleted_evaluation_months', delSerialized);
     }
     setCurrentEvaluationMonth(trimmed);
     localStorage.setItem('school_evaluation_current_month', trimmed);
@@ -5154,6 +5196,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     if (!sheet?.id) return;
     setDeletingArchiveKey(sheet.id);
     try {
+      recordDeletedGradeReportIdsLocally([sheet.id]);
       const next = sentGradeSheets.filter(s => s.id !== sheet.id);
       setSentGradeSheets(next);
       const serialized = JSON.stringify(next);
@@ -5180,14 +5223,42 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     if (!cleanMonth) return;
     setDeletingArchiveKey(`month_${cleanMonth}`);
     try {
+      const deletedAt = Date.now();
       const sheetsToDelete = sentGradeSheets.filter(s => String(s.month || '').trim() === cleanMonth);
-      if (sheetsToDelete.length === 0) return;
+      const deletedSheetIds = sheetsToDelete.map(s => s.id).filter(Boolean);
+      if (deletedSheetIds.length > 0) {
+        recordDeletedGradeReportIdsLocally(deletedSheetIds, deletedAt);
+      }
 
-      const next = sentGradeSheets.filter(s => String(s.month || '').trim() !== cleanMonth);
-      setSentGradeSheets(next);
-      const serialized = JSON.stringify(next);
-      saveSyncedLocalOnly('school_sent_grade_sheets', serialized);
-      safeDispatchStorageUpdate('school_sent_grade_sheets', serialized);
+      // Collect all affected student IDs from sent sheets, raw grades, and monthly evaluations of this month
+      const affectedIdsSet = new Set<string>();
+      sheetsToDelete.forEach(sh => {
+        (sh.studentsSummary || []).forEach(sm => {
+          const sid = String(sm.studentId || '').trim();
+          if (sid) affectedIdsSet.add(sid);
+        });
+      });
+      grades.forEach(g => {
+        if (String(g.examName || '').trim() === cleanMonth && g.studentId) {
+          affectedIdsSet.add(String(g.studentId).trim());
+        }
+      });
+      Object.entries(monthlyEvaluations || {}).forEach(([k, rawVal]) => {
+        const val = rawVal as { month?: string } | undefined;
+        const valMonth = String(val?.month || '').trim();
+        const keyMatches = k.endsWith(`_${cleanMonth}`);
+        if (keyMatches || valMonth === cleanMonth) {
+          const rawId = keyMatches ? k.slice(0, k.length - (`_${cleanMonth}`).length) : k;
+          if (rawId) affectedIdsSet.add(rawId.trim());
+        }
+      });
+
+      // 1. Remove sent grade sheets for this month
+      const nextSheets = sentGradeSheets.filter(s => String(s.month || '').trim() !== cleanMonth);
+      setSentGradeSheets(nextSheets);
+      const sheetsSerialized = JSON.stringify(nextSheets);
+      saveSyncedLocalOnly('school_sent_grade_sheets', sheetsSerialized);
+      safeDispatchStorageUpdate('school_sent_grade_sheets', sheetsSerialized);
       if (selectedSentSheetToView && String(selectedSentSheetToView.month || '').trim() === cleanMonth) {
         setSelectedSentSheetToView(null);
       }
@@ -5195,17 +5266,118 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
         setExpandedSentMonth(null);
       }
 
-      const affectedIds: string[] = Array.from(
-        new Set<string>(
-          sheetsToDelete.flatMap(sh => (sh.studentsSummary || []).map(sm => String(sm.studentId || '').trim()).filter(Boolean))
-        )
-      );
+      // 2. Remove raw grades for this month
+      const nextGrades = grades.filter(g => String(g.examName || '').trim() !== cleanMonth);
+      const gradesChanged = nextGrades.length !== grades.length;
+      if (gradesChanged) {
+        setGrades(nextGrades);
+        const gradesSerialized = JSON.stringify(nextGrades);
+        saveSyncedLocalOnly('school_grades', gradesSerialized);
+        safeDispatchStorageUpdate('school_grades', gradesSerialized);
+      }
 
-      await Promise.all([
+      // 3. Remove monthly evaluations for this month
+      const nextEvals: typeof monthlyEvaluations = {};
+      let evalsChanged = false;
+      for (const [k, rawVal] of Object.entries(monthlyEvaluations || {})) {
+        const val = rawVal as { month: string; text: string; teacherText?: string; directorText?: string };
+        const valMonth = String(val?.month || '').trim();
+        if (k.endsWith(`_${cleanMonth}`) || valMonth === cleanMonth) {
+          evalsChanged = true;
+        } else {
+          nextEvals[k] = val;
+        }
+      }
+      if (evalsChanged) {
+        setMonthlyEvaluations(nextEvals);
+        const evalsSerialized = JSON.stringify(nextEvals);
+        saveSyncedLocalOnly('school_monthly_evaluations', evalsSerialized);
+        safeDispatchStorageUpdate('school_monthly_evaluations', evalsSerialized);
+      }
+
+      // 4. Remove month from saved evaluation months list & update active month if needed
+      const nextSavedMonths = savedEvaluationMonths.filter(m => String(m || '').trim() !== cleanMonth);
+      const monthsChanged = nextSavedMonths.length !== savedEvaluationMonths.length;
+      let nextCurrentMonth = currentEvaluationMonth;
+      if (monthsChanged) {
+        setSavedEvaluationMonths(nextSavedMonths);
+        const monthsSerialized = JSON.stringify(nextSavedMonths);
+        saveSyncedLocalOnly('school_saved_evaluation_months', monthsSerialized);
+        saveSyncedLocalOnly('school_evaluation_saved_months', monthsSerialized);
+        safeDispatchStorageUpdate('school_saved_evaluation_months', monthsSerialized);
+        safeDispatchStorageUpdate('school_evaluation_saved_months', monthsSerialized);
+      }
+      if (String(currentEvaluationMonth || '').trim() === cleanMonth) {
+        nextCurrentMonth = nextSavedMonths[0] || '';
+        setCurrentEvaluationMonth(nextCurrentMonth);
+        saveSyncedLocalOnly('school_evaluation_current_month', nextCurrentMonth);
+        safeDispatchStorageUpdate('school_evaluation_current_month', nextCurrentMonth);
+      }
+
+      // 5. Record tombstone for deleted month so stale caches/messages on any portal/APK never resurrect it
+      const nextDeletedMonths = {
+        ...getDeletedEvaluationMonthsMap(),
+        [cleanMonth]: deletedAt
+      };
+      const deletedMonthsSerialized = JSON.stringify(nextDeletedMonths);
+      saveSyncedLocalOnly('school_deleted_evaluation_months', deletedMonthsSerialized);
+      safeDispatchStorageUpdate('school_deleted_evaluation_months', deletedMonthsSerialized);
+
+      // 6. Clean any grade_report / auto messages mentioning this deleted month
+      const singleMonthTombstone = { [cleanMonth]: deletedAt };
+      const nextMessages = messages.filter(m => {
+        if (!m) return false;
+        const isGradeMsg = m.category === 'grade_report' || isAutoGradeNotificationMessage(m);
+        if (isGradeMsg && isGradeMessageDeletedByMonth(m.content, m.date, singleMonthTombstone)) {
+          return false;
+        }
+        return true;
+      });
+      const messagesChanged = nextMessages.length !== messages.length;
+      if (messagesChanged) {
+        setMessages(nextMessages);
+        const msgsSerialized = JSON.stringify(nextMessages);
+        saveSyncedLocalOnly('school_messages', msgsSerialized);
+        safeDispatchStorageUpdate('school_messages', msgsSerialized);
+      }
+
+      const affectedIds = Array.from(affectedIdsSet);
+      const cloudTasks: Promise<any>[] = [
         ...sheetsToDelete.map(sh => deleteGradeReportFromFirestore(sh.id).catch(() => {})),
-        persistDirectToFirestore('school_sent_grade_sheets', next, { timeoutMs: 5000 }).catch(() => false),
-        resyncAndClearDeletedSheetStudents(affectedIds, next).catch(() => false)
-      ]);
+        persistDirectToFirestore('school_deleted_evaluation_months', nextDeletedMonths, { timeoutMs: 5000 }).catch(() => false),
+        persistDirectToFirestore('school_sent_grade_sheets', nextSheets, { timeoutMs: 5000 }).catch(() => false),
+        resyncAndClearDeletedSheetStudents(affectedIds, nextSheets).catch(() => false)
+      ];
+      if (gradesChanged) {
+        cloudTasks.push(persistDirectToFirestore('school_grades', nextGrades, { timeoutMs: 5000 }).catch(() => false));
+      }
+      if (evalsChanged) {
+        cloudTasks.push(persistDirectToFirestore('school_monthly_evaluations', nextEvals, { timeoutMs: 5000 }).catch(() => false));
+      }
+      if (monthsChanged) {
+        cloudTasks.push(persistDirectToFirestore('school_saved_evaluation_months', nextSavedMonths, { timeoutMs: 5000 }).catch(() => false));
+        cloudTasks.push(persistDirectToFirestore('school_evaluation_saved_months', nextSavedMonths, { timeoutMs: 5000 }).catch(() => false));
+      }
+      if (nextCurrentMonth !== currentEvaluationMonth) {
+        cloudTasks.push(persistDirectToFirestore('school_evaluation_current_month', nextCurrentMonth, { timeoutMs: 5000 }).catch(() => false));
+      }
+      if (messagesChanged) {
+        cloudTasks.push(persistDirectToFirestore('school_messages', nextMessages, { timeoutMs: 5000 }).catch(() => false));
+      }
+      if (db && !isFirestoreWriteQuotaExceeded()) {
+        cloudTasks.push(
+          getDocs(query(collection(db, 'notifications'), where('month', '==', cleanMonth)))
+            .then(async snap => {
+              if (snap.empty) return;
+              const batch = writeBatch(db);
+              snap.forEach(d => batch.delete(d.ref));
+              await batch.commit();
+            })
+            .catch(() => {})
+        );
+      }
+
+      await Promise.all(cloudTasks);
       setConfirmDeleteKey(null);
     } finally {
       setDeletingArchiveKey(null);
@@ -11171,7 +11343,7 @@ ${sampleEval}
                       <div className="flex flex-wrap items-center gap-2 bg-indigo-50/70 border border-indigo-200/80 p-2 sm:py-1.5 rounded-2xl shadow-2xs">
                         <span className="text-[11px] font-extrabold text-indigo-950 whitespace-nowrap">📋 التقييم الشهري لشهر:</span>
                         {!isAddingNewMonth ? (
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
                             <select
                               value={currentEvaluationMonth}
                               onChange={e => {
@@ -11193,6 +11365,37 @@ ${sampleEval}
                               ))}
                               <option value="add_new" className="text-indigo-600 font-bold">➕ إضافة شهر جديد...</option>
                             </select>
+                            {currentEvaluationMonth && (
+                              confirmDeleteKey === `eval_bar_month_${currentEvaluationMonth}` ? (
+                                <div className="flex items-center gap-1 bg-rose-50 border border-rose-200 px-2 py-0.5 rounded-xl">
+                                  <button
+                                    type="button"
+                                    disabled={deletingArchiveKey === `month_${currentEvaluationMonth}`}
+                                    onClick={() => handleDeleteSentMonth(currentEvaluationMonth)}
+                                    className="px-2 py-0.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-[10px] font-bold cursor-pointer disabled:opacity-50"
+                                  >
+                                    {deletingArchiveKey === `month_${currentEvaluationMonth}` ? 'جاري...' : 'تأكيد الحذف النهائي'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setConfirmDeleteKey(null)}
+                                    className="px-1.5 py-0.5 bg-white text-slate-600 rounded-lg text-[10px] font-bold border border-slate-200 cursor-pointer"
+                                  >
+                                    إلغاء
+                                  </button>
+                                </div>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirmDeleteKey(`eval_bar_month_${currentEvaluationMonth}`)}
+                                  className="px-2 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-xl text-[10px] font-bold cursor-pointer flex items-center gap-1 transition"
+                                  title="حذف هذا الشهر نهائياً من المدير والطالب وولي الأمر"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                  <span>حذف الشهر</span>
+                                </button>
+                              )
+                            )}
                             <span className="bg-emerald-100 text-emerald-800 border border-emerald-300 text-[10px] font-black px-2 py-0.5 rounded-full whitespace-nowrap hidden sm:inline-block">
                               🔒 محدد رسمياً للمعلمين
                             </span>
@@ -14938,11 +15141,11 @@ ${sampleEval}
                       <div className="mt-1 bg-white/90 border border-rose-200 rounded-xl p-2.5 text-[11px] text-rose-950 space-y-1.5">
                         <p className="font-bold leading-relaxed">
                           {isSharedProjectWriteLimit
-                            ? `ملاحظة مهمة: قاعدة مدرستكم استهلكت فقط ${usedWrites.toLocaleString()} من أصل ${SPARK_DAILY_WRITE_LIMIT.toLocaleString()} كتابة اليوم (${writesUsedPct.toFixed(1)}%). لكن حصة Spark المجانية في Firebase تُحسب بشكل مشترك على مستوى المشروع (${FIREBASE_PROJECT_ID}) أو بسبب ضغط كتابة لحظي مؤقت.`
+                            ? `ملاحظة مهمة: هذا المتصفح سجل فقط ${usedWrites.toLocaleString()} من أصل ${SPARK_DAILY_WRITE_LIMIT.toLocaleString()} كتابة اليوم (${writesUsedPct.toFixed(1)}%). لكن خادم Google Firebase أرجع خطأ 429 لأن إجمالي الكتابات عبر جميع الأجهزة (أو النسخة السابقة على Netlify / الـ APK قبل تحديث الدفعة الموحّدة) استنفد حصة المشروع المجانية (${FIREBASE_PROJECT_ID}) لليوم.`
                             : 'وصل استهلاك الكتابات اليومي لهذه القاعدة إلى الحد الأقصى المجاني.'}
                         </p>
-                        <p className="text-[10px] text-slate-600 leading-relaxed">
-                          القراءة والمزامنة المباشرة بين أجهزتكم عبر البث الفوري (Live Relay) والذاكرة المحلية مستمرة بشكل طبيعي ولا يضيع أي تعديل.
+                        <p className="text-[10px] text-slate-700 leading-relaxed font-semibold">
+                          للرفع الفوري دون انتظار: يمكنك ترقية المشروع في Firebase Console إلى خطة <span className="font-mono font-bold">Blaze</span> (تبقى الـ 20,000 كتابة يومياً مجانية بالكامل ويُزال القفل فوراً)، أو انتظار التصفير التلقائي عند منتصف الليل بتوقيت Firebase الموضح أعلاه — مع نشر التحديث على Netlify لتتوقف الأجهزة الأخرى عن استهلاك الحصة.
                           {writeQuotaInfo.cooldownRemainingSec > 0 && (
                             <span className="font-bold text-rose-700"> (إعادة فحص تلقائي خلال {writeQuotaInfo.cooldownRemainingSec} ث)</span>
                           )}
@@ -18109,6 +18312,63 @@ ${sampleEval}
                           className="w-full sm:w-64 text-xs border border-slate-200 rounded-xl px-3 py-1.5 bg-slate-50 focus:bg-white focus:border-indigo-500 focus:outline-none text-right"
                         />
                       </div>
+
+                      {(() => {
+                        const modalMonths = Array.from(
+                          new Set(
+                            [
+                              ...sentGradeSheets.map(sh => String(sh.month || '').trim()).filter(Boolean),
+                              ...savedEvaluationMonths.map(m => String(m || '').trim()).filter(Boolean)
+                            ]
+                          )
+                        );
+                        if (modalMonths.length === 0) return null;
+                        return (
+                          <div className="bg-rose-50/60 border border-rose-200/80 rounded-2xl p-3 space-y-2">
+                            <div className="text-[11px] font-extrabold text-rose-900 flex items-center justify-between gap-2">
+                              <span>🗑️ حذف شهر تقييم نهائياً (يُحذف من المدير والمعلم والطالب وولي الأمر):</span>
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              {modalMonths.map(mName => {
+                                const count = sentGradeSheets.filter(sh => String(sh.month || '').trim() === mName).length;
+                                const isConfirmingM = confirmDeleteKey === `modal_month_${mName}`;
+                                const isDeletingM = deletingArchiveKey === `month_${mName}`;
+                                return isConfirmingM ? (
+                                  <div key={mName} className="flex items-center gap-1.5 bg-white border border-rose-300 px-2.5 py-1 rounded-xl shadow-2xs">
+                                    <span className="text-[11px] font-bold text-rose-900">حذف شهر {mName}؟</span>
+                                    <button
+                                      type="button"
+                                      disabled={isDeletingM}
+                                      onClick={() => handleDeleteSentMonth(mName)}
+                                      className="px-2 py-0.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-[11px] font-bold cursor-pointer disabled:opacity-50"
+                                    >
+                                      {isDeletingM ? 'جاري الحذف...' : 'تأكيد'}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setConfirmDeleteKey(null)}
+                                      className="px-2 py-0.5 bg-slate-100 text-slate-600 rounded-lg text-[11px] font-bold cursor-pointer"
+                                    >
+                                      إلغاء
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    key={mName}
+                                    type="button"
+                                    onClick={() => setConfirmDeleteKey(`modal_month_${mName}`)}
+                                    className="px-2.5 py-1 bg-white hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-xl text-[11px] font-bold flex items-center gap-1.5 cursor-pointer transition shadow-2xs"
+                                    title={`حذف شهر ${mName} بالكامل من المدير والطالب وولي الأمر`}
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                    <span>شهر {mName}{count > 0 ? ` (${count})` : ''}</span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })()}
 
                       {sentGradeSheets.length === 0 ? (
                         <div className="text-center py-16 px-4 bg-slate-50/80 rounded-3xl border border-dashed border-slate-200 space-y-3">

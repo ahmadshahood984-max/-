@@ -19,7 +19,7 @@ import {
   isQuotaError
 } from './quotaManager';
 import { enqueuePendingGradeBatch, getPendingGradeBatches, removePendingGradeBatch, getVaultItem, setVaultItem } from './offlineVault';
-import { isReadCacheFresh, markReadCacheFresh } from './readCache';
+import { isReadCacheFresh, markReadCacheFresh, invalidateReadCache } from './readCache';
 
 /**
  * Interface for Consolidated Single-Document Student Grades
@@ -357,11 +357,23 @@ export function getLocalStudentGrades(studentId: string, unifiedNo?: string): Gr
     const targetId = normalizeId(studentId);
     const targetUnified = normalizeId(unifiedNo);
 
+    let deletedMonths: Record<string, number> = {};
+    try {
+      const dmRaw = localStorage.getItem('school_deleted_evaluation_months');
+      if (dmRaw) deletedMonths = JSON.parse(dmRaw) || {};
+    } catch {}
+
     return all.filter(g => {
       const gStudent = normalizeId(g.studentId);
-      if (gStudent === targetId) return true;
-      if (targetUnified && gStudent === targetUnified) return true;
-      return false;
+      const matchesStudent = gStudent === targetId || (Boolean(targetUnified) && gStudent === targetUnified);
+      if (!matchesStudent) return false;
+      const m = String(g.examName || '').trim();
+      const delTs = m ? Number(deletedMonths[m]) || 0 : 0;
+      if (delTs > 0) {
+        const gTs = g.date ? new Date(g.date).getTime() || 0 : 0;
+        if (gTs <= 0 || delTs >= gTs) return false;
+      }
+      return true;
     });
   } catch {
     return [];
@@ -1057,9 +1069,11 @@ export async function resyncAndClearDeletedSheetStudents(
   const cleanIds = Array.from(new Set((affectedStudentIds || []).map(normalizeId).filter(Boolean)));
   if (cleanIds.length === 0) return true;
 
-  // Invalidate cached sync signatures for affected students so updates/deletes are never skipped
+  // Invalidate cached sync signatures & read caches for affected students so updates/deletes are never skipped
   cleanIds.forEach((cleanId) => {
     consolidatedRecordMemoryCache.delete(cleanId);
+    invalidateReadCache(`students_grades_record:${cleanId}`);
+    invalidateReadCache(`students_grades_on_demand:${cleanId}`);
     Array.from(lastSyncedConsolidatedSignatures.keys()).forEach((k) => {
       if (k === cleanId || k === `subjects_${cleanId}` || k.startsWith(`${cleanId}_`)) {
         lastSyncedConsolidatedSignatures.delete(k);
@@ -1098,6 +1112,7 @@ export async function resyncAndClearDeletedSheetStudents(
         wave.map(async (sid) => {
           try {
             await deleteFirestoreDocFast('students_grades', sid, { sdkGraceMs: 2500, restTimeoutMs: 7000 });
+            serverConfirmedMissingStudentIds.add(sid);
             trackFirestoreWrite(1, `مسح درجات محذوفة (${sid})`);
           } catch (err: any) {
             if (isQuotaError(err)) markFirestoreWriteQuotaExceeded(err);

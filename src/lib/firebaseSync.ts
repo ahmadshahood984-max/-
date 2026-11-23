@@ -4,6 +4,7 @@
  */
 
 import { db, getDocCacheFirst, writeFirestoreDocFast } from './firebase';
+import type { SentGradeSheet } from '../types';
 import { collection, doc, documentId, enableNetwork, getDocsFromCache, getDocsFromServer, onSnapshot, query, setDoc, where } from 'firebase/firestore';
 import { trackFirestoreRead, trackFirestoreWrite } from './firestoreTracker';
 import { sanitizeAndDeduplicateStudents } from './studentDeduplicator';
@@ -78,6 +79,7 @@ export const PARENT_REALTIME_KEYS = [
   'school_active_academic_year',
   'school_saved_evaluation_months',
   'school_evaluation_saved_months',
+  'school_deleted_evaluation_months',
   'school_seal_and_signatures_config',
   'school_app_icon',
   'school_welcome_messages',
@@ -92,6 +94,7 @@ export const PARENT_FAST_LIVE_KEYS = [
   'school_evaluation_current_month',
   'school_evaluation_saved_months',
   'school_saved_evaluation_months',
+  'school_deleted_evaluation_months',
   'school_announcements',
   'school_classes',
   'school_teachers',
@@ -115,6 +118,7 @@ export const FAST_LIVE_SYNC_KEYS = [
   'school_evaluation_current_month',
   'school_evaluation_saved_months',
   'school_saved_evaluation_months',
+  'school_deleted_evaluation_months',
   'school_students',
   'school_classes',
   'school_teachers',
@@ -165,6 +169,7 @@ export const SYNC_KEYS = [
   'school_sent_grade_sheets',
   'school_saved_evaluation_months',
   'school_evaluation_saved_months',
+  'school_deleted_evaluation_months',
   'school_max_grade_setting',
   'school_custom_max_grade',
   'school_pass_grade_setting',
@@ -172,6 +177,76 @@ export const SYNC_KEYS = [
   'school_whatsapp_monthly_template',
   'school_exam_questions'
 ];
+
+export function getDeletedEvaluationMonthsMap(): Record<string, number> {
+  try {
+    const raw = typeof window !== 'undefined' && window.localStorage
+      ? window.localStorage.getItem('school_deleted_evaluation_months')
+      : null;
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const out: Record<string, number> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      const m = String(k || '').trim();
+      const ts = Number(v) || 0;
+      if (m && ts > 0) out[m] = ts;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+export function isItemDeletedByEvaluationMonth(
+  month: string | undefined | null,
+  itemTs: number,
+  deletedMonthsMap: Record<string, number> = getDeletedEvaluationMonthsMap()
+): boolean {
+  const m = String(month || '').trim();
+  if (!m) return false;
+  const deletedAt = Number(deletedMonthsMap[m]) || 0;
+  if (!deletedAt) return false;
+  // If item has no timestamp or was created/sent at or before deletion, treat as deleted
+  return itemTs <= 0 || deletedAt >= itemTs;
+}
+
+export function filterOutDeletedMonthsFromSheets(
+  sheets: SentGradeSheet[],
+  deletedMonthsMap: Record<string, number> = getDeletedEvaluationMonthsMap()
+): SentGradeSheet[] {
+  if (!Array.isArray(sheets)) return [];
+  if (!deletedMonthsMap || Object.keys(deletedMonthsMap).length === 0) return sheets;
+  return sheets.filter((sh) => {
+    if (!sh) return false;
+    const rec = sh as SentGradeSheet & { updatedAt?: number };
+    const ts = Number(rec.updatedAt) || (rec.dateSent ? new Date(rec.dateSent).getTime() || 0 : 0);
+    return !isItemDeletedByEvaluationMonth(rec.month, ts, deletedMonthsMap);
+  });
+}
+
+export function isGradeMessageDeletedByMonth(
+  content: string | undefined | null,
+  dateStr?: string,
+  deletedMonthsMap: Record<string, number> = getDeletedEvaluationMonthsMap()
+): boolean {
+  if (!content || !deletedMonthsMap || Object.keys(deletedMonthsMap).length === 0) return false;
+  const msgTs = dateStr ? new Date(dateStr).getTime() || 0 : 0;
+  for (const [m, deletedAt] of Object.entries(deletedMonthsMap)) {
+    if (!m || !deletedAt) continue;
+    if (msgTs > deletedAt) continue;
+    if (
+      content.includes(`الشهر: [${m}]`) ||
+      content.includes(`الشهر: ${m}`) ||
+      content.includes(`لشهر (${m})`) ||
+      content.includes(`لشهر ${m}`) ||
+      content.includes(`شهر ${m}`)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
 
 let isRemoteSyncing = false;
 const initialLoadCompletedKeys = new Set<string>();
@@ -474,12 +549,33 @@ function safeGetLocalItem(key: string): string | null {
   return memoryFallbackStore.get(key) ?? null;
 }
 
+function pruneNonEssentialLocalCaches(): void {
+  const disposableKeys = [
+    'school_grade_reports_cache_v1',
+    'school_students_dir_sigs_v1',
+    'school_whatsapp_sent_records',
+    'school_deleted_grade_report_ids_v1'
+  ];
+  for (const k of disposableKeys) {
+    try {
+      originalRemoveItem(k);
+    } catch {}
+  }
+}
+
 function safeSetLocalItem(key: string, value: string): void {
   memoryFallbackStore.set(key, value);
   try {
     originalSetItem(key, value);
   } catch (err) {
-    console.warn(`[Offline Storage] localStorage limit reached for ${key}, preserved in memory & IndexedDB vault.`, err);
+    // Free duplicate caches and retry once before relying solely on memory + IndexedDB vault
+    pruneNonEssentialLocalCaches();
+    try {
+      originalSetItem(key, value);
+      return;
+    } catch {
+      console.warn(`[Offline Storage] localStorage limit reached for ${key}, preserved in memory & IndexedDB vault.`, err);
+    }
   }
 }
 
@@ -743,25 +839,43 @@ function mergePendingLocalWithRemote(key: string, remotePayload: any, localParse
   }
 
   if (key === 'school_sent_grade_sheets' && Array.isArray(remotePayload) && Array.isArray(localParsed)) {
-    return deduplicateGradeSheetsPreservingTeachers([...remotePayload, ...localParsed]);
+    const deletedMonthsMap = getDeletedEvaluationMonthsMap();
+    return filterOutDeletedMonthsFromSheets(
+      deduplicateGradeSheetsPreservingTeachers([...remotePayload, ...localParsed]),
+      deletedMonthsMap
+    );
   }
 
   if (key === 'school_grades' && Array.isArray(remotePayload) && Array.isArray(localParsed)) {
+    const deletedMonthsMap = getDeletedEvaluationMonthsMap();
     const map = new Map<string, any>();
     const gradeKey = (g: any) =>
       `${String(g?.studentId || '').trim()}__${String(g?.subject || '').trim()}__${String(g?.examName || '').trim()}`;
+    const isDeleted = (g: any) => {
+      const ts = g?.date ? new Date(g.date).getTime() || 0 : 0;
+      return isItemDeletedByEvaluationMonth(g?.examName, ts, deletedMonthsMap);
+    };
     remotePayload.forEach((g: any) => {
-      if (g && g.studentId && g.subject) map.set(gradeKey(g), g);
+      if (g && g.studentId && g.subject && !isDeleted(g)) map.set(gradeKey(g), g);
     });
     localParsed.forEach((g: any) => {
-      if (g && g.studentId && g.subject) map.set(gradeKey(g), g);
+      if (g && g.studentId && g.subject && !isDeleted(g)) map.set(gradeKey(g), g);
     });
     return Array.from(map.values());
   }
 
   if (key === 'school_monthly_evaluations' && typeof remotePayload === 'object' && typeof localParsed === 'object') {
-    const merged: Record<string, any> = { ...remotePayload };
-    for (const [k, localVal] of Object.entries(localParsed)) {
+    const deletedMonthsMap = getDeletedEvaluationMonthsMap();
+    const isEvalDeleted = (evalKey: string, val: any) => {
+      const m = String(val?.month || '').trim() || (evalKey.includes('_') ? evalKey.slice(evalKey.indexOf('_') + 1).trim() : '');
+      return Boolean(m && deletedMonthsMap[m]);
+    };
+    const merged: Record<string, any> = {};
+    for (const [k, remVal] of Object.entries(remotePayload || {})) {
+      if (!isEvalDeleted(k, remVal)) merged[k] = remVal;
+    }
+    for (const [k, localVal] of Object.entries(localParsed || {})) {
+      if (isEvalDeleted(k, localVal)) continue;
       const remVal = merged[k];
       if (remVal && typeof remVal === 'object' && typeof localVal === 'object' && localVal !== null) {
         merged[k] = {
@@ -1823,7 +1937,7 @@ function processRemoteSnapshotDoc(key: string, docData: any, fromCache: boolean)
   }
 
   if (key === 'school_sent_grade_sheets' && Array.isArray(payload)) {
-    payload = deduplicateGradeSheetsPreservingTeachers(payload);
+    payload = filterOutDeletedMonthsFromSheets(deduplicateGradeSheetsPreservingTeachers(payload));
   }
 
   if (key === 'school_students' && Array.isArray(payload)) {
@@ -1853,8 +1967,7 @@ function processRemoteSnapshotDoc(key: string, docData: any, fromCache: boolean)
       key === 'school_students' ||
       key === 'school_teachers' ||
       key === 'school_classes' ||
-      key === 'school_parents' ||
-      key === 'school_grades';
+      key === 'school_parents';
     if (protectedCoreKeys || fromCache || !initialLoadCompletedKeys.has(key) || remoteUpdatedAt <= localMeta.updatedAt) {
       initialLoadCompletedKeys.add(key);
       return;
@@ -2071,6 +2184,7 @@ export function setupFirebaseSync(options?: { deferNetwork?: boolean }) {
   if (typeof window !== 'undefined') {
     let lastHiddenAt = 0;
     let lastRestoreSyncAt = 0;
+    let wentOffline = false;
 
     const handleForegroundOrNetworkRestore = (source: 'online' | 'resume') => {
       if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
@@ -2084,7 +2198,8 @@ export function setupFirebaseSync(options?: { deferNetwork?: boolean }) {
         lastHiddenAt = 0;
       }
 
-      if (db) {
+      if (db && (source === 'online' || wentOffline)) {
+        wentOffline = false;
         enableNetwork(db).catch(() => {});
       }
       emitOfflineSyncStatus();
@@ -2109,6 +2224,7 @@ export function setupFirebaseSync(options?: { deferNetwork?: boolean }) {
       handleForegroundOrNetworkRestore('online');
     });
     window.addEventListener('offline', () => {
+      wentOffline = true;
       emitOfflineSyncStatus();
     });
     document.addEventListener('visibilitychange', () => {
