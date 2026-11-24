@@ -60,6 +60,8 @@ import {
   mergeAndPersistSentGradeSheet,
   mergeAndPersistGrades,
   syncLivePortalDataFromServer,
+  syncEvaluationMonthConfigFromServer,
+  normalizeEvaluationMonthValue,
   FAST_LIVE_SYNC_KEYS,
   filterOutDeletedMonthsFromSheets,
   getDeletedEvaluationMonthsMap,
@@ -153,13 +155,17 @@ export default function TeacherPortal({
     return saved ? filterOutDeletedMonthsFromSheets(JSON.parse(saved)) : [];
   });
   const [currentEvaluationMonth, setCurrentEvaluationMonth] = useState<string>(() => {
-    const raw = localStorage.getItem('school_evaluation_current_month');
-    if (!raw) return 'شهر شباط';
-    try { return raw.startsWith('"') ? JSON.parse(raw) : raw; } catch { return raw; }
+    return normalizeEvaluationMonthValue(localStorage.getItem('school_evaluation_current_month')) || 'شهر شباط';
   });
   const [savedEvaluationMonths, setSavedEvaluationMonths] = useState<string[]>(() => {
-    const saved = localStorage.getItem('school_evaluation_saved_months');
-    return saved ? JSON.parse(saved) : ['شهر كانون الثاني', 'شهر شباط', 'شهر آذار', 'شهر نيسان', 'شهر أيار'];
+    const saved = localStorage.getItem('school_evaluation_saved_months') || localStorage.getItem('school_saved_evaluation_months');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      } catch {}
+    }
+    return ['شهر كانون الثاني', 'شهر شباط', 'شهر آذار', 'شهر نيسان', 'شهر أيار'];
   });
   const [customSubjects, setCustomSubjects] = useState<string[]>(() => {
     const saved = localStorage.getItem('school_custom_subjects');
@@ -209,11 +215,8 @@ export default function TeacherPortal({
           return changed ? next : prev;
         });
       } else if (key === 'school_evaluation_current_month' && value) {
-        try {
-          setCurrentEvaluationMonth(value.startsWith('"') ? JSON.parse(value) : value);
-        } catch {
-          setCurrentEvaluationMonth(value);
-        }
+        const normalizedMonth = normalizeEvaluationMonthValue(value);
+        if (normalizedMonth) setCurrentEvaluationMonth(normalizedMonth);
       } else if ((key === 'school_evaluation_saved_months' || key === 'school_saved_evaluation_months') && value) {
         try { setSavedEvaluationMonths(JSON.parse(value)); } catch (err) {}
       } else if (key === 'school_custom_subjects' && value) {
@@ -259,8 +262,8 @@ export default function TeacherPortal({
         }
       } catch {}
       try {
-        const savedMonth = localStorage.getItem('school_evaluation_current_month');
-        if (savedMonth) setCurrentEvaluationMonth(savedMonth.startsWith('"') ? JSON.parse(savedMonth) : savedMonth);
+        const normalizedMonth = normalizeEvaluationMonthValue(localStorage.getItem('school_evaluation_current_month'));
+        if (normalizedMonth) setCurrentEvaluationMonth(normalizedMonth);
       } catch {}
       try {
         const savedMonthsList = localStorage.getItem('school_evaluation_saved_months') || localStorage.getItem('school_saved_evaluation_months');
@@ -280,6 +283,9 @@ export default function TeacherPortal({
     };
 
     window.addEventListener('school_storage_update', handleStorageUpdate);
+    syncEvaluationMonthConfigFromServer({ force: true })
+      .then(() => reloadTeacherSyncedData())
+      .catch(() => {});
     syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS })
       .then(() => reloadTeacherSyncedData())
       .catch(() => {});

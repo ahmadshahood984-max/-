@@ -277,6 +277,79 @@ async function writeDocViaRestApi(
   }
 }
 
+function fromFirestoreRestValue(restVal: any): any {
+  if (!restVal || typeof restVal !== 'object') return null;
+  if ('nullValue' in restVal) return null;
+  if ('booleanValue' in restVal) return Boolean(restVal.booleanValue);
+  if ('integerValue' in restVal) {
+    const n = Number(restVal.integerValue);
+    return Number.isSafeInteger(n) ? n : Number(restVal.integerValue);
+  }
+  if ('doubleValue' in restVal) return Number(restVal.doubleValue);
+  if ('stringValue' in restVal) return String(restVal.stringValue);
+  if ('timestampValue' in restVal) return String(restVal.timestampValue);
+  if ('arrayValue' in restVal) {
+    const values = Array.isArray(restVal.arrayValue?.values) ? restVal.arrayValue.values : [];
+    return values.map(fromFirestoreRestValue);
+  }
+  if ('mapValue' in restVal) {
+    const fields = restVal.mapValue?.fields || {};
+    const out: Record<string, any> = {};
+    for (const [k, v] of Object.entries(fields)) {
+      out[k] = fromFirestoreRestValue(v);
+    }
+    return out;
+  }
+  return null;
+}
+
+export async function readDocViaRestApi(
+  collectionName: string,
+  docId: string,
+  timeoutMs: number = 5000
+): Promise<{ exists: boolean; data: Record<string, any> | null }> {
+  const cleanCollection = collectionName
+    .split('/')
+    .map((seg) => encodeURIComponent(seg))
+    .join('/');
+  const encodedPath = `${cleanCollection}/${encodeURIComponent(docId)}`;
+  const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(firebaseConfig.projectId)}/databases/${encodeURIComponent(databaseId)}/documents/${encodedPath}?key=${encodeURIComponent(firebaseConfig.apiKey)}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      cache: 'no-store',
+      signal: controller.signal
+    });
+    if (res.status === 404) {
+      return { exists: false, data: null };
+    }
+    if (!res.ok) {
+      const errText = await res.text().catch(() => res.statusText);
+      if (res.status === 429 || errText.toLowerCase().includes('quota') || errText.toLowerCase().includes('resource_exhausted')) {
+        throw new Error(`resource-exhausted: ${errText}`);
+      }
+      if (res.status === 403 || errText.toLowerCase().includes('permission')) {
+        throw new Error(`permission-denied: ${errText}`);
+      }
+      throw new Error(`Firestore REST read failed (${res.status}): ${errText}`);
+    }
+    const json = await res.json();
+    const fields = json?.fields;
+    if (!fields || typeof fields !== 'object') {
+      return { exists: true, data: {} };
+    }
+    const decoded: Record<string, any> = {};
+    for (const [k, v] of Object.entries(fields)) {
+      decoded[k] = fromFirestoreRestValue(v);
+    }
+    return { exists: true, data: decoded };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function commitFirestoreBatchViaRest(
   items: Array<{
     collectionName: string;

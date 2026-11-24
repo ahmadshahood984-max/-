@@ -47,6 +47,7 @@ import {
   ensureParentRealtimeListeners,
   deduplicateGradeSheetsPreservingTeachers,
   syncLivePortalDataFromServer,
+  syncEvaluationMonthConfigFromServer,
   FAST_LIVE_SYNC_KEYS,
   PARENT_FAST_LIVE_KEYS
 } from './lib/firebaseSync';
@@ -289,7 +290,10 @@ export default function App() {
         resetFirestoreQuotaBreaker();
       }
       const targetKeys = activePortal === 'parent' ? PARENT_FAST_LIVE_KEYS : FAST_LIVE_SYNC_KEYS;
-      await syncLivePortalDataFromServer({ keys: targetKeys, bypassCache: true, forceServer: true });
+      await Promise.all([
+        syncEvaluationMonthConfigFromServer({ force: true }),
+        syncLivePortalDataFromServer({ keys: targetKeys, bypassCache: true, forceServer: true })
+      ]);
       if (activePortal === 'parent') {
         window.dispatchEvent(new CustomEvent('school_force_parent_refresh'));
       }

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { commitFirestoreBatchViaRest, db, getDocCacheFirst, writeFirestoreDocFast } from './firebase';
+import { commitFirestoreBatchViaRest, db, getDocCacheFirst, readDocViaRestApi, writeFirestoreDocFast } from './firebase';
 import type { SentGradeSheet } from '../types';
 import { collection, doc, documentId, enableNetwork, getDocsFromCache, getDocsFromServer, onSnapshot, query, setDoc, where, writeBatch } from 'firebase/firestore';
 import { trackFirestoreRead, trackFirestoreWrite } from './firestoreTracker';
@@ -179,6 +179,27 @@ export const SYNC_KEYS = [
   'school_exam_questions'
 ];
 
+export const EVALUATION_CONFIG_KEYS = [
+  'school_evaluation_current_month',
+  'school_saved_evaluation_months',
+  'school_evaluation_saved_months',
+  'school_deleted_evaluation_months'
+];
+
+export function normalizeEvaluationMonthValue(raw: any): string {
+  if (raw === null || raw === undefined) return '';
+  let str = typeof raw === 'string' ? raw.trim() : String(raw).trim();
+  if (str.startsWith('"') && str.endsWith('"') && str.length >= 2) {
+    try {
+      const parsed = JSON.parse(str);
+      if (typeof parsed === 'string') {
+        str = parsed.trim();
+      }
+    } catch {}
+  }
+  return str;
+}
+
 export function getDeletedEvaluationMonthsMap(): Record<string, number> {
   try {
     const raw = typeof window !== 'undefined' && window.localStorage
@@ -281,6 +302,7 @@ const memoryFallbackStore = new Map<string, string>();
 const inFlightDirectWrites = new Map<string, string>();
 const inFlightWritePromises = new Map<string, { value: string; promise: Promise<boolean> }>();
 const lastSyncedValues = new Map<string, string>();
+const lastCloudConfirmedValues = new Map<string, string>();
 const subscribedRealtimeKeys = new Set<string>();
 const allowedRealtimeKeys = new Set<string>();
 let collectionListenerAttached = false;
@@ -294,6 +316,7 @@ let schoolLiveDataColUnsubscribe: (() => void) | null = null;
 let schoolLiveDataReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let parentScopedUnsubscribes: Array<() => void> = [];
 let parentScopedReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let lastRealtimeServerEventAt = 0;
 
 export function notifyCrossDeviceKeyChanged(_changedKey: string): void {
   // Handled natively by real-time Firestore `onSnapshot` on `school_live_data` and `grade_reports`
@@ -348,6 +371,9 @@ function startSchoolLiveDataCollectionListener(): void {
         const changes = snapshot.docChanges();
         let serverReadsCount = 0;
         let receivedRemoteServerUpdate = false;
+        if (!snapshot.metadata?.fromCache) {
+          lastRealtimeServerEventAt = Date.now();
+        }
 
         changes.forEach((change) => {
           if (change.type === 'removed') return;
@@ -440,6 +466,9 @@ function startParentScopedRealtimeListeners(): void {
         (snapshot) => {
           let serverReadsCount = 0;
           let receivedRemoteUpdate = false;
+          if (!snapshot.metadata?.fromCache) {
+            lastRealtimeServerEventAt = Date.now();
+          }
 
           snapshot.docChanges().forEach((change) => {
             if (change.type === 'removed') return;
@@ -1129,14 +1158,16 @@ export async function persistDirectToFirestore(
   options?: { timeoutMs?: number }
 ): Promise<boolean> {
   try {
-    const valueString = typeof data === 'object' ? JSON.stringify(data) : String(data);
+    const valueString = key === 'school_evaluation_current_month'
+      ? normalizeEvaluationMonthValue(data)
+      : (typeof data === 'object' ? JSON.stringify(data) : String(data));
     const now = Date.now();
     const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
     const prevMeta = getKeySyncMeta(key);
     const waitTimeoutMs = options?.timeoutMs ?? 6000;
 
-    // 1. Skip redundant cloud write ONLY if identical value was already cleanly confirmed synced
-    if (!isOffline && db && !isFirestoreWriteQuotaExceeded() && !prevMeta.pendingSync && lastSyncedValues.get(key) === valueString) {
+    // 1. Skip redundant cloud write ONLY if identical value was genuinely confirmed on Firestore cloud
+    if (!isOffline && db && !isFirestoreWriteQuotaExceeded() && !prevMeta.pendingSync && lastCloudConfirmedValues.get(key) === valueString) {
       safeSetLocalItem(key, valueString);
       safeDispatchStorageUpdate(key, valueString);
       broadcastLocalUpdate(key, valueString);
@@ -1202,6 +1233,7 @@ export async function persistDirectToFirestore(
           inFlightWritePromises.delete(key);
         }
         lastSyncedValues.set(key, valueString);
+        lastCloudConfirmedValues.set(key, valueString);
         const latestMeta = getKeySyncMeta(key);
         if (latestMeta.updatedAt <= now || safeGetLocalItem(key) === valueString) {
           setKeySyncMeta(key, now, false);
@@ -1419,6 +1451,7 @@ export async function flushPendingLocalSyncKeys(): Promise<boolean> {
           }
 
           lastSyncedValues.set(key, raw);
+          lastCloudConfirmedValues.set(key, raw);
           const latestMeta = getKeySyncMeta(key);
           if (latestMeta.updatedAt <= targetUpdatedAt || safeGetLocalItem(key) === raw) {
             setKeySyncMeta(key, now, false);
@@ -1758,9 +1791,11 @@ export async function forceRefreshDataFromFirestore(options?: {
       }
     }
 
-    const valueString = typeof payload === 'object'
-      ? JSON.stringify(payload)
-      : String(payload);
+    const valueString = key === 'school_evaluation_current_month'
+      ? normalizeEvaluationMonthValue(payload)
+      : (typeof payload === 'object'
+        ? JSON.stringify(payload)
+        : String(payload));
 
     if (localVal !== valueString) {
       isRemoteSyncing = true;
@@ -1770,6 +1805,9 @@ export async function forceRefreshDataFromFirestore(options?: {
         isRemoteSyncing = false;
       }
       lastSyncedValues.set(key, valueString);
+      if (!fromCache) {
+        lastCloudConfirmedValues.set(key, valueString);
+      }
       setKeySyncMeta(key, remoteUpdatedAt || Date.now(), false);
       saveToOfflineVault(key, valueString, remoteUpdatedAt || Date.now(), false).catch(() => {});
 
@@ -1777,8 +1815,21 @@ export async function forceRefreshDataFromFirestore(options?: {
       broadcastLocalUpdate(key, valueString);
     } else if (!localMeta.pendingSync) {
       lastSyncedValues.set(key, valueString);
+      if (!fromCache) {
+        lastCloudConfirmedValues.set(key, valueString);
+      }
       if (remoteUpdatedAt > 0) {
         setKeySyncMeta(key, remoteUpdatedAt, false);
+      }
+    }
+    if ((key === 'school_saved_evaluation_months' || key === 'school_evaluation_saved_months') && Array.isArray(payload)) {
+      const siblingKey = key === 'school_saved_evaluation_months'
+        ? 'school_evaluation_saved_months'
+        : 'school_saved_evaluation_months';
+      const siblingMeta = getKeySyncMeta(siblingKey);
+      if (!siblingMeta.pendingSync && safeGetLocalItem(siblingKey) !== valueString) {
+        saveSyncedLocalOnly(siblingKey, valueString);
+        safeDispatchStorageUpdate(siblingKey, valueString);
       }
     }
     initialLoadCompletedKeys.add(key);
@@ -1827,16 +1878,47 @@ export async function forceRefreshDataFromFirestore(options?: {
       if (effectiveForceServer && isFirestoreReadQuotaExceeded()) return;
       try {
         const docRef = doc(db, 'school_live_data', key);
-        const { snap, fromCache } = await getDocCacheFirst(docRef, {
-          forceServer: effectiveForceServer,
-          timeoutMs: effectiveForceServer ? 8000 : 2500
-        });
-        if (snap && !fromCache) {
+        let snapData: any = null;
+        let docExists = false;
+        let fromCache = false;
+        try {
+          const res = await getDocCacheFirst(docRef, {
+            forceServer: effectiveForceServer,
+            timeoutMs: effectiveForceServer ? 4500 : 2500
+          });
+          if (res.snap) {
+            fromCache = res.fromCache;
+            docExists = res.snap.exists();
+            snapData = docExists ? res.snap.data() : null;
+          }
+        } catch (sdkErr: any) {
+          if (isQuotaError(sdkErr)) throw sdkErr;
+          fromCache = true;
+        }
+
+        // If forceServer was requested but SDK timed out / fell back to cache (common in Android WebView/VPN), fetch directly via REST
+        if (effectiveForceServer && !isOffline && !isFirestoreReadQuotaExceeded() && (fromCache || !docExists)) {
+          try {
+            const restRes = await readDocViaRestApi('school_live_data', key, 5000);
+            if (restRes.exists && restRes.data) {
+              docExists = true;
+              snapData = restRes.data;
+              fromCache = false;
+            } else if (!restRes.exists) {
+              docExists = false;
+              fromCache = false;
+            }
+          } catch (restErr: any) {
+            if (isQuotaError(restErr)) throw restErr;
+          }
+        }
+
+        if (!fromCache) {
           trackFirestoreRead(1, `مزامنة بيانات (${key})`);
           markReadCacheFresh(`school_live_data:${key}`);
         }
-        if (snap && snap.exists()) {
-          await applyDocPayload(key, snap.data(), fromCache);
+        if (docExists && snapData) {
+          await applyDocPayload(key, snapData, fromCache);
         } else if (!fromCache) {
           initialLoadCompletedKeys.add(key);
           markReadCacheFresh(`school_live_data:${key}`);
@@ -1850,9 +1932,16 @@ export async function forceRefreshDataFromFirestore(options?: {
       }
     };
 
+    // Prioritize tiny critical config keys (like evaluation month) first before large collection payloads
+    const evalSet = new Set(EVALUATION_CONFIG_KEYS);
+    const prioritizedKeys = [
+      ...targetKeys.filter((k) => evalSet.has(k)),
+      ...targetKeys.filter((k) => !evalSet.has(k))
+    ];
+
     const CHUNK_SIZE = 6;
-    for (let i = 0; i < targetKeys.length; i += CHUNK_SIZE) {
-      const batch = targetKeys.slice(i, i + CHUNK_SIZE);
+    for (let i = 0; i < prioritizedKeys.length; i += CHUNK_SIZE) {
+      const batch = prioritizedKeys.slice(i, i + CHUNK_SIZE);
       await Promise.all(batch.map((k) => refreshSingleKey(k)));
     }
     return true;
@@ -1982,12 +2071,17 @@ function processRemoteSnapshotDoc(key: string, docData: any, fromCache: boolean)
     }
   }
 
-  const valueString = typeof payload === 'object'
-    ? JSON.stringify(payload)
-    : String(payload);
+  const valueString = key === 'school_evaluation_current_month'
+    ? normalizeEvaluationMonthValue(payload)
+    : (typeof payload === 'object'
+      ? JSON.stringify(payload)
+      : String(payload));
 
   if (!keepPendingAfterApply) {
     lastSyncedValues.set(key, valueString);
+    if (!fromCache) {
+      lastCloudConfirmedValues.set(key, valueString);
+    }
   }
 
   if (localVal !== valueString) {
@@ -2005,6 +2099,16 @@ function processRemoteSnapshotDoc(key: string, docData: any, fromCache: boolean)
     broadcastLocalUpdate(key, valueString);
   } else if (keepPendingAfterApply !== !!localMeta.pendingSync) {
     setKeySyncMeta(key, remoteUpdatedAt || Date.now(), keepPendingAfterApply);
+  }
+  if ((key === 'school_saved_evaluation_months' || key === 'school_evaluation_saved_months') && Array.isArray(payload)) {
+    const siblingKey = key === 'school_saved_evaluation_months'
+      ? 'school_evaluation_saved_months'
+      : 'school_saved_evaluation_months';
+    const siblingMeta = getKeySyncMeta(siblingKey);
+    if (!siblingMeta.pendingSync && safeGetLocalItem(siblingKey) !== valueString) {
+      saveSyncedLocalOnly(siblingKey, valueString);
+      safeDispatchStorageUpdate(siblingKey, valueString);
+    }
   }
   initialLoadCompletedKeys.add(key);
 }
@@ -2083,6 +2187,104 @@ export function ensureParentRealtimeListeners() {
 
 let lastLiveServerSyncAt = 0;
 let activeLiveSyncPromise: Promise<boolean> | null = null;
+let lastEvalMonthConfigSyncAt = 0;
+let activeEvalMonthConfigPromise: Promise<boolean> | null = null;
+
+/**
+ * Lightweight, ultra-fast server sync for evaluation month & saved months list ONLY (<1KB docs).
+ * Uses SDK getDocFromServer with direct REST GET fallback so Android APK / WebView behind VPN
+ * always stays matched with the Desktop Director browser immediately on open, resume, or reconnect.
+ */
+export async function syncEvaluationMonthConfigFromServer(options?: {
+  force?: boolean;
+  minCooldownMs?: number;
+}): Promise<boolean> {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return false;
+  if (!db || isFirestoreReadQuotaExceeded()) return false;
+
+  const now = Date.now();
+  const cooldown = options?.force ? 0 : (options?.minCooldownMs ?? 4000);
+  if (now - lastEvalMonthConfigSyncAt < cooldown) {
+    return true;
+  }
+  if (activeEvalMonthConfigPromise && !options?.force) {
+    return activeEvalMonthConfigPromise;
+  }
+
+  lastEvalMonthConfigSyncAt = now;
+  activeEvalMonthConfigPromise = (async () => {
+    let anyChanged = false;
+    try {
+      if (!isFirestoreWriteQuotaExceeded()) {
+        const metaMap = loadLocalSyncMeta();
+        const hasPendingEvalKey = EVALUATION_CONFIG_KEYS.some((k) => metaMap[k]?.pendingSync);
+        if (hasPendingEvalKey) {
+          await flushPendingLocalSyncKeys().catch(() => false);
+        }
+      }
+
+      await Promise.all(
+        EVALUATION_CONFIG_KEYS.map(async (key) => {
+          if (isFirestoreReadQuotaExceeded()) return;
+          let docData: any = null;
+          let fromCache = false;
+          try {
+            const res = await getDocCacheFirst(doc(db, 'school_live_data', key), {
+              forceServer: true,
+              timeoutMs: 3000
+            });
+            if (res.snap && res.snap.exists() && !res.fromCache) {
+              docData = res.snap.data();
+            } else {
+              fromCache = true;
+            }
+          } catch (sdkErr: any) {
+            if (isQuotaError(sdkErr)) {
+              markFirestoreReadQuotaExceeded(sdkErr);
+              return;
+            }
+            fromCache = true;
+          }
+
+          if (fromCache || !docData) {
+            try {
+              const restRes = await readDocViaRestApi('school_live_data', key, 4000);
+              if (restRes.exists && restRes.data) {
+                docData = restRes.data;
+              } else {
+                return;
+              }
+            } catch (restErr: any) {
+              if (isQuotaError(restErr)) markFirestoreReadQuotaExceeded(restErr);
+              return;
+            }
+          }
+
+          trackFirestoreRead(1, `مزامنة شهر التقييم (${key})`);
+          markReadCacheFresh(`school_live_data:${key}`);
+          const prevLocal = safeGetLocalItem(key);
+          processRemoteSnapshotDoc(key, docData, false);
+          if (safeGetLocalItem(key) !== prevLocal) {
+            anyChanged = true;
+          }
+        })
+      );
+
+      if (anyChanged && typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('school_live_sync_completed', {
+          detail: { ok: true, ts: Date.now(), source: 'evaluation_month_sync' }
+        }));
+      }
+      return true;
+    } catch {
+      return false;
+    } finally {
+      activeEvalMonthConfigPromise = null;
+    }
+  })();
+
+  return activeEvalMonthConfigPromise;
+}
 
 /**
  * On-demand sync with 5-minute per-key TTL cache + ZERO-read SSE Live Relay.
@@ -2210,12 +2412,19 @@ export function setupFirebaseSync(options?: { deferNetwork?: boolean }) {
         wentOffline = false;
         enableNetwork(db).catch(() => {});
       }
+      // On Android WebView resume after >=10s hidden or network reconnect, recycle onSnapshot so frozen sockets reconnect immediately
+      if (source === 'online' || hiddenDuration >= 10000) {
+        stopSchoolLiveDataCollectionListener();
+        stopParentScopedRealtimeListeners();
+      }
       emitOfflineSyncStatus();
       ensureRealtimeSyncHealthy();
       if (!isFirestoreWriteQuotaExceeded()) {
         flushPendingLocalSyncKeys().catch(() => {});
       }
       fetchLiveRelaySnapshot().catch(() => {});
+      // Always pull lightweight evaluation month config on resume/focus/online so PC and APK stay 100% matched
+      syncEvaluationMonthConfigFromServer({ minCooldownMs: 4000 }).catch(() => {});
 
       if (shouldForceFreshSync) {
         syncLivePortalDataFromServer({ bypassCache: true, forceServer: true }).catch(() => {});
@@ -2254,6 +2463,10 @@ export function setupFirebaseSync(options?: { deferNetwork?: boolean }) {
       if (document.visibilityState === 'visible' && navigator.onLine !== false) {
         ensureRealtimeSyncHealthy();
         fetchLiveRelaySnapshot().catch(() => {});
+        // Fallback check for silent Android WebView WebChannel stalls when no server snapshot arrived recently
+        if (Date.now() - lastRealtimeServerEventAt > 20000) {
+          syncEvaluationMonthConfigFromServer({ minCooldownMs: 20000 }).catch(() => {});
+        }
       }
     }, 30000);
   }
@@ -2333,6 +2546,7 @@ export function setupFirebaseSync(options?: { deferNetwork?: boolean }) {
                 inFlightWritePromises.delete(key);
               }
               lastSyncedValues.set(key, targetValue);
+              lastCloudConfirmedValues.set(key, targetValue);
               const latestMeta = getKeySyncMeta(key);
               if (latestMeta.updatedAt <= ts || safeGetLocalItem(key) === targetValue) {
                 setKeySyncMeta(key, ts, false);
@@ -2391,6 +2605,7 @@ export function setupFirebaseSync(options?: { deferNetwork?: boolean }) {
   localStorage.removeItem = (key: string) => {
     memoryFallbackStore.delete(key);
     lastSyncedValues.delete(key);
+    lastCloudConfirmedValues.delete(key);
     originalRemoveItem(key);
   };
 
@@ -2420,10 +2635,12 @@ export async function resetAllSchoolLiveDataInCloudAndLocal(emptyDefaults: Recor
     originalRemoveItem('school_local_sync_meta');
     originalRemoveItem(DELETED_STUDENTS_KEY);
     inMemorySyncMetaCache = {};
+    lastCloudConfirmedValues.clear();
     keys.forEach((k) => {
       const valStr = typeof emptyDefaults[k] === 'object' ? JSON.stringify(emptyDefaults[k]) : String(emptyDefaults[k]);
       safeSetLocalItem(k, valStr);
       lastSyncedValues.set(k, valStr);
+      lastCloudConfirmedValues.set(k, valStr);
       setKeySyncMeta(k, now, false);
       initialLoadCompletedKeys.add(k);
       invalidateReadCache(`school_live_data:${k}`);

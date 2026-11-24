@@ -87,7 +87,7 @@ import { db, writeFirestoreDocFast } from '../lib/firebase';
 import { collection, addDoc, setDoc, deleteDoc, doc, serverTimestamp, writeBatch, getDocs, query, where } from 'firebase/firestore';
 import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead, checkDailyRollover, fetchCentralizedConsumptionOnce, resetCentralizedFirestoreConsumption, calibrateCentralConsumptionBaseline, getTimeUntilFirebaseQuotaReset, probeFirestoreWriteAvailability, SPARK_DAILY_READ_LIMIT, SPARK_DAILY_WRITE_LIMIT, SPARK_STORAGE_LIMIT_MB, QUOTA_WARNING_RATIO, FIREBASE_PROJECT_ID, FIREBASE_DATABASE_ID } from '../lib/firestoreTracker';
 import { calculateStorageUsageReport, measureLiveCloudStorageAudit, StorageUsageReport } from '../lib/storageUsage';
-import { persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate, saveSyncedLocalOnly, recordDeletedStudentIds, queueOfflineNotification, deduplicateGradeSheetsPreservingTeachers, syncLivePortalDataFromServer, flushPendingLocalSyncKeys, FAST_LIVE_SYNC_KEYS, SYNC_KEYS, filterOutDeletedMonthsFromSheets, getDeletedEvaluationMonthsMap, isItemDeletedByEvaluationMonth, isGradeMessageDeletedByMonth, resetAllSchoolLiveDataInCloudAndLocal } from '../lib/firebaseSync';
+import { persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate, saveSyncedLocalOnly, recordDeletedStudentIds, queueOfflineNotification, deduplicateGradeSheetsPreservingTeachers, syncLivePortalDataFromServer, syncEvaluationMonthConfigFromServer, normalizeEvaluationMonthValue, flushPendingLocalSyncKeys, FAST_LIVE_SYNC_KEYS, SYNC_KEYS, filterOutDeletedMonthsFromSheets, getDeletedEvaluationMonthsMap, isItemDeletedByEvaluationMonth, isGradeMessageDeletedByMonth, resetAllSchoolLiveDataInCloudAndLocal } from '../lib/firebaseSync';
 import {
   submitGradeReportToFirestore,
   updateGradeReportInFirestore,
@@ -821,11 +821,17 @@ export default function DirectorPortal({
     : parseFloat(effectivePassGrade) || null;
 
   const [currentEvaluationMonth, setCurrentEvaluationMonth] = useState<string>(() => {
-    return localStorage.getItem('school_evaluation_current_month') || 'التاسع';
+    return normalizeEvaluationMonthValue(localStorage.getItem('school_evaluation_current_month')) || 'التاسع';
   });
   const [savedEvaluationMonths, setSavedEvaluationMonths] = useState<string[]>(() => {
-    const saved = localStorage.getItem('school_saved_evaluation_months');
-    return saved ? JSON.parse(saved) : ['التاسع', 'تشرين الأول', 'تشرين الثاني', 'كانون الأول', 'كانون الثاني', 'شباط', 'آذار', 'نيسان', 'أيار'];
+    const saved = localStorage.getItem('school_saved_evaluation_months') || localStorage.getItem('school_evaluation_saved_months');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      } catch {}
+    }
+    return ['التاسع', 'تشرين الأول', 'تشرين الثاني', 'كانون الأول', 'كانون الثاني', 'شباط', 'آذار', 'نيسان', 'أيار'];
   });
   const [isAddingNewMonth, setIsAddingNewMonth] = useState(false);
   const [newMonthName, setNewMonthName] = useState('');
@@ -1338,8 +1344,7 @@ export default function DirectorPortal({
         updateGradeReportInFirestore(updatedSheet),
         syncSentGradeSheetsToConsolidatedCollection(allApprovedForConsolidated, {
           onlyStudentIds: updatedSummaryList.map(s => s.studentId)
-        }),
-        persistDirectToFirestore('school_evaluation_current_month', sheet.month, { timeoutMs: 4000 })
+        })
       ]);
       reportResult = resReport;
       batchSyncedOk = Boolean(resConsolidated);
@@ -2114,9 +2119,14 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
           case 'school_active_academic_year':
             setActiveAcademicYear(value.startsWith('"') ? parsed : value);
             break;
-          case 'school_evaluation_current_month':
-            setCurrentEvaluationMonth(value.startsWith('"') ? parsed : value);
+          case 'school_evaluation_current_month': {
+            const normalizedMonth = normalizeEvaluationMonthValue(typeof parsed === 'string' ? parsed : value);
+            if (normalizedMonth) {
+              setCurrentEvaluationMonth(normalizedMonth);
+              setSavedEvaluationMonths(prev => (prev.includes(normalizedMonth) ? prev : [...prev, normalizedMonth]));
+            }
             break;
+          }
           case 'school_sent_grade_sheets':
             setSentGradeSheets(filterOutDeletedMonthsFromSheets(deduplicateGradeSheets(parsed)));
             break;
@@ -2200,7 +2210,11 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
         if (key === 'school_active_academic_year') {
           setActiveAcademicYear(value);
         } else if (key === 'school_evaluation_current_month') {
-          setCurrentEvaluationMonth(value);
+          const normalizedMonth = normalizeEvaluationMonthValue(value);
+          if (normalizedMonth) {
+            setCurrentEvaluationMonth(normalizedMonth);
+            setSavedEvaluationMonths(prev => (prev.includes(normalizedMonth) ? prev : [...prev, normalizedMonth]));
+          }
         } else if (key === 'school_apk_mode') {
           setApkCompatibilityMode(value === 'true');
         } else if (key === 'school_app_icon') {
@@ -2237,16 +2251,28 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       if (savedBlocked) {
         try { setBlockedGrades(JSON.parse(savedBlocked)); } catch (e) {}
       }
-      const savedMonth = localStorage.getItem('school_evaluation_current_month');
-      if (savedMonth) {
-        try { setCurrentEvaluationMonth(savedMonth.startsWith('"') ? JSON.parse(savedMonth) : savedMonth); } catch (e) {}
-      }
+      const rawSavedMonth = localStorage.getItem('school_evaluation_current_month');
+      const normalizedSavedMonth = normalizeEvaluationMonthValue(rawSavedMonth);
       const savedMonthsList = localStorage.getItem('school_evaluation_saved_months') || localStorage.getItem('school_saved_evaluation_months');
+      let loadedMonthsList: string[] | null = null;
       if (savedMonthsList) {
         try {
           const parsed = JSON.parse(savedMonthsList);
-          if (Array.isArray(parsed)) setSavedEvaluationMonths(parsed);
+          if (Array.isArray(parsed)) {
+            loadedMonthsList = parsed;
+          }
         } catch (e) {}
+      }
+      if (loadedMonthsList) {
+        const ensured = normalizedSavedMonth && !loadedMonthsList.includes(normalizedSavedMonth)
+          ? [...loadedMonthsList, normalizedSavedMonth]
+          : loadedMonthsList;
+        setSavedEvaluationMonths(ensured);
+      } else if (normalizedSavedMonth) {
+        setSavedEvaluationMonths(prev => (prev.includes(normalizedSavedMonth) ? prev : [...prev, normalizedSavedMonth]));
+      }
+      if (normalizedSavedMonth) {
+        setCurrentEvaluationMonth(normalizedSavedMonth);
       }
       const savedCustom = localStorage.getItem('school_custom_subjects');
       if (savedCustom) {
@@ -2304,6 +2330,9 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       }
     };
     reloadFromLocalStorage();
+    syncEvaluationMonthConfigFromServer({ force: true })
+      .then(() => reloadFromLocalStorage())
+      .catch(() => {});
     syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS })
       .then(() => reloadFromLocalStorage())
       .catch(() => {});
@@ -4921,26 +4950,17 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     if (!savedEvaluationMonths.includes(trimmed)) {
       updated = [...savedEvaluationMonths, trimmed];
       setSavedEvaluationMonths(updated);
-      const serializedMonths = JSON.stringify(updated);
-      saveSyncedLocalOnly('school_saved_evaluation_months', serializedMonths);
-      saveSyncedLocalOnly('school_evaluation_saved_months', serializedMonths);
       persistDirectToFirestore('school_saved_evaluation_months', updated);
       persistDirectToFirestore('school_evaluation_saved_months', updated);
-      safeDispatchStorageUpdate('school_saved_evaluation_months', serializedMonths);
     }
     const existingDeleted = getDeletedEvaluationMonthsMap();
     if (existingDeleted[trimmed]) {
       const nextDeleted = { ...existingDeleted };
       delete nextDeleted[trimmed];
-      const delSerialized = JSON.stringify(nextDeleted);
-      saveSyncedLocalOnly('school_deleted_evaluation_months', delSerialized);
       persistDirectToFirestore('school_deleted_evaluation_months', nextDeleted);
-      safeDispatchStorageUpdate('school_deleted_evaluation_months', delSerialized);
     }
     setCurrentEvaluationMonth(trimmed);
-    localStorage.setItem('school_evaluation_current_month', trimmed);
     persistDirectToFirestore('school_evaluation_current_month', trimmed);
-    safeDispatchStorageUpdate('school_evaluation_current_month', trimmed);
     setIsAddingNewMonth(false);
   };
 
@@ -11550,14 +11570,15 @@ ${sampleEval}
                                 } else {
                                   const newMonth = e.target.value;
                                   setCurrentEvaluationMonth(newMonth);
-                                  localStorage.setItem('school_evaluation_current_month', newMonth);
                                   persistDirectToFirestore('school_evaluation_current_month', newMonth);
-                                  safeDispatchStorageUpdate('school_evaluation_current_month', newMonth);
                                 }
                               }}
                               className="bg-white border border-indigo-200 rounded-xl px-2 py-1 text-indigo-900 text-[11px] font-black focus:outline-none focus:ring-2 focus:ring-indigo-500 text-center cursor-pointer min-w-[120px]"
                             >
-                              {savedEvaluationMonths.map(m => (
+                              {(currentEvaluationMonth && !savedEvaluationMonths.includes(currentEvaluationMonth)
+                                ? [currentEvaluationMonth, ...savedEvaluationMonths]
+                                : savedEvaluationMonths
+                              ).map(m => (
                                 <option key={m} value={m}>{m}</option>
                               ))}
                               <option value="add_new" className="text-indigo-600 font-bold">➕ إضافة شهر جديد...</option>
