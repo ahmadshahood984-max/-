@@ -359,6 +359,49 @@ async function deleteDocViaRestApi(
   }
 }
 
+export async function commitFirestoreDeletesViaRest(
+  items: Array<{
+    collectionName: string;
+    docId: string;
+  }>,
+  timeoutMs: number = 9000
+): Promise<void> {
+  if (!Array.isArray(items) || items.length === 0) return;
+  const writes = items.map(({ collectionName, docId }) => {
+    const cleanCollection = collectionName
+      .split('/')
+      .map((seg) => encodeURIComponent(seg))
+      .join('/');
+    const cleanDocId = encodeURIComponent(docId);
+    const name = `projects/${encodeURIComponent(firebaseConfig.projectId)}/databases/${encodeURIComponent(databaseId)}/documents/${cleanCollection}/${cleanDocId}`;
+    return { delete: name };
+  });
+
+  const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(firebaseConfig.projectId)}/databases/${encodeURIComponent(databaseId)}/documents:commit?key=${encodeURIComponent(firebaseConfig.apiKey)}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ writes }),
+      signal: controller.signal
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => res.statusText);
+      if (res.status === 429 || errText.toLowerCase().includes('quota') || errText.toLowerCase().includes('resource_exhausted')) {
+        throw new Error(`resource-exhausted: ${errText}`);
+      }
+      if (res.status === 403 || errText.toLowerCase().includes('permission')) {
+        throw new Error(`permission-denied: ${errText}`);
+      }
+      throw new Error(`Firestore REST batch delete failed (${res.status}): ${errText}`);
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Fast document writer: attempts Firestore SDK `setDoc` first, and if the WebChannel stream
  * takes longer than `sdkGraceMs` (default 1500ms), immediately falls back to direct Firestore REST PATCH

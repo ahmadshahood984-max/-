@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { collection, doc, limit, query, where, writeBatch } from 'firebase/firestore';
-import { db, getDocCacheFirst, getDocsCacheFirst } from './firebase';
+import { collection, doc, getDocs, limit, query, where, writeBatch } from 'firebase/firestore';
+import { commitFirestoreBatchViaRest, commitFirestoreDeletesViaRest, db, getDocCacheFirst, getDocsCacheFirst } from './firebase';
 import { trackFirestoreRead, trackFirestoreWrite } from './firestoreTracker';
 import {
   isFirestoreReadQuotaExceeded,
@@ -13,7 +13,7 @@ import {
   markFirestoreReadQuotaExceeded,
   markFirestoreWriteQuotaExceeded
 } from './quotaManager';
-import { isReadCacheFresh, markReadCacheFresh } from './readCache';
+import { invalidateReadCache, isReadCacheFresh, markReadCacheFresh } from './readCache';
 import { getVaultItem, setVaultItem } from './offlineVault';
 import { Student } from '../types';
 
@@ -112,6 +112,68 @@ function buildLookupMetadata(): {
   return { classMap, teacherMap };
 }
 
+function buildStudentDirectoryPayload(
+  st: Student,
+  classMap: Map<string, { name: string; teacherId?: string }>,
+  teacherMap: Map<string, string>
+): { id: string; sig: string; payload: Record<string, any> } | null {
+  if (!st || !st.id) return null;
+  const cleanId = String(st.id).trim();
+  if (!cleanId) return null;
+
+  const unified = st.unifiedNo !== undefined && st.unifiedNo !== null ? String(st.unifiedNo).trim() : '';
+  const roll = st.rollNo !== undefined && st.rollNo !== null ? String(st.rollNo).trim() : '';
+  const clsInfo = st.classId ? classMap.get(String(st.classId)) : undefined;
+  const teacherName = clsInfo?.teacherId ? teacherMap.get(String(clsInfo.teacherId)) || '' : '';
+
+  const payload = sanitizeForFirestoreDoc({
+    id: cleanId,
+    name: st.name || '',
+    classId: st.classId || '',
+    className: clsInfo?.name || '',
+    teacherName,
+    parentId: st.parentId || '',
+    parentName: st.parentName || '',
+    parentPhone: st.parentPhone || '',
+    rollNo: roll,
+    rollNoNormalized: normalizeDigits(roll),
+    unifiedNo: unified,
+    unifiedNoNormalized: normalizeDigits(unified),
+    nationalId: st.nationalId || '',
+    gender: st.gender || 'male',
+    dob: st.dob || '',
+    shift: st.shift || 'morning',
+    serialNo: st.serialNo || '',
+    avatar: st.avatar || ''
+  });
+
+  return { id: cleanId, sig: JSON.stringify(payload), payload };
+}
+
+/**
+ * Seeds directory signatures locally from a freshly fetched server `school_students` snapshot
+ * so new browsers / APKs do not waste 200+ Firestore writes re-uploading unchanged students on startup.
+ */
+export async function seedStudentsDirectorySignatures(students: Student[]): Promise<void> {
+  if (!Array.isArray(students) || students.length === 0) return;
+  await ensureDirSigsHydrated();
+  const { classMap, teacherMap } = buildLookupMetadata();
+  if (classMap.size === 0) return;
+
+  let changed = false;
+  for (const st of students) {
+    const built = buildStudentDirectoryPayload(st, classMap, teacherMap);
+    if (!built) continue;
+    if (!syncedStudentSignatures.has(built.id)) {
+      syncedStudentSignatures.set(built.id, built.sig);
+      changed = true;
+    }
+  }
+  if (changed) {
+    persistDirectorySignatures();
+  }
+}
+
 /**
  * Mirrors individual student records to `students/{student.id}` so Parent Portal
  * can fetch a SINGLE student document directly by `unifiedNo` (`where`/`doc`)
@@ -131,46 +193,17 @@ export async function syncStudentsDirectoryToFirestore(students: Student[]): Pro
   const changedDocs: Array<{ id: string; sig: string; data: Record<string, any> }> = [];
 
   for (const st of students) {
-    if (!st || !st.id) continue;
-    const cleanId = String(st.id).trim();
-    if (!cleanId) continue;
-
-    const unified = st.unifiedNo !== undefined && st.unifiedNo !== null ? String(st.unifiedNo).trim() : '';
-    const roll = st.rollNo !== undefined && st.rollNo !== null ? String(st.rollNo).trim() : '';
-    const clsInfo = st.classId ? classMap.get(String(st.classId)) : undefined;
-    const teacherName = clsInfo?.teacherId ? teacherMap.get(String(clsInfo.teacherId)) || '' : '';
-
-    const payload = sanitizeForFirestoreDoc({
-      id: cleanId,
-      name: st.name || '',
-      classId: st.classId || '',
-      className: clsInfo?.name || '',
-      teacherName,
-      parentId: st.parentId || '',
-      parentName: st.parentName || '',
-      parentPhone: st.parentPhone || '',
-      rollNo: roll,
-      rollNoNormalized: normalizeDigits(roll),
-      unifiedNo: unified,
-      unifiedNoNormalized: normalizeDigits(unified),
-      nationalId: st.nationalId || '',
-      gender: st.gender || 'male',
-      dob: st.dob || '',
-      shift: st.shift || 'morning',
-      serialNo: st.serialNo || '',
-      avatar: st.avatar || ''
-    });
-
-    const sig = JSON.stringify(payload);
-    if (syncedStudentSignatures.get(cleanId) === sig) {
+    const built = buildStudentDirectoryPayload(st, classMap, teacherMap);
+    if (!built) continue;
+    if (syncedStudentSignatures.get(built.id) === built.sig) {
       continue;
     }
 
     changedDocs.push({
-      id: cleanId,
-      sig,
+      id: built.id,
+      sig: built.sig,
       data: {
-        ...payload,
+        ...built.payload,
         updatedAt: Date.now()
       }
     });
@@ -186,7 +219,26 @@ export async function syncStudentsDirectoryToFirestore(students: Student[]): Pro
       chunk.forEach((item) => {
         batch.set(doc(db, STUDENTS_COLLECTION, item.id), item.data, { merge: true });
       });
-      await batch.commit();
+      let committed = false;
+      try {
+        await Promise.race([
+          batch.commit().then(() => { committed = true; }),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('batch_timeout')), 2500))
+        ]);
+      } catch (err) {
+        if (!committed) {
+          if (isQuotaError(err)) throw err;
+          await commitFirestoreBatchViaRest(
+            chunk.map((item) => ({
+              collectionName: STUDENTS_COLLECTION,
+              docId: item.id,
+              data: item.data,
+              merge: true
+            })),
+            9000
+          );
+        }
+      }
       chunk.forEach((item) => {
         syncedStudentSignatures.set(item.id, item.sig);
       });
@@ -199,6 +251,87 @@ export async function syncStudentsDirectoryToFirestore(students: Student[]): Pro
     } else {
       console.warn('[ParentStudentQuery] Notice syncing students directory:', err?.message || err);
     }
+  }
+}
+
+/**
+ * Deletes removed student documents directly from `students/{studentId}` in Firestore
+ * using chunked batch deletes (max 400 docs/batch) with REST `:commit` fallback.
+ */
+export async function deleteStudentsFromDirectoryFirestore(studentIds: string[]): Promise<boolean> {
+  const cleanIds = Array.from(new Set((studentIds || []).map((id) => String(id || '').trim()).filter(Boolean)));
+  if (cleanIds.length === 0) return true;
+
+  await ensureDirSigsHydrated();
+  cleanIds.forEach((id) => {
+    syncedStudentSignatures.delete(id);
+  });
+  singleStudentMemoryCache.clear();
+  persistDirectorySignatures();
+
+  if (!db || isFirestoreWriteQuotaExceeded() || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+    return false;
+  }
+
+  let ok = true;
+  for (let i = 0; i < cleanIds.length; i += 400) {
+    const chunk = cleanIds.slice(i, i + 400);
+    const batch = writeBatch(db);
+    chunk.forEach((id) => {
+      batch.delete(doc(db, STUDENTS_COLLECTION, id));
+    });
+
+    let committed = false;
+    try {
+      await Promise.race([
+        batch.commit().then(() => { committed = true; }),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('batch_timeout')), 2500))
+      ]);
+    } catch (err: any) {
+      if (!committed) {
+        if (isQuotaError(err)) {
+          markFirestoreWriteQuotaExceeded(err);
+          return false;
+        }
+        try {
+          await commitFirestoreDeletesViaRest(
+            chunk.map((id) => ({ collectionName: STUDENTS_COLLECTION, docId: id })),
+            9000
+          );
+          committed = true;
+        } catch (restErr: any) {
+          if (isQuotaError(restErr)) markFirestoreWriteQuotaExceeded(restErr);
+          ok = false;
+        }
+      }
+    }
+    if (committed) {
+      trackFirestoreWrite(chunk.length, `حذف طلاب من فهرس القاعدة (${chunk.length})`);
+    }
+  }
+  return ok;
+}
+
+export async function clearAllStudentsDirectoryCacheAndFirestore(): Promise<boolean> {
+  syncedStudentSignatures.clear();
+  singleStudentMemoryCache.clear();
+  persistDirectorySignatures();
+
+  if (!db || isFirestoreWriteQuotaExceeded() || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+    return false;
+  }
+
+  try {
+    const snap = await getDocs(collection(db, STUDENTS_COLLECTION));
+    if (!snap.empty) {
+      trackFirestoreRead(snap.size, `جرد فهرس الطلاب للحذف الشامل (${snap.size})`);
+      const ids = snap.docs.map((d) => d.id);
+      return await deleteStudentsFromDirectoryFirestore(ids);
+    }
+    return true;
+  } catch (err: any) {
+    if (isQuotaError(err)) markFirestoreWriteQuotaExceeded(err);
+    return false;
   }
 }
 

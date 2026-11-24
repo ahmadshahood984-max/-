@@ -87,11 +87,13 @@ import { db, writeFirestoreDocFast } from '../lib/firebase';
 import { collection, addDoc, setDoc, deleteDoc, doc, serverTimestamp, writeBatch, getDocs, query, where } from 'firebase/firestore';
 import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead, checkDailyRollover, fetchCentralizedConsumptionOnce, resetCentralizedFirestoreConsumption, calibrateCentralConsumptionBaseline, getTimeUntilFirebaseQuotaReset, probeFirestoreWriteAvailability, SPARK_DAILY_READ_LIMIT, SPARK_DAILY_WRITE_LIMIT, SPARK_STORAGE_LIMIT_MB, QUOTA_WARNING_RATIO, FIREBASE_PROJECT_ID, FIREBASE_DATABASE_ID } from '../lib/firestoreTracker';
 import { calculateStorageUsageReport, measureLiveCloudStorageAudit, StorageUsageReport } from '../lib/storageUsage';
-import { persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate, saveSyncedLocalOnly, recordDeletedStudentIds, queueOfflineNotification, deduplicateGradeSheetsPreservingTeachers, syncLivePortalDataFromServer, flushPendingLocalSyncKeys, FAST_LIVE_SYNC_KEYS, SYNC_KEYS, filterOutDeletedMonthsFromSheets, getDeletedEvaluationMonthsMap, isItemDeletedByEvaluationMonth, isGradeMessageDeletedByMonth } from '../lib/firebaseSync';
+import { persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate, saveSyncedLocalOnly, recordDeletedStudentIds, queueOfflineNotification, deduplicateGradeSheetsPreservingTeachers, syncLivePortalDataFromServer, flushPendingLocalSyncKeys, FAST_LIVE_SYNC_KEYS, SYNC_KEYS, filterOutDeletedMonthsFromSheets, getDeletedEvaluationMonthsMap, isItemDeletedByEvaluationMonth, isGradeMessageDeletedByMonth, resetAllSchoolLiveDataInCloudAndLocal } from '../lib/firebaseSync';
 import {
   submitGradeReportToFirestore,
   updateGradeReportInFirestore,
   deleteGradeReportFromFirestore,
+  deleteGradeReportsBulkFromFirestore,
+  clearAllGradeReportsLocalCache,
   fetchGradeReportsFromFirestore,
   subscribeGradeReportsRealtime,
   extractFirestoreErrorMessage,
@@ -111,10 +113,18 @@ import {
 import { getStoredWelcomeMessages, saveWelcomeMessages, DEFAULT_WELCOME_MESSAGES, WelcomeMessagesConfig } from '../lib/welcomeMessages';
 import { Bell, Activity, Info, Smartphone } from 'lucide-react';
 import { sendParentPushNotification, sendBroadcastPushNotification, getRegisteredPushDevicesCount } from '../lib/pushDispatcher';
-import { syncStudentsDirectoryToFirestore } from '../lib/parentStudentQuery';
+import {
+  syncStudentsDirectoryToFirestore,
+  deleteStudentsFromDirectoryFirestore,
+  clearAllStudentsDirectoryCacheAndFirestore
+} from '../lib/parentStudentQuery';
 import {
   syncSentGradeSheetsToConsolidatedCollection,
-  resyncAndClearDeletedSheetStudents
+  resyncAndClearDeletedSheetStudents,
+  batchDeleteFirestoreDocs,
+  deleteStudentsGradesConsolidatedBulk,
+  deleteEntireFirestoreCollection,
+  clearConsolidatedGradesSignaturesAndPending
 } from '../lib/studentGradesQuery';
 
 const getShareableOrigin = (preferPublished = false) => {
@@ -950,7 +960,7 @@ export default function DirectorPortal({
     }
   };
 
-  const confirmAndExecute = (title: string, message: string, onConfirm: () => void) => {
+  const confirmAndExecute = (title: string, message: string, onConfirm: () => void | Promise<void>) => {
     setDeleteConfirmModal({
       isOpen: true,
       title,
@@ -958,8 +968,11 @@ export default function DirectorPortal({
       onConfirm: () => {
         saveAutomaticSnapshot();
         setHasEmergencySnapshot(true);
-        onConfirm();
         setDeleteConfirmModal(null);
+        Promise.resolve(onConfirm()).catch((err) => {
+          console.error('[DirectorPortal] Delete action failed:', err);
+          alert('حدث خطأ أثناء تنفيذ عملية الحذف من قاعدة البيانات. يرجى المحاولة مرة أخرى.');
+        });
       }
     });
   };
@@ -5343,7 +5356,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
 
       const affectedIds = Array.from(affectedIdsSet);
       const cloudTasks: Promise<any>[] = [
-        ...sheetsToDelete.map(sh => deleteGradeReportFromFirestore(sh.id).catch(() => {})),
+        deleteGradeReportsBulkFromFirestore(deletedSheetIds).catch(() => {}),
         persistDirectToFirestore('school_deleted_evaluation_months', nextDeletedMonths, { timeoutMs: 5000 }).catch(() => false),
         persistDirectToFirestore('school_sent_grade_sheets', nextSheets, { timeoutMs: 5000 }).catch(() => false),
         resyncAndClearDeletedSheetStudents(affectedIds, nextSheets).catch(() => false)
@@ -5369,9 +5382,8 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
           getDocs(query(collection(db, 'notifications'), where('month', '==', cleanMonth)))
             .then(async snap => {
               if (snap.empty) return;
-              const batch = writeBatch(db);
-              snap.forEach(d => batch.delete(d.ref));
-              await batch.commit();
+              trackFirestoreRead(snap.size, `جرد إشعارات الشهر المحذوف (${snap.size})`);
+              await batchDeleteFirestoreDocs('notifications', snap.docs.map(d => d.id), 'حذف إشعارات الشهر المحذوف');
             })
             .catch(() => {})
         );
@@ -5513,6 +5525,236 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     XLSX.writeFile(workbook, `كشف_حصر_أسماء_كامل_الفوج_${activeCohort === 'evening' ? 'المسائي' : 'الصباحي'}.xlsx`);
   };
 
+  const purgeStudentsCascadeFromSystemAndFirestore = async (
+    studentIdsToDelete: string[],
+    extra?: {
+      teachersToKeep?: Teacher[];
+      classesToKeep?: Class[];
+      announcementsToKeep?: Announcement[];
+      cohortFilterForExtra?: (item: { shift?: 'morning' | 'evening' }) => boolean;
+      overrideBaseStudents?: Student[];
+    }
+  ) => {
+    const cleanIds = Array.from(new Set((studentIdsToDelete || []).map(id => String(id || '').trim()).filter(Boolean)));
+    const idSet = new Set(cleanIds);
+    if (cleanIds.length > 0) {
+      recordDeletedStudentIds(cleanIds);
+    }
+
+    const cohortMatches = extra?.cohortFilterForExtra;
+    const baseStudents = extra?.overrideBaseStudents ?? students;
+
+    // 1. Students
+    const nextStudents = baseStudents.filter(s => !idSet.has(String(s.id)) && (!cohortMatches || !cohortMatches(s)));
+    const studentsChanged = nextStudents.length !== students.length || Boolean(extra?.overrideBaseStudents);
+    if (studentsChanged) {
+      setStudents(nextStudents);
+      const sStr = JSON.stringify(nextStudents);
+      saveSyncedLocalOnly('school_students', sStr);
+      safeDispatchStorageUpdate('school_students', sStr);
+    }
+
+    // 2. Grades
+    const nextGrades = grades.filter(g => !idSet.has(String(g.studentId)) && (!cohortMatches || !cohortMatches(g as any)));
+    const gradesChanged = nextGrades.length !== grades.length;
+    if (gradesChanged) {
+      setGrades(nextGrades);
+      const gStr = JSON.stringify(nextGrades);
+      saveSyncedLocalOnly('school_grades', gStr);
+      safeDispatchStorageUpdate('school_grades', gStr);
+    }
+
+    // 3. Attendance
+    const nextAttendance = attendance.filter(a => !idSet.has(String(a.studentId)) && (!cohortMatches || !cohortMatches(a as any)));
+    const attChanged = nextAttendance.length !== attendance.length;
+    if (attChanged) {
+      setAttendance(nextAttendance);
+      const aStr = JSON.stringify(nextAttendance);
+      saveSyncedLocalOnly('school_attendance', aStr);
+      safeDispatchStorageUpdate('school_attendance', aStr);
+    }
+
+    // 4. Excuses
+    const nextExcuses = excuses.filter(e => !idSet.has(String(e.studentId)) && (!cohortMatches || !cohortMatches(e as any)));
+    const excChanged = nextExcuses.length !== excuses.length;
+    if (excChanged) {
+      setExcuses(nextExcuses);
+      const eStr = JSON.stringify(nextExcuses);
+      saveSyncedLocalOnly('school_excuses', eStr);
+      safeDispatchStorageUpdate('school_excuses', eStr);
+    }
+
+    // 5. Messages + track deleted message IDs for `notifications` cleanup
+    const removedMessageIds: string[] = [];
+    const nextMessages = messages.filter(m => {
+      const matchesDeletedStudent = Boolean(m.studentId && idSet.has(String(m.studentId)));
+      const matchesCohortDel = Boolean(cohortMatches && cohortMatches(m as any));
+      if (matchesDeletedStudent || matchesCohortDel) {
+        if (m.id) removedMessageIds.push(String(m.id));
+        return false;
+      }
+      return true;
+    });
+    const msgsChanged = nextMessages.length !== messages.length;
+    if (msgsChanged) {
+      setMessages(nextMessages);
+      const mStr = JSON.stringify(nextMessages);
+      saveSyncedLocalOnly('school_messages', mStr);
+      safeDispatchStorageUpdate('school_messages', mStr);
+    }
+
+    // 6. Parents + track orphaned parentIds to delete their `fcm_tokens`
+    const removedParentIds: string[] = [];
+    const nextParents = parents
+      .map(parent => ({
+        ...parent,
+        childrenIds: parent.childrenIds.filter(cid => !idSet.has(String(cid)))
+      }))
+      .filter(parent => {
+        if (parent.childrenIds.length === 0) {
+          if (parent.id) removedParentIds.push(String(parent.id));
+          return false;
+        }
+        return true;
+      });
+    const parentsChanged = nextParents.length !== parents.length || parents.some((p, i) => p.childrenIds.length !== nextParents[i]?.childrenIds?.length);
+    if (parentsChanged) {
+      setParents(nextParents);
+      const pStr = JSON.stringify(nextParents);
+      saveSyncedLocalOnly('school_parents', pStr);
+      safeDispatchStorageUpdate('school_parents', pStr);
+    }
+
+    // 7. Tuitions
+    let tuitionsChanged = false;
+    const nextTuitions = { ...tuitions };
+    cleanIds.forEach(sid => {
+      if (Object.prototype.hasOwnProperty.call(nextTuitions, sid)) {
+        delete nextTuitions[sid];
+        tuitionsChanged = true;
+      }
+    });
+    if (tuitionsChanged) {
+      setTuitions(nextTuitions);
+      const tStr = JSON.stringify(nextTuitions);
+      saveSyncedLocalOnly('school_tuitions', tStr);
+      safeDispatchStorageUpdate('school_tuitions', tStr);
+    }
+
+    // 8. Monthly evaluations
+    let evalsChanged = false;
+    const nextEvaluations: typeof monthlyEvaluations = {};
+    Object.entries(monthlyEvaluations || {}).forEach(([k, val]) => {
+      const matchedStudent = cleanIds.some(sid => k === sid || k.startsWith(`${sid}_`));
+      if (matchedStudent) {
+        evalsChanged = true;
+      } else {
+        nextEvaluations[k] = val;
+      }
+    });
+    if (evalsChanged) {
+      setMonthlyEvaluations(nextEvaluations);
+      const evStr = JSON.stringify(nextEvaluations);
+      saveSyncedLocalOnly('school_monthly_evaluations', evStr);
+      safeDispatchStorageUpdate('school_monthly_evaluations', evStr);
+    }
+
+    // 9. Sent grade sheets + `grade_reports`
+    const deletedReportIds: string[] = [];
+    const modifiedReports: SentGradeSheet[] = [];
+    let sheetsChanged = false;
+    const nextSentSheets: SentGradeSheet[] = [];
+    for (const sh of sentGradeSheets) {
+      if (!sh) continue;
+      if (cohortMatches && cohortMatches({ shift: sh.cohort === 'evening' ? 'evening' : 'morning' })) {
+        if (sh.id) deletedReportIds.push(sh.id);
+        sheetsChanged = true;
+        continue;
+      }
+      const origSummary = sh.studentsSummary || [];
+      const filteredSummary = origSummary.filter(sm => !idSet.has(String(sm.studentId)));
+      if (filteredSummary.length !== origSummary.length) {
+        sheetsChanged = true;
+        if (filteredSummary.length === 0) {
+          if (sh.id) deletedReportIds.push(sh.id);
+        } else {
+          const updatedSheet: SentGradeSheet = {
+            ...sh,
+            studentCount: filteredSummary.length,
+            studentsSummary: filteredSummary
+          };
+          nextSentSheets.push(updatedSheet);
+          modifiedReports.push(updatedSheet);
+        }
+      } else {
+        nextSentSheets.push(sh);
+      }
+    }
+    if (sheetsChanged) {
+      if (deletedReportIds.length > 0) {
+        recordDeletedGradeReportIdsLocally(deletedReportIds);
+      }
+      setSentGradeSheets(nextSentSheets);
+      const shStr = JSON.stringify(nextSentSheets);
+      saveSyncedLocalOnly('school_sent_grade_sheets', shStr);
+      safeDispatchStorageUpdate('school_sent_grade_sheets', shStr);
+    }
+
+    // 10. Persist changed `school_live_data` documents immediately
+    const cloudTasks: Promise<any>[] = [];
+    if (studentsChanged) cloudTasks.push(persistDirectToFirestore('school_students', nextStudents, { timeoutMs: 6000 }).catch(() => false));
+    if (gradesChanged) cloudTasks.push(persistDirectToFirestore('school_grades', nextGrades, { timeoutMs: 6000 }).catch(() => false));
+    if (attChanged) cloudTasks.push(persistDirectToFirestore('school_attendance', nextAttendance, { timeoutMs: 6000 }).catch(() => false));
+    if (excChanged) cloudTasks.push(persistDirectToFirestore('school_excuses', nextExcuses, { timeoutMs: 6000 }).catch(() => false));
+    if (msgsChanged) cloudTasks.push(persistDirectToFirestore('school_messages', nextMessages, { timeoutMs: 6000 }).catch(() => false));
+    if (parentsChanged) cloudTasks.push(persistDirectToFirestore('school_parents', nextParents, { timeoutMs: 6000 }).catch(() => false));
+    if (tuitionsChanged) cloudTasks.push(persistDirectToFirestore('school_tuitions', nextTuitions, { timeoutMs: 6000 }).catch(() => false));
+    if (evalsChanged) cloudTasks.push(persistDirectToFirestore('school_monthly_evaluations', nextEvaluations, { timeoutMs: 6000 }).catch(() => false));
+    if (sheetsChanged) cloudTasks.push(persistDirectToFirestore('school_sent_grade_sheets', nextSentSheets, { timeoutMs: 6000 }).catch(() => false));
+
+    if (extra?.teachersToKeep) {
+      setTeachers(extra.teachersToKeep);
+      const tStr = JSON.stringify(extra.teachersToKeep);
+      saveSyncedLocalOnly('school_teachers', tStr);
+      safeDispatchStorageUpdate('school_teachers', tStr);
+      cloudTasks.push(persistDirectToFirestore('school_teachers', extra.teachersToKeep, { timeoutMs: 6000 }).catch(() => false));
+    }
+    if (extra?.classesToKeep) {
+      setClasses(extra.classesToKeep);
+      const cStr = JSON.stringify(extra.classesToKeep);
+      saveSyncedLocalOnly('school_classes', cStr);
+      safeDispatchStorageUpdate('school_classes', cStr);
+      cloudTasks.push(persistDirectToFirestore('school_classes', extra.classesToKeep, { timeoutMs: 6000 }).catch(() => false));
+    }
+    if (extra?.announcementsToKeep) {
+      setAnnouncements(extra.announcementsToKeep);
+      const anStr = JSON.stringify(extra.announcementsToKeep);
+      saveSyncedLocalOnly('school_announcements', anStr);
+      safeDispatchStorageUpdate('school_announcements', anStr);
+      cloudTasks.push(persistDirectToFirestore('school_announcements', extra.announcementsToKeep, { timeoutMs: 6000 }).catch(() => false));
+    }
+
+    // 11. Delete individual documents from dedicated Firestore collections (`students`, `students_grades`, `grade_reports`, `fcm_tokens`, `notifications`)
+    if (cleanIds.length > 0) {
+      cloudTasks.push(deleteStudentsFromDirectoryFirestore(cleanIds).catch(() => false));
+      cloudTasks.push(deleteStudentsGradesConsolidatedBulk(cleanIds).catch(() => false));
+    }
+    if (deletedReportIds.length > 0) {
+      cloudTasks.push(deleteGradeReportsBulkFromFirestore(deletedReportIds).catch(() => {}));
+    }
+    if (modifiedReports.length > 0) {
+      cloudTasks.push(Promise.allSettled(modifiedReports.map(r => updateGradeReportInFirestore(r).catch(() => {}))));
+    }
+    if (removedParentIds.length > 0) {
+      cloudTasks.push(batchDeleteFirestoreDocs('fcm_tokens', removedParentIds, 'حذف رموز إشعارات أولياء أمور محذوفين').catch(() => false));
+    }
+    if (removedMessageIds.length > 0) {
+      cloudTasks.push(batchDeleteFirestoreDocs('notifications', removedMessageIds, 'حذف إشعارات طلاب محذوفين').catch(() => false));
+    }
+
+    await Promise.allSettled(cloudTasks);
+  };
+
   const handleDeleteStudents = () => {
     // 1. Determine target students to delete
     let targetStudents: Student[] = [];
@@ -5553,29 +5795,13 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     // 3. Confirm with user via confirmAndExecute modal
     confirmAndExecute(
       `⚠️ تنبيه هام للغاية: حذف الطلاب من ${scopeLabel}`,
-      `أنت على وشك حذف عدد (${targetStudents.length}) طالب/طالبة نهائياً من ${scopeLabel}.\nسيؤدي هذا الإجراء أيضاً إلى حذف كافة درجاتهم وسجلات حضورهم وأعذارهم وحسابات أولياء أمورهم غير المرتبطين بأبناء آخرين. لا يمكن التراجع عن هذه الخطوة!`,
-      () => {
+      `أنت على وشك حذف عدد (${targetStudents.length}) طالب/طالبة نهائياً من ${scopeLabel}.\nسيؤدي هذا الإجراء أيضاً إلى حذف كافة درجاتهم وسجلات حضورهم وأعذارهم وحسابات أولياء أمورهم غير المرتبطين بأبناء آخرين ومن قاعدة البيانات السحابية. لا يمكن التراجع عن هذه الخطوة!`,
+      async () => {
         const studentIdsToDelete = targetStudents.map(s => s.id);
-        recordDeletedStudentIds(studentIdsToDelete);
-
-        // 4. Perform filtering (deleting) on states
-        setStudents(prev => prev.filter(s => !studentIdsToDelete.includes(s.id)));
-        setGrades(prev => prev.filter(g => !studentIdsToDelete.includes(g.studentId)));
-        setAttendance(prev => prev.filter(a => !studentIdsToDelete.includes(a.studentId)));
-        setExcuses(prev => prev.filter(e => !studentIdsToDelete.includes(e.studentId)));
-        setMessages(prev => prev.filter(m => !m.studentId || !studentIdsToDelete.includes(m.studentId)));
-
-        setParents(prev => {
-          return prev
-            .map(parent => ({
-              ...parent,
-              childrenIds: parent.childrenIds.filter(cid => !studentIdsToDelete.includes(cid))
-            }))
-            .filter(parent => parent.childrenIds.length > 0);
-        });
+        await purgeStudentsCascadeFromSystemAndFirestore(studentIdsToDelete);
 
         // 5. Success feedback and clear inputs
-        alert(`🎉 تم بنجاح حذف (${targetStudents.length}) طالب وكافة بياناتهم وسجلاتهم المرتبطة نهائياً من النظام لسهولة العمل.`);
+        alert(`🎉 تم بنجاح حذف (${targetStudents.length}) طالب وكافة بياناتهم وسجلاتهم المرتبطة نهائياً من النظام وقاعدة البيانات.`);
         setDeleteConfirmationText('');
         setSelectedGradeForDelete('');
         setSelectedClassIdForDelete('');
@@ -5590,36 +5816,10 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       if (!student) return;
       confirmAndExecute(
         '⚠️ حذف الطالب نهائياً من النظام',
-        `هل أنت متأكد من حذف الطالب (${student.name}) نهائياً من النظام؟ سيؤدي ذلك لحذف كافة درجاته، سجلات غيابه وحضوره، وأعذاره الطبية أيضاً. لا يمكن التراجع عن هذه الخطوة!`,
-        () => {
-          recordDeletedStudentIds([itemId]);
-          const updatedStudents = currentList.filter(s => s.id !== itemId);
-          setStudents(updatedStudents);
-          localStorage.setItem('school_students', JSON.stringify(updatedStudents));
-          persistDirectToFirestore('school_students', updatedStudents);
-          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_students', value: JSON.stringify(updatedStudents) } }));
-
-          const updatedGrades = grades.filter(g => g.studentId !== itemId);
-          setGrades(updatedGrades);
-          localStorage.setItem('school_grades', JSON.stringify(updatedGrades));
-
-          const updatedExcuses = excuses.filter(e => e.studentId !== itemId);
-          setExcuses(updatedExcuses);
-          localStorage.setItem('school_excuses', JSON.stringify(updatedExcuses));
-
-          const updatedAttendance = attendance.filter(a => a.studentId !== itemId);
-          setAttendance(updatedAttendance);
-          localStorage.setItem('school_attendance', JSON.stringify(updatedAttendance));
-
-          const updatedParents = parents.map(p => ({
-            ...p,
-            childrenIds: p.childrenIds.filter(cid => cid !== itemId)
-          })).filter(p => p.childrenIds.length > 0);
-          setParents(updatedParents);
-          localStorage.setItem('school_parents', JSON.stringify(updatedParents));
-          persistDirectToFirestore('school_parents', updatedParents);
-
-          alert(`✅ تم حذف الطالب (${student.name}) بنجاح.`);
+        `هل أنت متأكد من حذف الطالب (${student.name}) نهائياً من النظام وقاعدة البيانات؟ سيؤدي ذلك لحذف كافة درجاته، سجلات غيابه وحضوره، وأعذاره الطبية أيضاً. لا يمكن التراجع عن هذه الخطوة!`,
+        async () => {
+          await purgeStudentsCascadeFromSystemAndFirestore([itemId], { overrideBaseStudents: currentList });
+          alert(`✅ تم حذف الطالب (${student.name}) وكافة سجلاته من النظام وقاعدة البيانات بنجاح.`);
         }
       );
     } else if (category === 'teachers') {
@@ -5628,11 +5828,14 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       confirmAndExecute(
         '⚠️ حذف المعلم نهائياً',
         `هل أنت متأكد من حذف المعلم (${teacher.name}) نهائياً من النظام وسحب كافة الصلاحيات التعليمية الممنوحة له؟`,
-        () => {
+        async () => {
           const updated = teachers.filter(t => t.id !== itemId);
           setTeachers(updated);
-          persistDirectToFirestore('school_teachers', updated);
-          alert(`✅ تم حذف المعلم (${teacher.name}) بنجاح.`);
+          const serialized = JSON.stringify(updated);
+          saveSyncedLocalOnly('school_teachers', serialized);
+          safeDispatchStorageUpdate('school_teachers', serialized);
+          await persistDirectToFirestore('school_teachers', updated, { timeoutMs: 6000 });
+          alert(`✅ تم حذف المعلم (${teacher.name}) من النظام وقاعدة البيانات بنجاح.`);
         }
       );
     } else if (category === 'announcements') {
@@ -5640,12 +5843,15 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       if (!ann) return;
       confirmAndExecute(
         '⚠️ حذف الإعلان/التعميم',
-        'هل أنت متأكد من حذف هذا التعميم/الإعلان نهائياً من لوحة إعلانات المنصة؟',
-        () => {
+        'هل أنت متأكد من حذف هذا التعميم/الإعلان نهائياً من لوحة إعلانات المنصة وقاعدة البيانات؟',
+        async () => {
           const updated = announcements.filter(a => a.id !== itemId);
           setAnnouncements(updated);
-          localStorage.setItem('school_announcements', JSON.stringify(updated));
-          alert(`✅ تم حذف الإعلان بنجاح.`);
+          const serialized = JSON.stringify(updated);
+          saveSyncedLocalOnly('school_announcements', serialized);
+          safeDispatchStorageUpdate('school_announcements', serialized);
+          await persistDirectToFirestore('school_announcements', updated, { timeoutMs: 6000 });
+          alert(`✅ تم حذف الإعلان من النظام وقاعدة البيانات بنجاح.`);
         }
       );
     } else if (category === 'messages') {
@@ -5653,17 +5859,18 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       if (!msg) return;
       confirmAndExecute(
         '⚠️ حذف الرسالة',
-        'هل أنت متأكد من حذف هذه الرسالة نهائياً من صندوق المحادثات؟',
-        () => {
+        'هل أنت متأكد من حذف هذه الرسالة نهائياً من صندوق المحادثات وقاعدة البيانات؟',
+        async () => {
           const updated = messages.filter(m => m.id !== itemId);
           setMessages(updated);
-          localStorage.setItem('school_messages', JSON.stringify(updated));
-          if (db) {
-            deleteDoc(doc(db, 'notifications', itemId)).then(() => {
-              trackFirestoreWrite(1, 'حذف إشعار رسالة');
-            }).catch(() => {});
-          }
-          alert(`✅ تم حذف الرسالة بنجاح.`);
+          const serialized = JSON.stringify(updated);
+          saveSyncedLocalOnly('school_messages', serialized);
+          safeDispatchStorageUpdate('school_messages', serialized);
+          await Promise.allSettled([
+            persistDirectToFirestore('school_messages', updated, { timeoutMs: 6000 }),
+            batchDeleteFirestoreDocs('notifications', [itemId], 'حذف إشعار رسالة')
+          ]);
+          alert(`✅ تم حذف الرسالة من النظام وقاعدة البيانات بنجاح.`);
         }
       );
     } else if (category === 'excuses') {
@@ -5671,12 +5878,15 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       if (!exc) return;
       confirmAndExecute(
         '⚠️ حذف العذر الطبي',
-        'هل أنت متأكد من حذف طلب العذر هذا نهائياً من سجلات المدرسة؟',
-        () => {
+        'هل أنت متأكد من حذف طلب العذر هذا نهائياً من سجلات المدرسة وقاعدة البيانات؟',
+        async () => {
           const updated = excuses.filter(e => e.id !== itemId);
           setExcuses(updated);
-          localStorage.setItem('school_excuses', JSON.stringify(updated));
-          alert(`✅ تم حذف العذر الطبي بنجاح.`);
+          const serialized = JSON.stringify(updated);
+          saveSyncedLocalOnly('school_excuses', serialized);
+          safeDispatchStorageUpdate('school_excuses', serialized);
+          await persistDirectToFirestore('school_excuses', updated, { timeoutMs: 6000 });
+          alert(`✅ تم حذف العذر الطبي من النظام وقاعدة البيانات بنجاح.`);
         }
       );
     } else if (category === 'classes') {
@@ -5684,12 +5894,15 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       if (!cls) return;
       confirmAndExecute(
         '⚠️ حذف الصف/الشعبة',
-        `هل أنت متأكد من حذف الصف/الشعبة (${cls.name})؟ سيتم إلغاء تعيين أي طلاب أو معلمين منتسبين لها وتصفير انتساباتهم بالكامل.`,
-        () => {
+        `هل أنت متأكد من حذف الصف/الشعبة (${cls.name})؟ سيتم إلغاء تعيين أي طلاب أو معلمين منتسبين لها وحذفها من قاعدة البيانات.`,
+        async () => {
           const updated = classes.filter(c => c.id !== itemId);
           setClasses(updated);
-          persistDirectToFirestore('school_classes', updated);
-          alert(`✅ تم حذف الصف/الشعبة بنجاح.`);
+          const serialized = JSON.stringify(updated);
+          saveSyncedLocalOnly('school_classes', serialized);
+          safeDispatchStorageUpdate('school_classes', serialized);
+          await persistDirectToFirestore('school_classes', updated, { timeoutMs: 6000 });
+          alert(`✅ تم حذف الصف/الشعبة من النظام وقاعدة البيانات بنجاح.`);
         }
       );
     } else if (category === 'grades') {
@@ -5697,12 +5910,22 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       if (!gd) return;
       confirmAndExecute(
         '⚠️ حذف سجل الدرجة',
-        'هل أنت متأكد من حذف سجل رصد هذه الدرجة نهائياً من الشهادات والتقارير المدرسية؟',
-        () => {
+        'هل أنت متأكد من حذف سجل رصد هذه الدرجة نهائياً من الشهادات والتقارير المدرسية وقاعدة البيانات؟',
+        async () => {
           const updated = grades.filter(g => g.id !== itemId);
           setGrades(updated);
-          localStorage.setItem('school_grades', JSON.stringify(updated));
-          alert(`✅ تم حذف سجل الدرجة بنجاح.`);
+          const serialized = JSON.stringify(updated);
+          saveSyncedLocalOnly('school_grades', serialized);
+          safeDispatchStorageUpdate('school_grades', serialized);
+          const tasks: Promise<any>[] = [
+            persistDirectToFirestore('school_grades', updated, { timeoutMs: 6000 }).catch(() => false)
+          ];
+          const studentStillHasRawGrades = updated.some(g => g.studentId === gd.studentId);
+          if (!studentStillHasRawGrades) {
+            tasks.push(resyncAndClearDeletedSheetStudents([gd.studentId], sentGradeSheets).catch(() => false));
+          }
+          await Promise.allSettled(tasks);
+          alert(`✅ تم حذف سجل الدرجة من النظام وقاعدة البيانات بنجاح.`);
         }
       );
     } else if (category === 'attendance') {
@@ -5712,11 +5935,14 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       confirmAndExecute(
         '⚠️ حذف سجل التحضير/الغياب',
         `هل أنت متأكد من حذف سجل التحضير للطالب (${studName}) بتاريخ (${att.date}) نهائياً؟`,
-        () => {
+        async () => {
           const updated = attendance.filter(a => a.id !== itemId);
           setAttendance(updated);
-          localStorage.setItem('school_attendance', JSON.stringify(updated));
-          alert(`✅ تم حذف سجل التحضير بنجاح.`);
+          const serialized = JSON.stringify(updated);
+          saveSyncedLocalOnly('school_attendance', serialized);
+          safeDispatchStorageUpdate('school_attendance', serialized);
+          await persistDirectToFirestore('school_attendance', updated, { timeoutMs: 6000 });
+          alert(`✅ تم حذف سجل التحضير من النظام وقاعدة البيانات بنجاح.`);
         }
       );
     }
@@ -5742,100 +5968,117 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
 
     confirmAndExecute(
       `🚨🚨🚨 تحذير أمني وتأكيد تفريغ السجلات!`,
-      `هل أنت متأكد تماماً وبشكل قاطع من رغبتك في تفريغ وتصفير (${label}) بالكامل؟\nملاحظة: يتم مسح فقط بيانات الفوج المختار دون تأثير على الفوج الآخر.`,
-      () => {
+      `هل أنت متأكد تماماً وبشكل قاطع من رغبتك في تفريغ وتصفير (${label}) بالكامل من النظام وقاعدة البيانات؟\nملاحظة: يتم مسح فقط بيانات الفوج المختار دون تأثير على الفوج الآخر.`,
+      async () => {
         if (category === 'students') {
-          const remainingStudents = students.filter(s => !matchesCohort(s));
           const removedIds = students.filter(s => matchesCohort(s)).map(s => s.id);
-          recordDeletedStudentIds(removedIds);
-          
-          setStudents(remainingStudents);
-          persistDirectToFirestore('school_students', remainingStudents);
-          
-          const remainingGrades = grades.filter(g => !removedIds.includes(g.studentId));
-          setGrades(remainingGrades);
-          localStorage.setItem('school_grades', JSON.stringify(remainingGrades));
-          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_grades', value: JSON.stringify(remainingGrades) } }));
-          
-          const remainingExcuses = excuses.filter(e => !removedIds.includes(e.studentId));
-          setExcuses(remainingExcuses);
-          localStorage.setItem('school_excuses', JSON.stringify(remainingExcuses));
-          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_excuses', value: JSON.stringify(remainingExcuses) } }));
-          
-          const remainingAttendance = attendance.filter(a => !removedIds.includes(a.studentId));
-          setAttendance(remainingAttendance);
-          localStorage.setItem('school_attendance', JSON.stringify(remainingAttendance));
-          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_attendance', value: JSON.stringify(remainingAttendance) } }));
-          
-          const remainingParents = parents.map(p => ({
-            ...p,
-            childrenIds: p.childrenIds.filter(cid => !removedIds.includes(cid))
-          })).filter(p => p.childrenIds.length > 0);
-          setParents(remainingParents);
-          localStorage.setItem('school_parents', JSON.stringify(remainingParents));
-          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_parents', value: JSON.stringify(remainingParents) } }));
+          await purgeStudentsCascadeFromSystemAndFirestore(removedIds);
         } else if (category === 'teachers') {
           const remaining = teachers.filter(t => !matchesCohort(t));
           setTeachers(remaining);
-          persistDirectToFirestore('school_teachers', remaining);
+          const serialized = JSON.stringify(remaining);
+          saveSyncedLocalOnly('school_teachers', serialized);
+          safeDispatchStorageUpdate('school_teachers', serialized);
+          await persistDirectToFirestore('school_teachers', remaining, { timeoutMs: 6000 });
         } else if (category === 'announcements') {
           const remaining = announcements.filter(a => !matchesCohort(a));
           setAnnouncements(remaining);
-          localStorage.setItem('school_announcements', JSON.stringify(remaining));
-          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_announcements', value: JSON.stringify(remaining) } }));
+          const serialized = JSON.stringify(remaining);
+          saveSyncedLocalOnly('school_announcements', serialized);
+          safeDispatchStorageUpdate('school_announcements', serialized);
+          await persistDirectToFirestore('school_announcements', remaining, { timeoutMs: 6000 });
         } else if (category === 'messages') {
+          const removedIds = messages.filter(m => matchesCohort(m)).map(m => m.id).filter(Boolean);
           const remaining = messages.filter(m => !matchesCohort(m));
           setMessages(remaining);
-          localStorage.setItem('school_messages', JSON.stringify(remaining));
-          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_messages', value: JSON.stringify(remaining) } }));
-          if (db && !isFirestoreQuotaExceeded()) {
-            getDocs(collection(db, 'notifications')).then(async snap => {
-              trackFirestoreRead(snap.size || 1, `قراءة الإشعارات للحذف (${snap.size})`);
-              const commitPromises: Promise<void>[] = [];
-              let b = writeBatch(db);
-              let c = 0;
-              snap.forEach(d => {
-                b.delete(d.ref);
-                c++;
-                if (c % 400 === 0) {
-                  commitPromises.push(b.commit());
-                  b = writeBatch(db);
-                }
-              });
-              if (c % 400 !== 0) commitPromises.push(b.commit());
-              if (commitPromises.length > 0) {
-                await Promise.all(commitPromises).catch((writeErr: any) => {
-                  if (isQuotaError(writeErr)) markFirestoreQuotaExceeded(writeErr);
-                });
-                if (c > 0) trackFirestoreWrite(c, `حذف دفعة إشعارات (${c})`);
-              }
-            }).catch((err: any) => {
-              if (isQuotaError(err)) markFirestoreReadQuotaExceeded(err);
-            });
+          const serialized = JSON.stringify(remaining);
+          saveSyncedLocalOnly('school_messages', serialized);
+          safeDispatchStorageUpdate('school_messages', serialized);
+          const tasks: Promise<any>[] = [
+            persistDirectToFirestore('school_messages', remaining, { timeoutMs: 6000 }).catch(() => false)
+          ];
+          if (activeCohort === 'all') {
+            tasks.push(deleteEntireFirestoreCollection('notifications', 'حذف جميع الإشعارات').catch(() => 0));
+          } else if (removedIds.length > 0) {
+            tasks.push(batchDeleteFirestoreDocs('notifications', removedIds, 'حذف إشعارات الفوج').catch(() => false));
           }
+          await Promise.allSettled(tasks);
         } else if (category === 'excuses') {
           const remaining = excuses.filter(e => !matchesCohort(e));
           setExcuses(remaining);
-          localStorage.setItem('school_excuses', JSON.stringify(remaining));
-          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_excuses', value: JSON.stringify(remaining) } }));
+          const serialized = JSON.stringify(remaining);
+          saveSyncedLocalOnly('school_excuses', serialized);
+          safeDispatchStorageUpdate('school_excuses', serialized);
+          await persistDirectToFirestore('school_excuses', remaining, { timeoutMs: 6000 });
         } else if (category === 'classes') {
           const remaining = classes.filter(c => !matchesCohort(c));
           setClasses(remaining);
-          persistDirectToFirestore('school_classes', remaining);
+          const serialized = JSON.stringify(remaining);
+          saveSyncedLocalOnly('school_classes', serialized);
+          safeDispatchStorageUpdate('school_classes', serialized);
+          await persistDirectToFirestore('school_classes', remaining, { timeoutMs: 6000 });
         } else if (category === 'grades') {
-          const remaining = grades.filter(g => !matchesCohort(g));
-          setGrades(remaining);
-          localStorage.setItem('school_grades', JSON.stringify(remaining));
-          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_grades', value: JSON.stringify(remaining) } }));
+          const cohortStudentIds = students.filter(s => matchesCohort(s)).map(s => s.id);
+          const cohortStudentIdSet = new Set(cohortStudentIds);
+          const remainingGrades = grades.filter(g => !matchesCohort(g) && !cohortStudentIdSet.has(g.studentId));
+          setGrades(remainingGrades);
+          const gSerialized = JSON.stringify(remainingGrades);
+          saveSyncedLocalOnly('school_grades', gSerialized);
+          safeDispatchStorageUpdate('school_grades', gSerialized);
+
+          const sheetsToDelete = sentGradeSheets.filter(sh =>
+            sh && (activeCohort === 'all' || (sh.cohort || 'morning') === activeCohort)
+          );
+          const deletedReportIds = sheetsToDelete.map(sh => sh.id).filter(Boolean);
+          const remainingSheets = sentGradeSheets.filter(sh => !sheetsToDelete.includes(sh));
+          if (deletedReportIds.length > 0) {
+            recordDeletedGradeReportIdsLocally(deletedReportIds);
+          }
+          setSentGradeSheets(remainingSheets);
+          const shSerialized = JSON.stringify(remainingSheets);
+          saveSyncedLocalOnly('school_sent_grade_sheets', shSerialized);
+          safeDispatchStorageUpdate('school_sent_grade_sheets', shSerialized);
+
+          const nextEvals: typeof monthlyEvaluations = {};
+          Object.entries(monthlyEvaluations || {}).forEach(([k, val]) => {
+            const belongsToCohort = cohortStudentIds.some(sid => k === sid || k.startsWith(`${sid}_`));
+            if (activeCohort !== 'all' && !belongsToCohort) {
+              nextEvals[k] = val;
+            }
+          });
+          setMonthlyEvaluations(nextEvals);
+          const evSerialized = JSON.stringify(nextEvals);
+          saveSyncedLocalOnly('school_monthly_evaluations', evSerialized);
+          safeDispatchStorageUpdate('school_monthly_evaluations', evSerialized);
+
+          const tasks: Promise<any>[] = [
+            persistDirectToFirestore('school_grades', remainingGrades, { timeoutMs: 6000 }).catch(() => false),
+            persistDirectToFirestore('school_sent_grade_sheets', remainingSheets, { timeoutMs: 6000 }).catch(() => false),
+            persistDirectToFirestore('school_monthly_evaluations', nextEvals, { timeoutMs: 6000 }).catch(() => false)
+          ];
+          if (activeCohort === 'all') {
+            tasks.push(deleteEntireFirestoreCollection('grade_reports', 'حذف كافة كشوفات الدرجات').catch(() => 0));
+            tasks.push(deleteEntireFirestoreCollection('students_grades', 'حذف كافة درجات الطلاب الموحدة').catch(() => 0));
+          } else {
+            if (deletedReportIds.length > 0) {
+              tasks.push(deleteGradeReportsBulkFromFirestore(deletedReportIds).catch(() => {}));
+            }
+            if (cohortStudentIds.length > 0) {
+              tasks.push(deleteStudentsGradesConsolidatedBulk(cohortStudentIds).catch(() => false));
+            }
+          }
+          await Promise.allSettled(tasks);
         } else if (category === 'attendance') {
           const remaining = attendance.filter(a => !matchesCohort(a));
           setAttendance(remaining);
-          localStorage.setItem('school_attendance', JSON.stringify(remaining));
-          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_attendance', value: JSON.stringify(remaining) } }));
+          const serialized = JSON.stringify(remaining);
+          saveSyncedLocalOnly('school_attendance', serialized);
+          safeDispatchStorageUpdate('school_attendance', serialized);
+          await persistDirectToFirestore('school_attendance', remaining, { timeoutMs: 6000 });
         }
 
         setBulkDeleteConfirmation('');
-        alert(`🎉 تم بنجاح تفريغ وتصفير سجلات ${label}!`);
+        alert(`🎉 تم بنجاح تفريغ وتصفير سجلات ${label} من النظام وقاعدة البيانات!`);
       }
     );
   };
@@ -5919,9 +6162,8 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
   const handleDeleteAllAppData = () => {
     confirmAndExecute(
       `⚠️ تحذير أمني خطير وعاجل جداً!`,
-      `أنت تقوم الآن بـ "تصفير وحذف كامل بيانات التطبيق" بالكامل.\nسيشمل هذا الإجراء حذف:\n1. جميع المعلمين المسجلين وبياناتهم وكلمات مرورهم.\n2. جميع الطلاب المسجلين وشعبهم ودرجاتهم.\n3. جميع أولياء الأمور وحساباتهم.\n4. جميع الصفوف والصفوف الدراسية بالكامل.\n\nهل تريد بالتأكيد تصفير المنصة وحذف كل شيء نهائياً للبدء بصفحة جديدة؟`,
-      () => {
-        localStorage.clear();
+      `أنت تقوم الآن بـ "تصفير وحذف كامل بيانات التطبيق" بالكامل من الجهاز ومن قاعدة البيانات السحابية.\nسيشمل هذا الإجراء حذف:\n1. جميع المعلمين المسجلين وبياناتهم وكلمات مرورهم.\n2. جميع الطلاب المسجلين وشعبهم ودرجاتهم وملفاتهم السحابية.\n3. جميع أولياء الأمور وحساباتهم ورموز إشعاراتهم.\n4. جميع الصفوف وكشوفات الدرجات والإعلانات والرسائل بالكامل.\n\nهل تريد بالتأكيد تصفير المنصة وحذف كل شيء نهائياً للبدء بصفحة جديدة؟`,
+      async () => {
         setTeachers([]);
         setClasses([]);
         setParents([]);
@@ -5931,12 +6173,45 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
         setAnnouncements([]);
         setMessages([]);
         setExcuses([]);
+        setTuitions({});
+        setSentGradeSheets([]);
+        setMonthlyEvaluations({});
+        setSavedEvaluationMonths([]);
+        setCurrentEvaluationMonth('');
 
-        ['school_teachers', 'school_classes', 'school_parents', 'school_students', 'school_attendance', 'school_grades', 'school_announcements', 'school_messages', 'school_excuses'].forEach(key => {
-          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key, value: JSON.stringify([]) } }));
-        });
+        const emptyDefaults: Record<string, any> = {
+          school_teachers: [],
+          school_classes: [],
+          school_parents: [],
+          school_students: [],
+          school_attendance: [],
+          school_grades: [],
+          school_announcements: [],
+          school_messages: [],
+          school_excuses: [],
+          school_tuitions: {},
+          school_sent_grade_sheets: [],
+          school_monthly_evaluations: {},
+          school_saved_evaluation_months: [],
+          school_evaluation_saved_months: [],
+          school_deleted_evaluation_months: {},
+          school_evaluation_current_month: '',
+          school_exam_questions: [],
+          school_blocked_grades: []
+        };
 
-        alert('🎉 تم بنجاح تصفير المنصة وحذف كافة البيانات والملفات والصفوف بالكامل! التطبيق جاهز الآن للبدء من جديد.');
+        await Promise.allSettled([
+          clearConsolidatedGradesSignaturesAndPending(),
+          Promise.resolve(clearAllGradeReportsLocalCache()),
+          resetAllSchoolLiveDataInCloudAndLocal(emptyDefaults),
+          clearAllStudentsDirectoryCacheAndFirestore(),
+          deleteEntireFirestoreCollection('students_grades', 'تصفير كشوفات الدرجات الموحدة'),
+          deleteEntireFirestoreCollection('grade_reports', 'تصفير أرشيف كشوفات الدرجات'),
+          deleteEntireFirestoreCollection('notifications', 'تصفير الإشعارات السحابية'),
+          deleteEntireFirestoreCollection('fcm_tokens', 'تصفير رموز إشعارات الهواتف')
+        ]);
+
+        alert('🎉 تم بنجاح تصفير المنصة وحذف كافة البيانات من الجهاز ومن قاعدة بيانات Firestore بالكامل! التطبيق جاهز الآن للبدء من جديد.');
       }
     );
   };
@@ -5957,69 +6232,17 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
 
     confirmAndExecute(
       `🚨🚨🚨 تحذير أمني وتأكيد تصفير الفوج!`,
-      `هل أنت متأكد تماماً وبشكل قاطع من رغبتك في تصفير وتفريغ (${cohortLabel}) بالكامل؟\n\nسيتم حذف كافة بياناته المخصصة:\n- جميع الطلاب (${cohortStudents.length} طالب)\n- جميع المعلمين (${cohortTeachers.length} معلم)\n- جميع الصفوف والشعب (${cohortClasses.length} صف)\n- كافة الدرجات، سجلات الغياب، الأعذار، الإعلانات والرسائل.\n\nلاحظ أن بيانات الفوج الآخر لن تتأثر مطلقاً!`,
-      () => {
+      `هل أنت متأكد تماماً وبشكل قاطع من رغبتك في تصفير وتفريغ (${cohortLabel}) بالكامل من النظام وقاعدة البيانات؟\n\nسيتم حذف كافة بياناته المخصصة:\n- جميع الطلاب (${cohortStudents.length} طالب)\n- جميع المعلمين (${cohortTeachers.length} معلم)\n- جميع الصفوف والشعب (${cohortClasses.length} صف)\n- كافة الدرجات، سجلات الغياب، الأعذار، الإعلانات والرسائل.\n\nلاحظ أن بيانات الفوج الآخر لن تتأثر مطلقاً!`,
+      async () => {
         const studentIds = cohortStudents.map(s => s.id);
-        recordDeletedStudentIds(studentIds);
-
-        // 1. Remove students
-        const updatedStudents = students.filter(s => !matchesTarget(s));
-        setStudents(updatedStudents);
-        persistDirectToFirestore('school_students', updatedStudents);
-
-        // 2. Remove teachers
-        const updatedTeachers = teachers.filter(t => !matchesTarget(t));
-        setTeachers(updatedTeachers);
-        persistDirectToFirestore('school_teachers', updatedTeachers);
-
-        // 3. Remove classes
-        const updatedClasses = classes.filter(c => !matchesTarget(c));
-        setClasses(updatedClasses);
-        persistDirectToFirestore('school_classes', updatedClasses);
-
-        // 4. Remove announcements
-        const updatedAnnounce = announcements.filter(a => !matchesTarget(a));
-        setAnnouncements(updatedAnnounce);
-        localStorage.setItem('school_announcements', JSON.stringify(updatedAnnounce));
-        window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_announcements', value: JSON.stringify(updatedAnnounce) } }));
-
-        // 5. Remove grades, attendance, excuses, messages
-        setGrades(prev => {
-          const updated = prev.filter(g => !studentIds.includes(g.studentId) && !matchesTarget(g));
-          localStorage.setItem('school_grades', JSON.stringify(updated));
-          return updated;
+        await purgeStudentsCascadeFromSystemAndFirestore(studentIds, {
+          teachersToKeep: teachers.filter(t => !matchesTarget(t)),
+          classesToKeep: classes.filter(c => !matchesTarget(c)),
+          announcementsToKeep: announcements.filter(a => !matchesTarget(a)),
+          cohortFilterForExtra: matchesTarget
         });
 
-        setAttendance(prev => {
-          const updated = prev.filter(a => !studentIds.includes(a.studentId) && !matchesTarget(a));
-          localStorage.setItem('school_attendance', JSON.stringify(updated));
-          return updated;
-        });
-
-        setExcuses(prev => {
-          const updated = prev.filter(e => !studentIds.includes(e.studentId) && !matchesTarget(e));
-          localStorage.setItem('school_excuses', JSON.stringify(updated));
-          return updated;
-        });
-
-        setMessages(prev => {
-          const updated = prev.filter(m => (!m.studentId || !studentIds.includes(m.studentId)) && !matchesTarget(m));
-          localStorage.setItem('school_messages', JSON.stringify(updated));
-          return updated;
-        });
-
-        setParents(prev => {
-          const updated = prev
-            .map(parent => ({
-              ...parent,
-              childrenIds: parent.childrenIds.filter(cid => !studentIds.includes(cid))
-            }))
-            .filter(parent => parent.childrenIds.length > 0);
-          localStorage.setItem('school_parents', JSON.stringify(updated));
-          return updated;
-        });
-
-        alert(`🎉 تم بنجاح تصفير وتفريغ كافة بيانات ${cohortLabel} بالكامل! بإمكانك الآن البدء في إضافة الطلاب والمعلمين والصفوف لهذا الفوج من جديد.`);
+        alert(`🎉 تم بنجاح تصفير وتفريغ كافة بيانات ${cohortLabel} من النظام وقاعدة البيانات بالكامل!`);
       }
     );
   };
@@ -6040,26 +6263,13 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
 
     confirmAndExecute(
       `⚠️ تأكيد حذف طلاب الصف (${gradeName})`,
-      `هل تريد بالتأكيد حذف كافة طلاب الصف (${gradeName}) وعددهم (${targetStudents.length}) طالب وطالبة؟\nسيتم تصفير وحذف جميع سجلاتهم المرتبطة (درجات، غياب وحضور، أعذار).`,
-      () => {
+      `هل تريد بالتأكيد حذف كافة طلاب الصف (${gradeName}) وعددهم (${targetStudents.length}) طالب وطالبة من النظام وقاعدة البيانات؟\nسيتم تصفير وحذف جميع سجلاتهم المرتبطة (درجات، غياب وحضور، أعذار).`,
+      async () => {
         const studentIds = targetStudents.map(s => s.id);
-        recordDeletedStudentIds(studentIds);
-        setStudents(prev => prev.filter(s => !studentIds.includes(s.id)));
-        setGrades(prev => prev.filter(g => !studentIds.includes(g.studentId)));
-        setAttendance(prev => prev.filter(a => !studentIds.includes(a.studentId)));
-        setExcuses(prev => prev.filter(e => !studentIds.includes(e.studentId)));
-        setMessages(prev => prev.filter(m => !m.studentId || !studentIds.includes(m.studentId)));
-        setParents(prev => {
-          return prev
-            .map(parent => ({
-              ...parent,
-              childrenIds: parent.childrenIds.filter(cid => !studentIds.includes(cid))
-            }))
-            .filter(parent => parent.childrenIds.length > 0);
-        });
+        await purgeStudentsCascadeFromSystemAndFirestore(studentIds);
 
         setQuickDeleteGrade('');
-        alert(`🎉 تم بنجاح حذف جميع طلاب الصف (${gradeName}) وسجلاتهم المرتبطة.`);
+        alert(`🎉 تم بنجاح حذف جميع طلاب الصف (${gradeName}) وسجلاتهم المرتبطة من النظام وقاعدة البيانات.`);
       }
     );
   };
@@ -6079,26 +6289,13 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
 
     confirmAndExecute(
       `⚠️ تأكيد حذف طلاب الشعبة (${cls?.name || ''})`,
-      `هل تريد بالتأكيد حذف جميع طلاب الشعبة (${cls?.name || ''}) وعددهم (${targetStudents.length}) طالب وطالبة؟\nسيتم حذف جميع علاماتهم وسجلات حضورهم وغيابهم وأعذارهم تلقائياً.`,
-      () => {
+      `هل تريد بالتأكيد حذف جميع طلاب الشعبة (${cls?.name || ''}) وعددهم (${targetStudents.length}) طالب وطالبة من النظام وقاعدة البيانات؟\nسيتم حذف جميع علاماتهم وسجلات حضورهم وغيابهم وأعذارهم تلقائياً.`,
+      async () => {
         const studentIds = targetStudents.map(s => s.id);
-        recordDeletedStudentIds(studentIds);
-        setStudents(prev => prev.filter(s => !studentIds.includes(s.id)));
-        setGrades(prev => prev.filter(g => !studentIds.includes(g.studentId)));
-        setAttendance(prev => prev.filter(a => !studentIds.includes(a.studentId)));
-        setExcuses(prev => prev.filter(e => !studentIds.includes(e.studentId)));
-        setMessages(prev => prev.filter(m => !m.studentId || !studentIds.includes(m.studentId)));
-        setParents(prev => {
-          return prev
-            .map(parent => ({
-              ...parent,
-              childrenIds: parent.childrenIds.filter(cid => !studentIds.includes(cid))
-            }))
-            .filter(parent => parent.childrenIds.length > 0);
-        });
+        await purgeStudentsCascadeFromSystemAndFirestore(studentIds);
 
         setQuickDeleteClassId('');
-        alert(`🎉 تم بنجاح حذف جميع طلاب الشعبة وسجلاتهم المرتبطة.`);
+        alert(`🎉 تم بنجاح حذف جميع طلاب الشعبة وسجلاتهم المرتبطة من النظام وقاعدة البيانات.`);
       }
     );
   };
@@ -13691,7 +13888,10 @@ ${sampleEval}
                               if (confirm(`هل أنت متأكد من حذف المادة "${sub}"؟`)) {
                                 const updated = customSubjects.filter(s => s !== sub);
                                 setCustomSubjects(updated);
-                                localStorage.setItem('school_custom_subjects', JSON.stringify(updated));
+                                const serialized = JSON.stringify(updated);
+                                saveSyncedLocalOnly('school_custom_subjects', serialized);
+                                safeDispatchStorageUpdate('school_custom_subjects', serialized);
+                                persistDirectToFirestore('school_custom_subjects', updated, { timeoutMs: 5000 }).catch(() => false);
                               }
                             }}
                             className="p-1.5 bg-rose-50 text-rose-500 hover:bg-rose-100 rounded-lg transition cursor-pointer"
@@ -14635,7 +14835,10 @@ ${sampleEval}
                                 if (confirm(`هل أنت متأكد من حذف العام الدراسي (${year}) نهائياً من القائمة؟`)) {
                                   const updated = academicYears.filter(y => y !== year);
                                   setAcademicYears(updated);
-                                  localStorage.setItem('school_academic_years', JSON.stringify(updated));
+                                  const serialized = JSON.stringify(updated);
+                                  saveSyncedLocalOnly('school_academic_years', serialized);
+                                  safeDispatchStorageUpdate('school_academic_years', serialized);
+                                  persistDirectToFirestore('school_academic_years', updated, { timeoutMs: 5000 }).catch(() => false);
                                 }
                               }}
                               className="text-rose-600 hover:text-rose-800 p-1 hover:bg-rose-50 rounded-lg transition cursor-pointer"

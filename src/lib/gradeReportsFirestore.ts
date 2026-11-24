@@ -10,9 +10,11 @@ import {
   getDocsFromCache,
   getDocsFromServer,
   onSnapshot,
+  writeBatch,
   type QuerySnapshot
 } from 'firebase/firestore';
 import {
+  commitFirestoreDeletesViaRest,
   db,
   deleteFirestoreDocFast,
   extractFirestoreErrorMessage,
@@ -312,6 +314,71 @@ export async function deleteGradeReportFromFirestore(reportId: string): Promise<
     }
     handleFirestoreError(error, OperationType.DELETE, reportPath);
   }
+}
+
+/**
+ * Batch-deletes multiple grade reports from `grade_reports` in chunks of 400 with REST `:commit` fallback
+ * and removes them from Live Relay & local cache.
+ */
+export async function deleteGradeReportsBulkFromFirestore(reportIds: string[]): Promise<void> {
+  const cleanIds = Array.from(new Set((reportIds || []).map((id) => String(id || '').trim()).filter(Boolean)));
+  if (cleanIds.length === 0) return;
+
+  recordDeletedGradeReportIdsLocally(cleanIds);
+  const idSet = new Set(cleanIds);
+  const remainingCached = loadCachedGradeReportsFromLocal().filter((r) => r && !idSet.has(r.id));
+  saveCachedGradeReportsToLocal(remainingCached);
+  invalidateReadCache(GRADE_REPORTS_CACHE_KEY);
+
+  const relayPromise = Promise.allSettled(cleanIds.map((id) => deleteLiveRelayGradeReport(id)));
+
+  if (!db || isFirestoreWriteQuotaExceeded() || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+    await relayPromise;
+    return;
+  }
+
+  for (let i = 0; i < cleanIds.length; i += 400) {
+    const chunk = cleanIds.slice(i, i + 400);
+    const batch = writeBatch(db);
+    chunk.forEach((id) => {
+      batch.delete(doc(db, GRADE_REPORTS_COLLECTION, id));
+    });
+    let committed = false;
+    try {
+      await Promise.race([
+        batch.commit().then(() => { committed = true; }),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('batch_timeout')), 2500))
+      ]);
+    } catch (err: any) {
+      if (!committed) {
+        if (isQuotaError(err)) {
+          markFirestoreWriteQuotaExceeded(err);
+          break;
+        }
+        try {
+          await commitFirestoreDeletesViaRest(
+            chunk.map((id) => ({ collectionName: GRADE_REPORTS_COLLECTION, docId: id })),
+            9000
+          );
+          committed = true;
+        } catch (restErr: any) {
+          if (isQuotaError(restErr)) markFirestoreWriteQuotaExceeded(restErr);
+        }
+      }
+    }
+    if (committed) {
+      trackFirestoreWrite(chunk.length, `حذف دفعة كشوفات (${chunk.length})`);
+    }
+  }
+
+  invalidateReadCache(GRADE_REPORTS_CACHE_KEY);
+  notifyCrossDeviceKeyChanged('grade_reports');
+  await relayPromise;
+}
+
+export function clearAllGradeReportsLocalCache(): void {
+  saveCachedGradeReportsToLocal([]);
+  invalidateReadCache(GRADE_REPORTS_CACHE_KEY);
 }
 
 function mapSnapshotToGradeReports(snap: QuerySnapshot): SentGradeSheet[] {

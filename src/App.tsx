@@ -40,6 +40,7 @@ import { sendParentPushNotification, sendBroadcastPushNotification } from './lib
 import { 
   persistDirectToFirestore, 
   safeDispatchStorageUpdate,
+  saveSyncedLocalOnly,
   hydrateFromOfflineVault,
   saveLocalSeedWithoutCloudWrite,
   ensureAllRealtimeListeners,
@@ -142,23 +143,18 @@ export default function App() {
   );
 
   const saveExamQuestionPaper = async (paper: ExamQuestionPaper) => {
-    let updatedPapers: ExamQuestionPaper[] = [];
-    setExamQuestions(prev => {
-      const idx = prev.findIndex(p => p.id === paper.id);
-      if (idx >= 0) {
-        updatedPapers = prev.map((p, i) => i === idx ? paper : p);
-      } else {
-        updatedPapers = [paper, ...prev];
-      }
-      try {
-        localStorage.setItem('school_exam_questions', JSON.stringify(updatedPapers));
-      } catch {}
-      return updatedPapers;
-    });
+    const currentPapers = examQuestions.length > 0 ? examQuestions : safeParseStorageArray<ExamQuestionPaper>('school_exam_questions');
+    const idx = currentPapers.findIndex(p => p.id === paper.id);
+    const updatedPapers = idx >= 0
+      ? currentPapers.map((p, i) => i === idx ? paper : p)
+      : [paper, ...currentPapers];
+
+    setExamQuestions(updatedPapers);
+    saveSyncedLocalOnly('school_exam_questions', JSON.stringify(updatedPapers));
+    safeDispatchStorageUpdate('school_exam_questions', JSON.stringify(updatedPapers));
 
     // Cloud and cross-browser synchronization
     await persistDirectToFirestore('school_exam_questions', updatedPapers);
-    safeDispatchStorageUpdate('school_exam_questions', JSON.stringify(updatedPapers));
 
     // If submitted by teacher, immediately notify the Director across all devices/browsers
     if (paper.status === 'submitted') {
@@ -216,16 +212,13 @@ export default function App() {
   };
 
   const deleteExamQuestionPaper = async (id: string) => {
-    let updatedPapers: ExamQuestionPaper[] = [];
-    setExamQuestions(prev => {
-      updatedPapers = prev.filter(p => p.id !== id);
-      try {
-        localStorage.setItem('school_exam_questions', JSON.stringify(updatedPapers));
-      } catch {}
-      return updatedPapers;
-    });
+    const currentPapers = examQuestions.length > 0 ? examQuestions : safeParseStorageArray<ExamQuestionPaper>('school_exam_questions');
+    const updatedPapers = currentPapers.filter(p => p.id !== id);
+    setExamQuestions(updatedPapers);
+    const serialized = JSON.stringify(updatedPapers);
+    saveSyncedLocalOnly('school_exam_questions', serialized);
+    safeDispatchStorageUpdate('school_exam_questions', serialized);
     await persistDirectToFirestore('school_exam_questions', updatedPapers);
-    safeDispatchStorageUpdate('school_exam_questions', JSON.stringify(updatedPapers));
   };
 
   // Simulator Active Portal: 'director' | 'teacher' | 'parent'

@@ -3,9 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { commitFirestoreBatchViaRest, db, deleteFirestoreDocFast, getDocCacheFirst, writeFirestoreDocFast } from './firebase';
+import { commitFirestoreBatchViaRest, commitFirestoreDeletesViaRest, db, deleteFirestoreDocFast, getDocCacheFirst, writeFirestoreDocFast } from './firebase';
 import { 
+  collection,
   doc, 
+  getDocs,
   setDoc, 
   writeBatch
 } from 'firebase/firestore';
@@ -18,7 +20,7 @@ import {
   markFirestoreReadQuotaExceeded,
   isQuotaError
 } from './quotaManager';
-import { enqueuePendingGradeBatch, getPendingGradeBatches, removePendingGradeBatch, getVaultItem, setVaultItem } from './offlineVault';
+import { enqueuePendingGradeBatch, getPendingGradeBatches, removePendingGradeBatch, removePendingGradeBatchesForStudents, clearPendingGradeBatches, getVaultItem, setVaultItem } from './offlineVault';
 import { isReadCacheFresh, markReadCacheFresh, invalidateReadCache } from './readCache';
 
 /**
@@ -1106,24 +1108,125 @@ export async function resyncAndClearDeletedSheetStudents(
   }
 
   if (idsToDelete.length > 0 && db && !isFirestoreWriteQuotaExceeded() && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
-    for (let i = 0; i < idsToDelete.length; i += 10) {
-      const wave = idsToDelete.slice(i, i + 10);
-      await Promise.all(
-        wave.map(async (sid) => {
-          try {
-            await deleteFirestoreDocFast('students_grades', sid, { sdkGraceMs: 2500, restTimeoutMs: 7000 });
-            serverConfirmedMissingStudentIds.add(sid);
-            trackFirestoreWrite(1, `مسح درجات محذوفة (${sid})`);
-          } catch (err: any) {
-            if (isQuotaError(err)) markFirestoreWriteQuotaExceeded(err);
-            ok = false;
-          }
-        })
-      );
+    const deletedOk = await batchDeleteFirestoreDocs('students_grades', idsToDelete, 'مسح درجات محذوفة');
+    if (deletedOk) {
+      idsToDelete.forEach((sid) => serverConfirmedMissingStudentIds.add(sid));
+    } else {
+      ok = false;
     }
   }
 
   return ok;
+}
+
+/**
+ * Deletes multiple Firestore document IDs from a collection in chunked batches (max 400 per batch)
+ * with fast single-round-trip REST `:commit` fallback.
+ */
+export async function batchDeleteFirestoreDocs(
+  collectionName: string,
+  docIds: string[],
+  label: string = 'حذف سجلات'
+): Promise<boolean> {
+  const cleanIds = Array.from(new Set((docIds || []).map(normalizeId).filter(Boolean)));
+  if (cleanIds.length === 0) return true;
+  if (!db || isFirestoreWriteQuotaExceeded() || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+    return false;
+  }
+
+  let ok = true;
+  for (let i = 0; i < cleanIds.length; i += 400) {
+    const chunk = cleanIds.slice(i, i + 400);
+    const batch = writeBatch(db);
+    chunk.forEach((id) => {
+      batch.delete(doc(db, collectionName, id));
+    });
+
+    let committed = false;
+    try {
+      await Promise.race([
+        batch.commit().then(() => { committed = true; }),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('batch_timeout')), 2500))
+      ]);
+    } catch (err: any) {
+      if (!committed) {
+        if (isQuotaError(err)) {
+          markFirestoreWriteQuotaExceeded(err);
+          return false;
+        }
+        try {
+          await commitFirestoreDeletesViaRest(
+            chunk.map((id) => ({ collectionName, docId: id })),
+            9000
+          );
+          committed = true;
+        } catch (restErr: any) {
+          if (isQuotaError(restErr)) markFirestoreWriteQuotaExceeded(restErr);
+          ok = false;
+        }
+      }
+    }
+
+    if (committed) {
+      trackFirestoreWrite(chunk.length, `${label} (${chunk.length})`);
+    }
+  }
+  return ok;
+}
+
+/**
+ * Batch-deletes consolidated student grade docs (`students_grades/{studentId}`) and clears local caches/queues.
+ */
+export async function deleteStudentsGradesConsolidatedBulk(studentIds: string[]): Promise<boolean> {
+  const cleanIds = Array.from(new Set((studentIds || []).map(normalizeId).filter(Boolean)));
+  if (cleanIds.length === 0) return true;
+
+  cleanIds.forEach((cleanId) => {
+    consolidatedRecordMemoryCache.delete(cleanId);
+    serverConfirmedMissingStudentIds.add(cleanId);
+    invalidateReadCache(`students_grades_record:${cleanId}`);
+    invalidateReadCache(`students_grades_on_demand:${cleanId}`);
+    Array.from(lastSyncedConsolidatedSignatures.keys()).forEach((k) => {
+      if (k === cleanId || k === `subjects_${cleanId}` || k.startsWith(`${cleanId}_`)) {
+        lastSyncedConsolidatedSignatures.delete(k);
+      }
+    });
+  });
+  persistConsolidatedSignaturesToStorage();
+  await removePendingGradeBatchesForStudents(cleanIds).catch(() => {});
+
+  return await batchDeleteFirestoreDocs('students_grades', cleanIds, 'حذف درجات الطلاب المحذوفين');
+}
+
+/**
+ * Deletes every document in a Firestore collection using chunked batch deletes (for full platform wipe).
+ */
+export async function deleteEntireFirestoreCollection(
+  collectionName: string,
+  label: string = `تصفير ${collectionName}`
+): Promise<number> {
+  if (!db || isFirestoreWriteQuotaExceeded() || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+    return 0;
+  }
+  try {
+    const snap = await getDocs(collection(db, collectionName));
+    if (snap.empty) return 0;
+    trackFirestoreRead(snap.size, `جرد ${collectionName} للتصفير (${snap.size})`);
+    const ids = snap.docs.map((d) => d.id);
+    await batchDeleteFirestoreDocs(collectionName, ids, label);
+    return ids.length;
+  } catch (err: any) {
+    if (isQuotaError(err)) markFirestoreWriteQuotaExceeded(err);
+    return 0;
+  }
+}
+
+export async function clearConsolidatedGradesSignaturesAndPending(): Promise<void> {
+  lastSyncedConsolidatedSignatures.clear();
+  consolidatedRecordMemoryCache.clear();
+  serverConfirmedMissingStudentIds.clear();
+  persistConsolidatedSignaturesToStorage();
+  await clearPendingGradeBatches().catch(() => {});
 }
 
 /**

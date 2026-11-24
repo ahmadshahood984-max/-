@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { db, getDocCacheFirst, writeFirestoreDocFast } from './firebase';
+import { commitFirestoreBatchViaRest, db, getDocCacheFirst, writeFirestoreDocFast } from './firebase';
 import type { SentGradeSheet } from '../types';
-import { collection, doc, documentId, enableNetwork, getDocsFromCache, getDocsFromServer, onSnapshot, query, setDoc, where } from 'firebase/firestore';
+import { collection, doc, documentId, enableNetwork, getDocsFromCache, getDocsFromServer, onSnapshot, query, setDoc, where, writeBatch } from 'firebase/firestore';
 import { trackFirestoreRead, trackFirestoreWrite } from './firestoreTracker';
 import { sanitizeAndDeduplicateStudents } from './studentDeduplicator';
 import {
@@ -29,6 +29,7 @@ import {
   saveToOfflineVault,
   markVaultKeySynced,
   getAllVaultItems,
+  clearEntireOfflineVault,
   enqueuePendingNotification,
   getPendingNotifications,
   removePendingNotification
@@ -40,7 +41,7 @@ import {
   markReadCacheFresh,
   needsInitialSessionServerSync
 } from './readCache';
-import { syncStudentsDirectoryToFirestore } from './parentStudentQuery';
+import { seedStudentsDirectorySignatures, syncStudentsDirectoryToFirestore } from './parentStudentQuery';
 
 // Parent Portal must NEVER fetch full school_students, school_grades, school_sent_grade_sheets,
 // school_monthly_evaluations, school_attendance, or school_parents lists.
@@ -1666,7 +1667,12 @@ export async function forceRefreshDataFromFirestore(options?: {
       const { merged, didRecoverLocal } = mergeLocalAndRemoteStudents(payload, localList, remoteUpdatedAt, localMeta);
       payload = [...merged].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
       if (!isStudentOrParentPortal() && payload.length > 0) {
-        syncStudentsDirectoryToFirestore(payload).catch(() => {});
+        if (didRecoverLocal) {
+          syncStudentsDirectoryToFirestore(payload).catch(() => {});
+        } else {
+          // Seed local directory signatures from server snapshot without re-writing 200+ unchanged student docs
+          seedStudentsDirectorySignatures(payload).catch(() => {});
+        }
       }
       if (didRecoverLocal && !isOffline && !isFirestoreWriteQuotaExceeded()) {
         const now = Date.now();
@@ -1740,9 +1746,10 @@ export async function forceRefreshDataFromFirestore(options?: {
         key === 'school_classes' ||
         key === 'school_parents' ||
         key === 'school_grades';
-      if (protectedCoreKeys || fromCache || !initialLoadCompletedKeys.has(key) || remoteUpdatedAt <= localMeta.updatedAt) {
+      const serverIsStrictlyNewerDelete = !fromCache && remoteUpdatedAt > 0 && remoteUpdatedAt > (localMeta.updatedAt + 1500);
+      if (!serverIsStrictlyNewerDelete && (protectedCoreKeys || fromCache || !initialLoadCompletedKeys.has(key) || remoteUpdatedAt <= localMeta.updatedAt)) {
         console.warn(`[Fast Sync] Protected local key ${key} from being wiped out by empty remote.`);
-        if (!isOffline && !isFirestoreWriteQuotaExceeded() && protectedCoreKeys) {
+        if (!isOffline && !isFirestoreWriteQuotaExceeded() && protectedCoreKeys && !localMeta.pendingSync) {
           await setDoc(docRef, { data: prepareFirestorePayload(key, localParsed ?? localVal), updatedAt: Date.now() }, { merge: true });
           trackFirestoreWrite(1, `استعادة بيانات (${key})`);
         }
@@ -1968,7 +1975,8 @@ function processRemoteSnapshotDoc(key: string, docData: any, fromCache: boolean)
       key === 'school_teachers' ||
       key === 'school_classes' ||
       key === 'school_parents';
-    if (protectedCoreKeys || fromCache || !initialLoadCompletedKeys.has(key) || remoteUpdatedAt <= localMeta.updatedAt) {
+    const serverIsStrictlyNewerDelete = !fromCache && remoteUpdatedAt > 0 && remoteUpdatedAt > (localMeta.updatedAt + 1500);
+    if (!serverIsStrictlyNewerDelete && (protectedCoreKeys || fromCache || !initialLoadCompletedKeys.has(key) || remoteUpdatedAt <= localMeta.updatedAt)) {
       initialLoadCompletedKeys.add(key);
       return;
     }
@@ -2390,3 +2398,95 @@ export function setupFirebaseSync(options?: { deferNetwork?: boolean }) {
     startDeferredFirebaseSync();
   }
 }
+
+/**
+ * Fully resets school_live_data documents in Firestore, Live Relay, IndexedDB Vault, and localStorage
+ * for a complete platform reset ("تصفير كامل المنصة") without re-triggering seed data or leaving orphaned docs.
+ */
+export async function resetAllSchoolLiveDataInCloudAndLocal(emptyDefaults: Record<string, any>): Promise<boolean> {
+  const now = Date.now();
+
+  debouncedCloudWriteTimers.forEach((timer) => clearTimeout(timer));
+  debouncedCloudWriteTimers.clear();
+  inFlightDirectWrites.clear();
+  inFlightWritePromises.clear();
+  localUpdateTimestamps.clear();
+
+  const keys = Object.keys(emptyDefaults);
+  await clearEntireOfflineVault().catch(() => {});
+
+  isRemoteSyncing = true;
+  try {
+    originalRemoveItem('school_local_sync_meta');
+    originalRemoveItem(DELETED_STUDENTS_KEY);
+    inMemorySyncMetaCache = {};
+    keys.forEach((k) => {
+      const valStr = typeof emptyDefaults[k] === 'object' ? JSON.stringify(emptyDefaults[k]) : String(emptyDefaults[k]);
+      safeSetLocalItem(k, valStr);
+      lastSyncedValues.set(k, valStr);
+      setKeySyncMeta(k, now, false);
+      initialLoadCompletedKeys.add(k);
+      invalidateReadCache(`school_live_data:${k}`);
+      safeDispatchStorageUpdate(k, valStr);
+      broadcastLocalUpdate(k, valStr);
+    });
+    safeSetLocalItem('school_seed_applied_v1', '1');
+  } finally {
+    isRemoteSyncing = false;
+  }
+
+  // Push empty state via Live Relay immediately
+  await Promise.allSettled(
+    keys.map((k) => {
+      const valStr = typeof emptyDefaults[k] === 'object' ? JSON.stringify(emptyDefaults[k]) : String(emptyDefaults[k]);
+      return pushLiveRelayKey(k, valStr, now, { allowEmpty: true });
+    })
+  );
+
+  if (!db || isFirestoreWriteQuotaExceeded() || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+    return false;
+  }
+
+  let ok = true;
+  for (let i = 0; i < keys.length; i += 400) {
+    const chunk = keys.slice(i, i + 400);
+    const batch = writeBatch(db);
+    chunk.forEach((k) => {
+      batch.set(doc(db, 'school_live_data', k), { data: emptyDefaults[k], updatedAt: now }, { merge: true });
+    });
+    let committed = false;
+    try {
+      await Promise.race([
+        batch.commit().then(() => { committed = true; }),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('batch_timeout')), 3000))
+      ]);
+    } catch (err: any) {
+      if (!committed) {
+        if (isQuotaError(err)) {
+          markFirestoreWriteQuotaExceeded(err);
+          return false;
+        }
+        try {
+          await commitFirestoreBatchViaRest(
+            chunk.map((k) => ({
+              collectionName: 'school_live_data',
+              docId: k,
+              data: { data: emptyDefaults[k], updatedAt: now },
+              merge: true
+            })),
+            9000
+          );
+          committed = true;
+        } catch (restErr: any) {
+          if (isQuotaError(restErr)) markFirestoreWriteQuotaExceeded(restErr);
+          ok = false;
+        }
+      }
+    }
+    if (committed) {
+      trackFirestoreWrite(chunk.length, `تصفير وثائق السحابة (${chunk.length})`);
+    }
+  }
+  return ok;
+}
+

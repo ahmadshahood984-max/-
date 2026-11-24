@@ -327,3 +327,52 @@ export async function setVaultItem(key: string, value: string): Promise<void> {
   await saveToOfflineVault(key, value, Date.now(), false);
 }
 
+export async function clearEntireOfflineVault(): Promise<void> {
+  const db = await openVaultDB();
+  if (!db) return;
+
+  return new Promise<void>((resolve) => {
+    try {
+      const tx = db.transaction([STORE_KV, STORE_GRADE_BATCHES, STORE_NOTIFICATIONS], 'readwrite');
+      tx.objectStore(STORE_KV).clear();
+      tx.objectStore(STORE_GRADE_BATCHES).clear();
+      tx.objectStore(STORE_NOTIFICATIONS).clear();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+      tx.onabort = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+
+export async function removePendingGradeBatchesForStudents(studentIds: string[]): Promise<void> {
+  const cleanIds = new Set((studentIds || []).map((id) => String(id || '').trim()).filter(Boolean));
+  if (cleanIds.size === 0) return;
+  const batches = await getPendingGradeBatches();
+  if (!batches || batches.length === 0) return;
+
+  const db = await openVaultDB();
+  if (!db) return;
+
+  return new Promise<void>((resolve) => {
+    try {
+      const tx = db.transaction(STORE_GRADE_BATCHES, 'readwrite');
+      const store = tx.objectStore(STORE_GRADE_BATCHES);
+      for (const batch of batches) {
+        const remaining = (batch.records || []).filter((r) => !cleanIds.has(String(r?.studentId || '').trim()));
+        if (remaining.length === 0) {
+          store.delete(batch.id);
+        } else if (remaining.length !== (batch.records || []).length) {
+          store.put({ ...batch, records: remaining });
+        }
+      }
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+      tx.onabort = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+
