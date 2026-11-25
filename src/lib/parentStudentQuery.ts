@@ -82,11 +82,15 @@ function sanitizeForFirestoreDoc<T extends Record<string, any>>(obj: T): Record<
 }
 
 function buildLookupMetadata(): {
-  classMap: Map<string, { name: string; teacherId?: string }>;
+  classMap: Map<string, { name: string; teacherId?: string; shift?: string }>;
   teacherMap: Map<string, string>;
+  fullClassTeacherByClassId: Map<string, { id: string; name: string }>;
+  anyTeacherByClassId: Map<string, { id: string; name: string }>;
 } {
-  const classMap = new Map<string, { name: string; teacherId?: string }>();
+  const classMap = new Map<string, { name: string; teacherId?: string; shift?: string }>();
   const teacherMap = new Map<string, string>();
+  const fullClassTeacherByClassId = new Map<string, { id: string; name: string }>();
+  const anyTeacherByClassId = new Map<string, { id: string; name: string }>();
   try {
     if (typeof window !== 'undefined' && window.localStorage) {
       const rawClasses = window.localStorage.getItem('school_classes');
@@ -94,7 +98,13 @@ function buildLookupMetadata(): {
         const list = JSON.parse(rawClasses);
         if (Array.isArray(list)) {
           list.forEach((c: any) => {
-            if (c?.id) classMap.set(String(c.id), { name: c.name || '', teacherId: c.teacherId });
+            if (c?.id) {
+              classMap.set(String(c.id), {
+                name: c.name || '',
+                teacherId: c.teacherId || '',
+                shift: c.shift || ''
+              });
+            }
           });
         }
       }
@@ -103,19 +113,37 @@ function buildLookupMetadata(): {
         const list = JSON.parse(rawTeachers);
         if (Array.isArray(list)) {
           list.forEach((t: any) => {
-            if (t?.id) teacherMap.set(String(t.id), t.name || '');
+            if (!t?.id) return;
+            const tid = String(t.id);
+            const tname = String(t.name || '');
+            teacherMap.set(tid, tname);
+            const isFullClass = Array.isArray(t.subjects) && t.subjects.includes('عام - جميع المواد');
+            if (Array.isArray(t.classes)) {
+              t.classes.forEach((cid: any) => {
+                const cleanCid = String(cid || '').trim();
+                if (!cleanCid) return;
+                if (isFullClass && !fullClassTeacherByClassId.has(cleanCid)) {
+                  fullClassTeacherByClassId.set(cleanCid, { id: tid, name: tname });
+                }
+                if (!anyTeacherByClassId.has(cleanCid)) {
+                  anyTeacherByClassId.set(cleanCid, { id: tid, name: tname });
+                }
+              });
+            }
           });
         }
       }
     }
   } catch {}
-  return { classMap, teacherMap };
+  return { classMap, teacherMap, fullClassTeacherByClassId, anyTeacherByClassId };
 }
 
 function buildStudentDirectoryPayload(
   st: Student,
-  classMap: Map<string, { name: string; teacherId?: string }>,
-  teacherMap: Map<string, string>
+  classMap: Map<string, { name: string; teacherId?: string; shift?: string }>,
+  teacherMap: Map<string, string>,
+  fullClassTeacherByClassId?: Map<string, { id: string; name: string }>,
+  anyTeacherByClassId?: Map<string, { id: string; name: string }>
 ): { id: string; sig: string; payload: Record<string, any> } | null {
   if (!st || !st.id) return null;
   const cleanId = String(st.id).trim();
@@ -123,15 +151,31 @@ function buildStudentDirectoryPayload(
 
   const unified = st.unifiedNo !== undefined && st.unifiedNo !== null ? String(st.unifiedNo).trim() : '';
   const roll = st.rollNo !== undefined && st.rollNo !== null ? String(st.rollNo).trim() : '';
-  const clsInfo = st.classId ? classMap.get(String(st.classId)) : undefined;
-  const teacherName = clsInfo?.teacherId ? teacherMap.get(String(clsInfo.teacherId)) || '' : '';
+  const cleanClassId = st.classId ? String(st.classId).trim() : '';
+  const clsInfo = cleanClassId ? classMap.get(cleanClassId) : undefined;
+
+  let resolvedTeacherId = '';
+  let resolvedTeacherName = '';
+  if (clsInfo?.teacherId && teacherMap.has(String(clsInfo.teacherId))) {
+    resolvedTeacherId = String(clsInfo.teacherId);
+    resolvedTeacherName = teacherMap.get(resolvedTeacherId) || '';
+  } else if (cleanClassId && fullClassTeacherByClassId?.has(cleanClassId)) {
+    const t = fullClassTeacherByClassId.get(cleanClassId)!;
+    resolvedTeacherId = t.id;
+    resolvedTeacherName = t.name;
+  } else if (cleanClassId && anyTeacherByClassId?.has(cleanClassId)) {
+    const t = anyTeacherByClassId.get(cleanClassId)!;
+    resolvedTeacherId = t.id;
+    resolvedTeacherName = t.name;
+  }
 
   const payload = sanitizeForFirestoreDoc({
     id: cleanId,
     name: st.name || '',
     classId: st.classId || '',
     className: clsInfo?.name || '',
-    teacherName,
+    teacherId: resolvedTeacherId,
+    teacherName: resolvedTeacherName,
     parentId: st.parentId || '',
     parentName: st.parentName || '',
     parentPhone: st.parentPhone || '',
@@ -157,12 +201,12 @@ function buildStudentDirectoryPayload(
 export async function seedStudentsDirectorySignatures(students: Student[]): Promise<void> {
   if (!Array.isArray(students) || students.length === 0) return;
   await ensureDirSigsHydrated();
-  const { classMap, teacherMap } = buildLookupMetadata();
+  const { classMap, teacherMap, fullClassTeacherByClassId, anyTeacherByClassId } = buildLookupMetadata();
   if (classMap.size === 0) return;
 
   let changed = false;
   for (const st of students) {
-    const built = buildStudentDirectoryPayload(st, classMap, teacherMap);
+    const built = buildStudentDirectoryPayload(st, classMap, teacherMap, fullClassTeacherByClassId, anyTeacherByClassId);
     if (!built) continue;
     if (!syncedStudentSignatures.has(built.id)) {
       syncedStudentSignatures.set(built.id, built.sig);
@@ -186,14 +230,14 @@ export async function syncStudentsDirectoryToFirestore(students: Student[]): Pro
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
 
   await ensureDirSigsHydrated();
-  const { classMap, teacherMap } = buildLookupMetadata();
+  const { classMap, teacherMap, fullClassTeacherByClassId, anyTeacherByClassId } = buildLookupMetadata();
   // Wait until classes are loaded so we never write 184 docs with empty className and overwrite them 1s later
   if (classMap.size === 0) return;
 
   const changedDocs: Array<{ id: string; sig: string; data: Record<string, any> }> = [];
 
   for (const st of students) {
-    const built = buildStudentDirectoryPayload(st, classMap, teacherMap);
+    const built = buildStudentDirectoryPayload(st, classMap, teacherMap, fullClassTeacherByClassId, anyTeacherByClassId);
     if (!built) continue;
     if (syncedStudentSignatures.get(built.id) === built.sig) {
       continue;

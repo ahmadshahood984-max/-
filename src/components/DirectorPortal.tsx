@@ -6494,7 +6494,8 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
           await Promise.allSettled([
             recordDeletedEntityIds('teachers', [itemId]),
             persistDirectToFirestore('school_teachers', updated, { timeoutMs: 6000, markClearedIfEmpty: true }),
-            ...(classesChanged ? [persistDirectToFirestore('school_classes', updatedClasses, { timeoutMs: 6000, markClearedIfEmpty: true })] : [])
+            ...(classesChanged ? [persistDirectToFirestore('school_classes', updatedClasses, { timeoutMs: 6000, markClearedIfEmpty: true })] : []),
+            syncStudentsDirectoryToFirestore(students).catch(() => {})
           ]);
           alert(`✅ تم حذف المعلم (${teacher.name}) من النظام وقاعدة البيانات بنجاح.`);
         }
@@ -6658,7 +6659,8 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
           await Promise.allSettled([
             recordDeletedEntityIds('teachers', removedIds),
             persistDirectToFirestore('school_teachers', remaining, { timeoutMs: 6000, markClearedIfEmpty: true }),
-            ...(classesChanged ? [persistDirectToFirestore('school_classes', nextClasses, { timeoutMs: 6000, markClearedIfEmpty: true })] : [])
+            ...(classesChanged ? [persistDirectToFirestore('school_classes', nextClasses, { timeoutMs: 6000, markClearedIfEmpty: true })] : []),
+            syncStudentsDirectoryToFirestore(students).catch(() => {})
           ]);
         } else if (category === 'announcements') {
           const remaining = announcements.filter(a => !matchesCohort(a));
@@ -7314,7 +7316,11 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     }
 
     setClasses(updatedClasses);
+    const cStr = JSON.stringify(updatedClasses);
+    saveSyncedLocalOnly('school_classes', cStr);
+    safeDispatchStorageUpdate('school_classes', cStr);
     await persistDirectToFirestore('school_classes', updatedClasses);
+    void syncStudentsDirectoryToFirestore(students);
 
     const isEdit = !!editingClass;
     setEditingClass(null);
@@ -7412,6 +7418,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     const generatedEmail = `${newTeacher.name.trim().replace(/\s+/g, "")}_${Date.now()}@school.com`;
     const defaultPhone = '0500000000';
 
+    const savedTeacherId = editingTeacher ? editingTeacher.id : `t-${Date.now()}`;
     let updatedTeachers: Teacher[] = [];
     if (editingTeacher) {
       updatedTeachers = teachers.map(t => {
@@ -7428,7 +7435,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       });
     } else {
       const newTeacherObj: Teacher = {
-        id: `t-${Date.now()}`,
+        id: savedTeacherId,
         name: newTeacher.name.trim(),
         email: generatedEmail,
         phone: defaultPhone,
@@ -7442,7 +7449,40 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     }
 
     setTeachers(updatedTeachers);
-    await persistDirectToFirestore('school_teachers', updatedTeachers);
+    const tStr = JSON.stringify(updatedTeachers);
+    saveSyncedLocalOnly('school_teachers', tStr);
+    safeDispatchStorageUpdate('school_teachers', tStr);
+
+    let classesChanged = false;
+    const nextClasses = classes.map(c => {
+      if (teacherAssignmentType === 'full_class' && teacherSelectedClassId) {
+        if (c.id === teacherSelectedClassId && c.teacherId !== savedTeacherId) {
+          classesChanged = true;
+          return { ...c, teacherId: savedTeacherId };
+        }
+        if (c.id !== teacherSelectedClassId && c.teacherId === savedTeacherId) {
+          classesChanged = true;
+          return { ...c, teacherId: '' };
+        }
+      } else if (editingTeacher && c.teacherId === savedTeacherId && !finalClasses.includes(c.id)) {
+        classesChanged = true;
+        return { ...c, teacherId: '' };
+      }
+      return c;
+    });
+
+    if (classesChanged) {
+      setClasses(nextClasses);
+      const cStr = JSON.stringify(nextClasses);
+      saveSyncedLocalOnly('school_classes', cStr);
+      safeDispatchStorageUpdate('school_classes', cStr);
+    }
+
+    await Promise.all([
+      persistDirectToFirestore('school_teachers', updatedTeachers),
+      ...(classesChanged ? [persistDirectToFirestore('school_classes', nextClasses)] : [])
+    ]);
+    void syncStudentsDirectoryToFirestore(students);
 
     const isEdit = !!editingTeacher;
 
@@ -8279,7 +8319,9 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
                   </h3>
                   <div className="space-y-3">
                     {classes.filter(matchesCohort).map(cls => {
-                      const teacher = teachers.find(t => t.id === cls.teacherId);
+                      const teacher =
+                        teachers.find(t => t.id === cls.teacherId) ||
+                        teachers.find(t => Array.isArray(t.classes) && t.classes.includes(cls.id) && Array.isArray(t.subjects) && t.subjects.includes('عام - جميع المواد'));
                       const classStudents = students.filter(s => s.classId === cls.id);
                       return (
                         <div key={cls.id} className="p-4 bg-slate-50 rounded-xl border border-slate-100 flex items-center justify-between hover:bg-slate-100/50 transition">
@@ -14846,7 +14888,26 @@ ${sampleEval}
                       />
                     </div>
 
-                    {/* 4. الفوج / الدوام */}
+                    {/* 4. المعلم المشرف / رائد الفصل (اختياري) */}
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 mb-1.5 font-sans">
+                        المعلم المشرف / رائد الفصل (اختياري)
+                      </label>
+                      <select
+                        value={newClassTeacherId}
+                        onChange={e => setNewClassTeacherId(e.target.value)}
+                        className="w-full text-sm border border-slate-200 px-3.5 py-2.5 rounded-xl bg-white focus:border-indigo-500 focus:outline-none text-slate-800"
+                      >
+                        <option value="">-- بدون تحديد أو يُحدد تلقائياً من الكادر --</option>
+                        {teachers.filter(matchesCohort).map(t => (
+                          <option key={t.id} value={t.id}>
+                            {t.name} {t.subjects?.includes('عام - جميع المواد') ? '(رائد صف)' : t.subjects?.length ? `(${t.subjects.join('، ')})` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* 5. الفوج / الدوام */}
                     <div>
                       <label className="block text-xs font-semibold text-slate-600 mb-1.5 font-sans">الفوج / الدوام</label>
                       <div className="grid grid-cols-2 gap-2">
@@ -14917,7 +14978,9 @@ ${sampleEval}
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-[500px] overflow-y-auto p-1">
                     {classes.filter(matchesCohort).map(cls => {
-                      const teacher = teachers.find(t => t.id === cls.teacherId);
+                      const teacher =
+                        teachers.find(t => t.id === cls.teacherId) ||
+                        teachers.find(t => Array.isArray(t.classes) && t.classes.includes(cls.id) && Array.isArray(t.subjects) && t.subjects.includes('عام - جميع المواد'));
                       const studentCount = students.filter(s => s.classId === cls.id).length;
                       const range = getClassUnifiedRange(cls.id, classes);
                       return (
@@ -15171,7 +15234,7 @@ ${sampleEval}
                             subtitle = `السبب: ${item.reason} | الحالة: ${item.status === 'approved' ? 'مقبول ✅' : item.status === 'rejected' ? 'مرفوض ❌' : 'قيد الانتظار ⏳'}`;
                           } else if (targetDeleteCategory === 'classes') {
                             title = item.name;
-                            subtitle = `المرحلة: ${item.grade} | رقم القاعة: ${item.room || 'غير محدد'} | رائد الفصل: ${teachers.find(t => t.id === item.classTeacherId)?.name || 'غير محدد'}`;
+                            subtitle = `المرحلة: ${item.grade} | رقم القاعة: ${item.room || 'غير محدد'} | رائد الفصل: ${teachers.find(t => t.id === (item.teacherId || item.classTeacherId))?.name || 'غير محدد'}`;
                           } else if (targetDeleteCategory === 'grades') {
                             title = `مادة ${item.subject} - الطالب: ${students.find(s => s.id === item.studentId)?.name || 'مجهول'}`;
                             subtitle = `النوع: ${item.type} | الشهر: ${item.month || 'غير محدد'} | الدرجة: ${item.score} من ${item.maxScore}`;
@@ -16003,7 +16066,7 @@ ${sampleEval}
                             subtitle = `السبب: ${item.reason} | الحالة: ${item.status === 'approved' ? 'مقبول ✅' : item.status === 'rejected' ? 'مرفوض ❌' : 'قيد الانتظار ⏳'}`;
                           } else if (targetDeleteCategory === 'classes') {
                             title = item.name;
-                            subtitle = `المرحلة: ${item.grade} | رقم القاعة: ${item.room || 'غير محدد'} | رائد الفصل: ${teachers.find(t => t.id === item.classTeacherId)?.name || 'غير محدد'}`;
+                            subtitle = `المرحلة: ${item.grade} | رقم القاعة: ${item.room || 'غير محدد'} | رائد الفصل: ${teachers.find(t => t.id === (item.teacherId || item.classTeacherId))?.name || 'غير محدد'}`;
                           } else if (targetDeleteCategory === 'grades') {
                             title = `مادة ${item.subject} - الطالب: ${students.find(s => s.id === item.studentId)?.name || 'مجهول'}`;
                             subtitle = `النوع: ${item.type} | الشهر: ${item.month || 'غير محدد'} | الدرجة: ${item.score} من ${item.maxScore}`;

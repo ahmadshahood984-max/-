@@ -1783,6 +1783,16 @@ export async function persistDirectToFirestore(
 
         if (key === 'school_students' && Array.isArray(data)) {
           syncStudentsDirectoryToFirestore(data).catch(() => {});
+        } else if ((key === 'school_classes' || key === 'school_teachers') && !isStudentOrParentPortal()) {
+          try {
+            const rawStudents = safeGetLocalItem('school_students');
+            if (rawStudents) {
+              const parsedStudents = JSON.parse(rawStudents);
+              if (Array.isArray(parsedStudents) && parsedStudents.length > 0) {
+                syncStudentsDirectoryToFirestore(parsedStudents).catch(() => {});
+              }
+            }
+          } catch {}
         }
         return true;
       })

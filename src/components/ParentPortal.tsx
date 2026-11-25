@@ -264,16 +264,38 @@ export default function ParentPortal({
       (s && s.rollNo && String(s.rollNo).trim() === loggedInStudentId.trim())
     );
 
-  const activeStudentObj: Student | undefined = liveMatchedStudent || activeDirectStudent || undefined;
+  const activeStudentObj: Student | undefined = liveMatchedStudent
+    ? ({
+        ...liveMatchedStudent,
+        className:
+          (liveMatchedStudent as any).className ||
+          (activeDirectStudent?.id === liveMatchedStudent.id ? (activeDirectStudent as any)?.className : undefined),
+        teacherId:
+          (liveMatchedStudent as any).teacherId ||
+          (activeDirectStudent?.id === liveMatchedStudent.id ? (activeDirectStudent as any)?.teacherId : undefined),
+        teacherName:
+          (liveMatchedStudent as any).teacherName ||
+          (activeDirectStudent?.id === liveMatchedStudent.id ? (activeDirectStudent as any)?.teacherName : undefined)
+      } as Student)
+    : activeDirectStudent || undefined;
 
   // Keep local cached profile fresh whenever cloud student list updates (never triggers cloud write)
   React.useEffect(() => {
     if (!liveMatchedStudent) return;
     try {
-      const nextJson = JSON.stringify(liveMatchedStudent);
+      const mergedForCache =
+        activeDirectStudent?.id === liveMatchedStudent.id
+          ? {
+              ...liveMatchedStudent,
+              className: (liveMatchedStudent as any).className || (activeDirectStudent as any)?.className,
+              teacherId: (liveMatchedStudent as any).teacherId || (activeDirectStudent as any)?.teacherId,
+              teacherName: (liveMatchedStudent as any).teacherName || (activeDirectStudent as any)?.teacherName
+            }
+          : liveMatchedStudent;
+      const nextJson = JSON.stringify(mergedForCache);
       if (localStorage.getItem('parent_portal_active_student_obj') !== nextJson) {
         localStorage.setItem('parent_portal_active_student_obj', nextJson);
-        setActiveDirectStudent(liveMatchedStudent);
+        setActiveDirectStudent(mergedForCache as Student);
       }
     } catch {}
   }, [liveMatchedStudent]);
@@ -572,6 +594,8 @@ export default function ParentPortal({
       localStorage.getItem('school_evaluation_current_month') !== null;
 
     const PUBLIC_GRADING_CONFIG_KEYS = [
+      'school_classes',
+      'school_teachers',
       'school_evaluation_current_month',
       'school_custom_subjects',
       'school_max_grade_setting',
@@ -585,6 +609,8 @@ export default function ParentPortal({
     const missingPublicGradingConfig =
       typeof localStorage !== 'undefined' &&
       [
+        'school_classes',
+        'school_teachers',
         'school_evaluation_current_month',
         'school_custom_subjects',
         'school_max_grade_setting',
@@ -1388,18 +1414,68 @@ export default function ParentPortal({
     }
   }, [selectedParentId, selectedChildId]);
 
+  const cleanChildClassName = String((activeChild as any)?.className || '').trim();
   const activeChildClass =
     classes.find(c => c.id === activeChild?.classId) ||
-    ((activeChild as any)?.className
-      ? ({ id: activeChild?.classId || '', name: (activeChild as any).className, teacherId: '' } as Class)
-      : undefined);
-  const activeChildTeacher =
-    teachers.find(t => t.id === activeChildClass?.teacherId) ||
-    teachers.find(t => activeChildClass?.id && t.classes && t.classes.includes(activeChildClass.id)) ||
-    ((activeChild as any)?.teacherName
-      ? ({ id: 'teacher', name: (activeChild as any).teacherName } as Teacher)
+    (cleanChildClassName
+      ? classes.find(
+          c =>
+            String(c.name || '').trim() === cleanChildClassName &&
+            (!activeChild?.shift || !c.shift || c.shift === activeChild.shift)
+        ) || classes.find(c => String(c.name || '').trim() === cleanChildClassName)
       : undefined) ||
-    teachers[0];
+    (cleanChildClassName
+      ? ({
+          id: activeChild?.classId || '',
+          name: cleanChildClassName,
+          teacherId: (activeChild as any)?.teacherId || ''
+        } as Class)
+      : undefined);
+
+  const childClassId = activeChildClass?.id || activeChild?.classId || '';
+  const activeChildTeacher: Teacher | undefined =
+    (activeChildClass?.teacherId
+      ? teachers.find(t => t.id === activeChildClass.teacherId)
+      : undefined) ||
+    ((activeChild as any)?.teacherId
+      ? teachers.find(t => t.id === (activeChild as any).teacherId)
+      : undefined) ||
+    teachers.find(
+      t =>
+        Boolean(childClassId) &&
+        Array.isArray(t.classes) &&
+        t.classes.includes(childClassId) &&
+        Array.isArray(t.subjects) &&
+        t.subjects.includes('عام - جميع المواد') &&
+        (!activeChild?.shift || !t.shift || t.shift === activeChild.shift)
+    ) ||
+    teachers.find(
+      t =>
+        Boolean(childClassId) &&
+        Array.isArray(t.classes) &&
+        t.classes.includes(childClassId) &&
+        Array.isArray(t.subjects) &&
+        t.subjects.includes('عام - جميع المواد')
+    ) ||
+    ((activeChild as any)?.teacherName
+      ? ({
+          id: (activeChild as any)?.teacherId || activeChildClass?.teacherId || 'teacher',
+          name: String((activeChild as any).teacherName).trim()
+        } as Teacher)
+      : undefined) ||
+    teachers.find(
+      t =>
+        Boolean(childClassId) &&
+        Array.isArray(t.classes) &&
+        t.classes.includes(childClassId) &&
+        (!activeChild?.shift || !t.shift || t.shift === activeChild.shift)
+    ) ||
+    teachers.find(
+      t =>
+        Boolean(childClassId) &&
+        Array.isArray(t.classes) &&
+        t.classes.includes(childClassId)
+    );
 
   // --- Auto-Login & Save Phone Number States ---
   const [rememberMe, setRememberMe] = React.useState<boolean>(true);
