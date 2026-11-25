@@ -81,7 +81,8 @@ export function applyGradePartUpdate(
       copy[existingIdx] = {
         ...copy[existingIdx],
         examName: copy[existingIdx].examName || month,
-        score: value
+        score: value,
+        updatedAt: Date.now()
       };
     } else {
       copy.push({
@@ -92,7 +93,8 @@ export function applyGradePartUpdate(
         score: value,
         maxScore,
         date: new Date().toISOString().split('T')[0],
-        teacherId
+        teacherId,
+        updatedAt: Date.now()
       });
     }
     return copy;
@@ -100,7 +102,7 @@ export function applyGradePartUpdate(
 
   const base: Grade =
     existingIdx !== -1
-      ? { ...copy[existingIdx], examName: copy[existingIdx].examName || month }
+      ? { ...copy[existingIdx], examName: copy[existingIdx].examName || month, updatedAt: Date.now() }
       : {
           id: `${idPrefix}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
           studentId,
@@ -112,7 +114,8 @@ export function applyGradePartUpdate(
           teacherId,
           oralScore: null,
           homeworkScore: null,
-          quizScore: null
+          quizScore: null,
+          updatedAt: Date.now()
         };
 
   base[part] = value;
@@ -126,6 +129,7 @@ export function applyGradePartUpdate(
 
   const total = computeGradeTotal(base) ?? 0;
   base.score = total;
+  base.updatedAt = Date.now();
 
   if (existingIdx !== -1) {
     copy[existingIdx] = base;

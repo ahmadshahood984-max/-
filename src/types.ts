@@ -98,6 +98,7 @@ export interface Grade {
   attachedMedia?: string;
   attachedMediaType?: 'image' | 'video';
   shift?: 'morning' | 'evening';
+  updatedAt?: number;
 }
 
 export interface Announcement {

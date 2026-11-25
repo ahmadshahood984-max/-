@@ -327,6 +327,23 @@ export async function setVaultItem(key: string, value: string): Promise<void> {
   await saveToOfflineVault(key, value, Date.now(), false);
 }
 
+export async function removeVaultItem(key: string): Promise<void> {
+  const db = await openVaultDB();
+  if (!db) return;
+
+  return new Promise<void>((resolve) => {
+    try {
+      const tx = db.transaction(STORE_KV, 'readwrite');
+      tx.objectStore(STORE_KV).delete(key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+      tx.onabort = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+
 export async function clearEntireOfflineVault(): Promise<void> {
   const db = await openVaultDB();
   if (!db) return;

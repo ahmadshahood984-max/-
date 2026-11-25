@@ -81,6 +81,7 @@ export const PARENT_REALTIME_KEYS = [
   'school_saved_evaluation_months',
   'school_evaluation_saved_months',
   'school_deleted_evaluation_months',
+  'school_deleted_records',
   'school_seal_and_signatures_config',
   'school_app_icon',
   'school_welcome_messages',
@@ -96,6 +97,7 @@ export const PARENT_FAST_LIVE_KEYS = [
   'school_evaluation_saved_months',
   'school_saved_evaluation_months',
   'school_deleted_evaluation_months',
+  'school_deleted_records',
   'school_announcements',
   'school_classes',
   'school_teachers',
@@ -120,6 +122,7 @@ export const FAST_LIVE_SYNC_KEYS = [
   'school_evaluation_saved_months',
   'school_saved_evaluation_months',
   'school_deleted_evaluation_months',
+  'school_deleted_records',
   'school_students',
   'school_classes',
   'school_teachers',
@@ -171,6 +174,7 @@ export const SYNC_KEYS = [
   'school_saved_evaluation_months',
   'school_evaluation_saved_months',
   'school_deleted_evaluation_months',
+  'school_deleted_records',
   'school_max_grade_setting',
   'school_custom_max_grade',
   'school_pass_grade_setting',
@@ -183,7 +187,8 @@ export const EVALUATION_CONFIG_KEYS = [
   'school_evaluation_current_month',
   'school_saved_evaluation_months',
   'school_evaluation_saved_months',
-  'school_deleted_evaluation_months'
+  'school_deleted_evaluation_months',
+  'school_deleted_records'
 ];
 
 export function normalizeEvaluationMonthValue(raw: any): string {
@@ -220,6 +225,34 @@ export function getDeletedEvaluationMonthsMap(): Record<string, number> {
   }
 }
 
+export function getGradeTimestampMs(grade: { updatedAt?: number; date?: string } | null | undefined): number {
+  if (!grade) return 0;
+  const upd = Number(grade.updatedAt) || 0;
+  if (upd > 0) return upd;
+  const rawDate = String(grade.date || '').trim();
+  if (!rawDate) return 0;
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(rawDate);
+  if (dateOnly) {
+    return Date.UTC(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]), 23, 59, 59, 999);
+  }
+  return new Date(rawDate).getTime() || 0;
+}
+
+export function unmarkDeletedEvaluationMonth(month: string, options?: { syncToCloud?: boolean }): void {
+  const cleanMonth = String(month || '').trim();
+  if (!cleanMonth) return;
+  const existingDeleted = getDeletedEvaluationMonthsMap();
+  if (!existingDeleted[cleanMonth]) return;
+  const nextDeleted = { ...existingDeleted };
+  delete nextDeleted[cleanMonth];
+  const serialized = JSON.stringify(nextDeleted);
+  saveSyncedLocalOnly('school_deleted_evaluation_months', serialized);
+  safeDispatchStorageUpdate('school_deleted_evaluation_months', serialized);
+  if (options?.syncToCloud !== false && !isStudentOrParentPortal()) {
+    persistDirectToFirestore('school_deleted_evaluation_months', nextDeleted, { timeoutMs: 3500 }).catch(() => false);
+  }
+}
+
 export function isItemDeletedByEvaluationMonth(
   month: string | undefined | null,
   itemTs: number,
@@ -238,11 +271,18 @@ export function filterOutDeletedMonthsFromSheets(
   deletedMonthsMap: Record<string, number> = getDeletedEvaluationMonthsMap()
 ): SentGradeSheet[] {
   if (!Array.isArray(sheets)) return [];
-  if (!deletedMonthsMap || Object.keys(deletedMonthsMap).length === 0) return sheets;
+  const deletedReportIds = getDeletedEntityIdsSet('gradeReports');
+  const hasDeletedMonths = Boolean(deletedMonthsMap && Object.keys(deletedMonthsMap).length > 0);
+  const hasDeletedReports = deletedReportIds.size > 0;
+  if (!hasDeletedMonths && !hasDeletedReports) return sheets;
   return sheets.filter((sh) => {
     if (!sh) return false;
     const rec = sh as SentGradeSheet & { updatedAt?: number };
     const ts = Number(rec.updatedAt) || (rec.dateSent ? new Date(rec.dateSent).getTime() || 0 : 0);
+    if (rec.id && deletedReportIds.has(String(rec.id).trim())) {
+      const delTs = Number(getDeletedRecordsMap().gradeReports[String(rec.id).trim()]) || 0;
+      if (delTs >= ts) return false;
+    }
     return !isItemDeletedByEvaluationMonth(rec.month, ts, deletedMonthsMap);
   });
 }
@@ -276,7 +316,11 @@ const localUpdateTimestamps = new Map<string, number>();
 
 const LOCAL_SYNC_META_KEY = 'school_local_sync_meta';
 const DELETED_STUDENTS_KEY = 'school_deleted_student_ids';
+const DELETED_RECORDS_KEY = 'school_deleted_records';
 const MAX_FIRESTORE_DOC_BYTES = 920 * 1024; // Safety threshold below Firestore 1 MiB limit
+
+export type DeletedEntityCategory = 'classes' | 'teachers' | 'parents' | 'students' | 'grades' | 'gradeReports';
+export type DeletedRecordsMap = Record<DeletedEntityCategory, Record<string, number>>;
 
 interface LocalKeySyncMeta {
   updatedAt: number;
@@ -309,14 +353,117 @@ let collectionListenerAttached = false;
 const latestCollectionSnapshots = new Map<string, { data: any; fromCache: boolean }>();
 const debouncedCloudWriteTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const DEBOUNCED_TYPING_KEYS = new Set<string>(['school_grades', 'school_monthly_evaluations']);
+const cleanedRemoteTombstoneSignatures = new Set<string>();
 
 // Real-time Firestore `onSnapshot` listeners for instant PC <-> Phone / Android APK sync
 const SYNC_PULSE_DOC_ID = '_sync_pulse';
+const PARENT_PULSE_DOC_ID = '_parent_pulse';
+const ADMIN_DELTA_SINCE_KEY = 'school_live_delta_since_admin_v1';
+const PARENT_PULSE_KEYS_MAP_KEY = 'school_parent_pulse_keys_v1';
 let schoolLiveDataColUnsubscribe: (() => void) | null = null;
 let schoolLiveDataReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let parentScopedUnsubscribes: Array<() => void> = [];
 let parentScopedReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let lastRealtimeServerEventAt = 0;
+
+let pendingParentPulseKeys: Record<string, number> = {};
+let parentPulseWriteTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleParentPulseUpdate(key: string, ts: number): void {
+  if (isStudentOrParentPortal() || !PARENT_REALTIME_KEYS.includes(key)) return;
+  if (!db || isFirestoreWriteQuotaExceeded()) return;
+  pendingParentPulseKeys[key] = Math.max(pendingParentPulseKeys[key] || 0, ts || Date.now());
+  if (parentPulseWriteTimer) return;
+  parentPulseWriteTimer = setTimeout(() => {
+    parentPulseWriteTimer = null;
+    if (!db || isFirestoreWriteQuotaExceeded()) {
+      pendingParentPulseKeys = {};
+      return;
+    }
+    const keysPatch = { ...pendingParentPulseKeys };
+    pendingParentPulseKeys = {};
+    const maxTs = Math.max(Date.now(), ...Object.values(keysPatch));
+    writeFirestoreDocFast(
+      'school_live_data',
+      PARENT_PULSE_DOC_ID,
+      { updatedAt: maxTs, keys: keysPatch },
+      { merge: true, sdkGraceMs: 1500, restTimeoutMs: 6000 }
+    )
+      .then(() => {
+        trackFirestoreWrite(1, 'تحديث نبض إعدادات ولي الأمر');
+      })
+      .catch(() => {});
+  }, 1200);
+}
+
+function getAdminDeltaSince(): number {
+  try {
+    const raw = safeGetLocalItem(ADMIN_DELTA_SINCE_KEY);
+    const n = Number(raw) || 0;
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function advanceAdminDeltaSince(candidateTs: number): void {
+  if (!Number.isFinite(candidateTs) || candidateTs <= 0) return;
+  const current = getAdminDeltaSince();
+  if (candidateTs > current) {
+    const val = String(candidateTs);
+    safeSetLocalItem(ADMIN_DELTA_SINCE_KEY, val);
+    saveToOfflineVault(ADMIN_DELTA_SINCE_KEY, val, candidateTs, false).catch(() => {});
+  }
+}
+
+function getParentPulseKeysMap(): Record<string, number> {
+  try {
+    const raw = safeGetLocalItem(PARENT_PULSE_KEYS_MAP_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const out: Record<string, number> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      const ts = Number(v) || 0;
+      if (k && ts > 0) out[k] = ts;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function updateParentPulseKeysMap(updates: Record<string, number>): void {
+  const entries = Object.entries(updates).filter(([, ts]) => Number(ts) > 0);
+  if (entries.length === 0) return;
+  const merged = getParentPulseKeysMap();
+  let changed = false;
+  for (const [k, ts] of entries) {
+    if (ts > (merged[k] || 0)) {
+      merged[k] = ts;
+      changed = true;
+    }
+  }
+  if (!changed) return;
+  const serialized = JSON.stringify(merged);
+  safeSetLocalItem(PARENT_PULSE_KEYS_MAP_KEY, serialized);
+  saveToOfflineVault(PARENT_PULSE_KEYS_MAP_KEY, serialized, Date.now(), false).catch(() => {});
+}
+
+export function hasPortalBaselineCache(isParentPortal: boolean = isStudentOrParentPortal()): boolean {
+  const hasPublicConfig =
+    safeGetLocalItem('school_classes') !== null &&
+    safeGetLocalItem('school_evaluation_current_month') !== null &&
+    safeGetLocalItem('school_teachers') !== null;
+  if (isParentPortal) {
+    return hasPublicConfig && Object.keys(getParentPulseKeysMap()).length > 0;
+  }
+  return (
+    hasPublicConfig &&
+    safeGetLocalItem('school_students') !== null &&
+    getAdminDeltaSince() > 0
+  );
+}
 
 export function notifyCrossDeviceKeyChanged(_changedKey: string): void {
   // Handled natively by real-time Firestore `onSnapshot` on `school_live_data` and `grade_reports`
@@ -364,13 +511,21 @@ function startSchoolLiveDataCollectionListener(): void {
   }
 
   let isInitialSnapshot = true;
+  const adminDeltaSince = getAdminDeltaSince();
+  const useDeltaQuery = adminDeltaSince > 0 && hasPortalBaselineCache(false);
+  const colRef = collection(db, 'school_live_data');
+  const listenTarget = useDeltaQuery
+    ? query(colRef, where('updatedAt', '>', Math.max(0, adminDeltaSince - 15000)))
+    : colRef;
+
   try {
     schoolLiveDataColUnsubscribe = onSnapshot(
-      collection(db, 'school_live_data'),
+      listenTarget,
       (snapshot) => {
         const changes = snapshot.docChanges();
         let serverReadsCount = 0;
         let receivedRemoteServerUpdate = false;
+        let maxServerUpdatedAt = 0;
         if (!snapshot.metadata?.fromCache) {
           lastRealtimeServerEventAt = Date.now();
         }
@@ -378,18 +533,22 @@ function startSchoolLiveDataCollectionListener(): void {
         changes.forEach((change) => {
           if (change.type === 'removed') return;
           const key = change.doc.id;
-          if (!key || key === SYNC_PULSE_DOC_ID || !SYNC_KEYS.includes(key)) return;
+          if (!key || key === SYNC_PULSE_DOC_ID || key === PARENT_PULSE_DOC_ID || !SYNC_KEYS.includes(key)) return;
 
           const fromCache = !!change.doc.metadata?.fromCache;
           const hasPendingWrites = !!change.doc.metadata?.hasPendingWrites;
           const docData = change.doc.data();
+          const docUpdatedAt = Number(docData?.updatedAt) || 0;
 
           latestCollectionSnapshots.set(key, { data: docData, fromCache });
 
           if (!fromCache && !hasPendingWrites) {
             serverReadsCount += 1;
+            if (docUpdatedAt > maxServerUpdatedAt) {
+              maxServerUpdatedAt = docUpdatedAt;
+            }
             markReadCacheFresh(`school_live_data:${key}`);
-            if (!isInitialSnapshot) {
+            if (!isInitialSnapshot || useDeltaQuery) {
               receivedRemoteServerUpdate = true;
             }
           }
@@ -397,16 +556,22 @@ function startSchoolLiveDataCollectionListener(): void {
           processRemoteSnapshotDoc(key, docData, fromCache);
         });
 
+        if (maxServerUpdatedAt > 0) {
+          advanceAdminDeltaSince(maxServerUpdatedAt);
+        }
+
         if (serverReadsCount > 0) {
           trackFirestoreRead(
             serverReadsCount,
-            isInitialSnapshot ? 'مزامنة مبدئية مباشرة' : 'تحديث فوري بين الأجهزة'
+            useDeltaQuery
+              ? `جلب التحديثات الجديدة فقط (${serverReadsCount})`
+              : (isInitialSnapshot ? 'مزامنة مبدئية مباشرة' : 'تحديث فوري بين الأجهزة')
           );
         }
 
-        if (!isInitialSnapshot && receivedRemoteServerUpdate && typeof window !== 'undefined') {
+        if (receivedRemoteServerUpdate && typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent('school_live_sync_completed', {
-            detail: { ok: true, ts: Date.now(), source: 'realtime_snapshot' }
+            detail: { ok: true, ts: Date.now(), source: useDeltaQuery ? 'realtime_delta_snapshot' : 'realtime_snapshot' }
           }));
         }
 
@@ -442,6 +607,93 @@ function startSchoolLiveDataCollectionListener(): void {
   }
 }
 
+function attachParentScopedChunkListeners(): void {
+  if (!db) return;
+  const chunks: string[][] = [];
+  for (let i = 0; i < PARENT_REALTIME_KEYS.length; i += 30) {
+    chunks.push(PARENT_REALTIME_KEYS.slice(i, i + 30));
+  }
+
+  chunks.forEach((keyChunk) => {
+    let isInitialChunkSnapshot = true;
+    const q = query(collection(db, 'school_live_data'), where(documentId(), 'in', keyChunk));
+    const unsub = onSnapshot(
+      q,
+      (snapshot) => {
+        let serverReadsCount = 0;
+        let receivedRemoteUpdate = false;
+        const pulseUpdates: Record<string, number> = {};
+        if (!snapshot.metadata?.fromCache) {
+          lastRealtimeServerEventAt = Date.now();
+        }
+
+        snapshot.docChanges().forEach((change) => {
+          if (change.type === 'removed') return;
+          const key = change.doc.id;
+          if (!key || !PARENT_REALTIME_KEYS.includes(key)) return;
+
+          const fromCache = !!change.doc.metadata?.fromCache;
+          const hasPendingWrites = !!change.doc.metadata?.hasPendingWrites;
+          const docData = change.doc.data();
+          const docUpdatedAt = Number(docData?.updatedAt) || Date.now();
+
+          latestCollectionSnapshots.set(key, { data: docData, fromCache });
+
+          if (!fromCache && !hasPendingWrites) {
+            serverReadsCount += 1;
+            pulseUpdates[key] = docUpdatedAt;
+            markReadCacheFresh(`school_live_data:${key}`);
+            if (!isInitialChunkSnapshot) {
+              receivedRemoteUpdate = true;
+            }
+          }
+
+          processRemoteSnapshotDoc(key, docData, fromCache);
+        });
+
+        if (Object.keys(pulseUpdates).length > 0) {
+          updateParentPulseKeysMap(pulseUpdates);
+        }
+
+        if (serverReadsCount > 0) {
+          trackFirestoreRead(
+            serverReadsCount,
+            isInitialChunkSnapshot ? 'جلب إعدادات ولي الأمر المبدئية' : 'تحديث فوري لإعدادات المدرسة'
+          );
+        }
+
+        if (!isInitialChunkSnapshot && receivedRemoteUpdate && typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('school_live_sync_completed', {
+            detail: { ok: true, ts: Date.now(), source: 'parent_realtime_snapshot' }
+          }));
+        }
+
+        isInitialChunkSnapshot = false;
+      },
+      (err) => {
+        stopParentScopedRealtimeListeners();
+        if (isQuotaError(err)) {
+          markFirestoreReadQuotaExceeded(err);
+          return;
+        }
+        const msg = String((err as any)?.message || err || '').toLowerCase();
+        if (msg.includes('permission') || msg.includes('missing or insufficient')) {
+          return;
+        }
+        if (!parentScopedReconnectTimer && typeof window !== 'undefined') {
+          parentScopedReconnectTimer = setTimeout(() => {
+            parentScopedReconnectTimer = null;
+            if (isStudentOrParentPortal()) {
+              startParentScopedRealtimeListeners();
+            }
+          }, 6000);
+        }
+      }
+    );
+    parentScopedUnsubscribes.push(unsub);
+  });
+}
+
 function startParentScopedRealtimeListeners(): void {
   if (parentScopedUnsubscribes.length > 0 || !db || !isStudentOrParentPortal()) return;
   if (isFirestoreReadQuotaExceeded()) return;
@@ -453,59 +705,59 @@ function startParentScopedRealtimeListeners(): void {
   }
 
   try {
-    const chunks: string[][] = [];
-    for (let i = 0; i < PARENT_REALTIME_KEYS.length; i += 30) {
-      chunks.push(PARENT_REALTIME_KEYS.slice(i, i + 30));
-    }
-
-    chunks.forEach((keyChunk) => {
-      let isInitialChunkSnapshot = true;
-      const q = query(collection(db, 'school_live_data'), where(documentId(), 'in', keyChunk));
+    // If parent already has local baseline cache, listen ONLY to the 1-doc `_parent_pulse`
+    // and fetch individual config keys ONLY when their timestamp increased.
+    if (hasPortalBaselineCache(true)) {
+      const pulseRef = doc(db, 'school_live_data', PARENT_PULSE_DOC_ID);
       const unsub = onSnapshot(
-        q,
-        (snapshot) => {
-          let serverReadsCount = 0;
-          let receivedRemoteUpdate = false;
-          if (!snapshot.metadata?.fromCache) {
-            lastRealtimeServerEventAt = Date.now();
+        pulseRef,
+        async (snap) => {
+          if (snap.metadata?.fromCache) return;
+          lastRealtimeServerEventAt = Date.now();
+          trackFirestoreRead(1, 'فحص نبض التحديثات (مستند واحد)');
+
+          if (!snap.exists()) {
+            // Legacy cloud DB without `_parent_pulse` yet: fall back once to scoped chunk listener
+            stopParentScopedRealtimeListeners();
+            attachParentScopedChunkListeners();
+            return;
           }
 
-          snapshot.docChanges().forEach((change) => {
-            if (change.type === 'removed') return;
-            const key = change.doc.id;
-            if (!key || !PARENT_REALTIME_KEYS.includes(key)) return;
-
-            const fromCache = !!change.doc.metadata?.fromCache;
-            const hasPendingWrites = !!change.doc.metadata?.hasPendingWrites;
-            const docData = change.doc.data();
-
-            latestCollectionSnapshots.set(key, { data: docData, fromCache });
-
-            if (!fromCache && !hasPendingWrites) {
-              serverReadsCount += 1;
-              markReadCacheFresh(`school_live_data:${key}`);
-              if (!isInitialChunkSnapshot) {
-                receivedRemoteUpdate = true;
-              }
-            }
-
-            processRemoteSnapshotDoc(key, docData, fromCache);
+          const pulseData = snap.data() as { keys?: Record<string, number> };
+          const remoteKeysMap = pulseData?.keys && typeof pulseData.keys === 'object' ? pulseData.keys : {};
+          const localKeysMap = getParentPulseKeysMap();
+          const changedKeys = PARENT_REALTIME_KEYS.filter((k) => {
+            if (safeGetLocalItem(k) === null) return true;
+            const remoteTs = Number(remoteKeysMap[k]) || 0;
+            const localTs = Number(localKeysMap[k]) || 0;
+            return remoteTs > localTs;
           });
 
-          if (serverReadsCount > 0) {
-            trackFirestoreRead(
-              serverReadsCount,
-              isInitialChunkSnapshot ? 'جلب إعدادات ولي الأمر المباشرة' : 'تحديث فوري لإعدادات المدرسة'
-            );
+          if (changedKeys.length === 0) {
+            PARENT_REALTIME_KEYS.forEach((k) => {
+              initialLoadCompletedKeys.add(k);
+              markReadCacheFresh(`school_live_data:${k}`);
+            });
+            return;
           }
 
-          if (!isInitialChunkSnapshot && receivedRemoteUpdate && typeof window !== 'undefined') {
+          await forceRefreshDataFromFirestore({
+            forceServer: true,
+            keys: changedKeys,
+            bypassCache: true
+          }).catch(() => false);
+
+          const appliedUpdates: Record<string, number> = {};
+          changedKeys.forEach((k) => {
+            appliedUpdates[k] = Number(remoteKeysMap[k]) || Date.now();
+          });
+          updateParentPulseKeysMap(appliedUpdates);
+
+          if (typeof window !== 'undefined') {
             window.dispatchEvent(new CustomEvent('school_live_sync_completed', {
-              detail: { ok: true, ts: Date.now(), source: 'parent_realtime_snapshot' }
+              detail: { ok: true, ts: Date.now(), source: 'parent_pulse_delta' }
             }));
           }
-
-          isInitialChunkSnapshot = false;
         },
         (err) => {
           stopParentScopedRealtimeListeners();
@@ -528,7 +780,10 @@ function startParentScopedRealtimeListeners(): void {
         }
       );
       parentScopedUnsubscribes.push(unsub);
-    });
+      return;
+    }
+
+    attachParentScopedChunkListeners();
   } catch {
     stopParentScopedRealtimeListeners();
   }
@@ -676,39 +931,209 @@ function setKeySyncMeta(key: string, updatedAt: number, pendingSync: boolean) {
   emitOfflineSyncStatus();
 }
 
+const ALL_DELETED_CATEGORIES: DeletedEntityCategory[] = [
+  'classes',
+  'teachers',
+  'parents',
+  'students',
+  'grades',
+  'gradeReports'
+];
+
+function createEmptyDeletedRecordsMap(): DeletedRecordsMap {
+  return { classes: {}, teachers: {}, parents: {}, students: {}, grades: {}, gradeReports: {} };
+}
+
+function normalizeDeletedRecordsMap(raw: any): DeletedRecordsMap {
+  const out = createEmptyDeletedRecordsMap();
+  if (!raw || typeof raw !== 'object') return out;
+  const now = Date.now();
+  const maxAge = 30 * 24 * 60 * 60 * 1000;
+  ALL_DELETED_CATEGORIES.forEach((cat) => {
+    const bucket = raw[cat];
+    if (bucket && typeof bucket === 'object' && !Array.isArray(bucket)) {
+      const entries = Object.entries(bucket)
+        .map(([k, v]) => [String(k || '').trim(), Number(v) || 0] as const)
+        .filter(([id, ts]) => Boolean(id) && ts > 0 && now - ts <= maxAge);
+      const maxEntries = cat === 'grades' ? 800 : 1200;
+      const sliced = entries.length > maxEntries
+        ? entries.sort((a, b) => b[1] - a[1]).slice(0, maxEntries)
+        : entries;
+      for (const [id, ts] of sliced) {
+        out[cat][id] = ts;
+      }
+    }
+  });
+  return out;
+}
+
+export function getDeletedRecordsMap(): DeletedRecordsMap {
+  let base = createEmptyDeletedRecordsMap();
+  try {
+    const raw = safeGetLocalItem(DELETED_RECORDS_KEY);
+    if (raw) {
+      base = normalizeDeletedRecordsMap(JSON.parse(raw));
+    }
+  } catch {}
+  try {
+    const rawLegacyStudents = safeGetLocalItem(DELETED_STUDENTS_KEY);
+    if (rawLegacyStudents) {
+      const legacyMap = JSON.parse(rawLegacyStudents);
+      if (legacyMap && typeof legacyMap === 'object') {
+        for (const [k, v] of Object.entries(legacyMap)) {
+          const id = String(k || '').trim();
+          const ts = Number(v) || 0;
+          if (id && ts > 0) {
+            base.students[id] = Math.max(base.students[id] || 0, ts);
+          }
+        }
+      }
+    }
+  } catch {}
+  return base;
+}
+
+function mergeDeletedRecordsMaps(remoteRaw: any, localRaw: any): DeletedRecordsMap {
+  const r = normalizeDeletedRecordsMap(remoteRaw);
+  const l = normalizeDeletedRecordsMap(localRaw);
+  const out = createEmptyDeletedRecordsMap();
+  ALL_DELETED_CATEGORIES.forEach((cat) => {
+    out[cat] = { ...r[cat] };
+    for (const [id, ts] of Object.entries(l[cat])) {
+      out[cat][id] = Math.max(out[cat][id] || 0, ts);
+    }
+  });
+  return out;
+}
+
+export function getDeletedEntityIdsSet(category: DeletedEntityCategory): Set<string> {
+  const map = getDeletedRecordsMap();
+  return new Set(Object.keys(map[category] || {}));
+}
+
+export function filterOutDeletedEntities<T extends { id?: any }>(category: DeletedEntityCategory, list: T[], deletedMap?: DeletedRecordsMap): T[] {
+  if (!Array.isArray(list)) return [];
+  const bucket = (deletedMap || getDeletedRecordsMap())[category];
+  if (!bucket || Object.keys(bucket).length === 0) return list;
+  return list.filter((item) => {
+    if (!item) return false;
+    const id = item.id !== undefined && item.id !== null ? String(item.id).trim() : '';
+    return !id || !bucket[id];
+  });
+}
+
+function pruneLocalCoreCollectionsByTombstones(deletedMap: DeletedRecordsMap): void {
+  const pairs: Array<[string, DeletedEntityCategory]> = [
+    ['school_classes', 'classes'],
+    ['school_teachers', 'teachers'],
+    ['school_parents', 'parents'],
+    ['school_students', 'students'],
+    ['school_grades', 'grades'],
+    ['school_sent_grade_sheets', 'gradeReports']
+  ];
+  for (const [storageKey, cat] of pairs) {
+    const bucket = deletedMap[cat];
+    if (!bucket || Object.keys(bucket).length === 0) continue;
+    try {
+      const raw = safeGetLocalItem(storageKey);
+      if (!raw) continue;
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) continue;
+      const filtered = parsed.filter((item: any) => {
+        const id = item?.id !== undefined && item?.id !== null ? String(item.id).trim() : '';
+        if (!id || !bucket[id]) return true;
+        if (cat === 'grades') {
+          const itemTs = getGradeTimestampMs(item);
+          return itemTs > bucket[id];
+        }
+        if (cat === 'gradeReports') {
+          const itemTs = Number(item?.updatedAt) || (item?.dateSent ? new Date(item.dateSent).getTime() || 0 : 0);
+          return itemTs > bucket[id];
+        }
+        return false;
+      });
+      if (filtered.length !== parsed.length) {
+        const serialized = JSON.stringify(filtered);
+        saveSyncedLocalOnly(storageKey, serialized);
+        safeDispatchStorageUpdate(storageKey, serialized);
+        broadcastLocalUpdate(storageKey, serialized);
+      }
+    } catch {}
+  }
+}
+
+/**
+ * Records intentionally deleted entity IDs locally and syncs tombstones to Firestore
+ * so other browsers / APKs never resurrect deleted classes, teachers, parents, or students.
+ */
+export function recordDeletedEntityIds(
+  category: DeletedEntityCategory,
+  ids: string[],
+  options?: { syncToCloud?: boolean }
+): Promise<boolean> {
+  if (!Array.isArray(ids) || ids.length === 0) return Promise.resolve(true);
+  try {
+    const now = Date.now();
+    const map = getDeletedRecordsMap();
+    for (const rawId of ids) {
+      const id = String(rawId || '').trim();
+      if (id) map[category][id] = now;
+    }
+    const serialized = JSON.stringify(map);
+    saveSyncedLocalOnly(DELETED_RECORDS_KEY, serialized);
+    safeDispatchStorageUpdate(DELETED_RECORDS_KEY, serialized);
+
+    if (category === 'students') {
+      const legacyStudents = JSON.stringify(map.students);
+      safeSetLocalItem(DELETED_STUDENTS_KEY, legacyStudents);
+      saveToOfflineVault(DELETED_STUDENTS_KEY, legacyStudents, now, false).catch(() => {});
+    }
+
+    if (options?.syncToCloud !== false && !isStudentOrParentPortal()) {
+      return persistDirectToFirestore(DELETED_RECORDS_KEY, map, { timeoutMs: 3500 }).catch(() => false);
+    }
+  } catch {}
+  return Promise.resolve(false);
+}
+
+/**
+ * Removes specific IDs from the deleted tombstones map when explicitly restored via backup.
+ */
+export function unmarkDeletedEntityIds(
+  category: DeletedEntityCategory,
+  ids: string[],
+  options?: { syncToCloud?: boolean }
+): void {
+  if (!Array.isArray(ids) || ids.length === 0) return;
+  try {
+    const map = getDeletedRecordsMap();
+    let changed = false;
+    for (const rawId of ids) {
+      const id = String(rawId || '').trim();
+      if (id && map[category][id]) {
+        delete map[category][id];
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    const serialized = JSON.stringify(map);
+    saveSyncedLocalOnly(DELETED_RECORDS_KEY, serialized);
+    safeDispatchStorageUpdate(DELETED_RECORDS_KEY, serialized);
+    if (options?.syncToCloud !== false && !isStudentOrParentPortal()) {
+      persistDirectToFirestore(DELETED_RECORDS_KEY, map, { timeoutMs: 3500 }).catch(() => {});
+    }
+  } catch {}
+}
+
 /**
  * Records intentionally deleted student IDs so sync merge safeguards never resurrect them.
  */
 export function recordDeletedStudentIds(ids: string[]) {
-  if (!Array.isArray(ids) || ids.length === 0) return;
-  try {
-    const now = Date.now();
-    const raw = safeGetLocalItem(DELETED_STUDENTS_KEY);
-    const map: Record<string, number> = raw ? JSON.parse(raw) : {};
-    // Prune entries older than 30 days
-    for (const [k, ts] of Object.entries(map)) {
-      if (now - Number(ts) > 30 * 24 * 60 * 60 * 1000) {
-        delete map[k];
-      }
-    }
-    for (const id of ids) {
-      if (id) map[String(id)] = now;
-    }
-    const serialized = JSON.stringify(map);
-    safeSetLocalItem(DELETED_STUDENTS_KEY, serialized);
-    saveToOfflineVault(DELETED_STUDENTS_KEY, serialized, now, false).catch(() => {});
-  } catch {}
+  void recordDeletedEntityIds('students', ids);
 }
 
 export function getRecentlyDeletedStudentIds(): Set<string> {
-  try {
-    const raw = localStorage.getItem(DELETED_STUDENTS_KEY);
-    if (!raw) return new Set();
-    const map: Record<string, number> = JSON.parse(raw);
-    return new Set(Object.keys(map));
-  } catch {
-    return new Set();
-  }
+  return getDeletedEntityIdsSet('students');
 }
 
 /**
@@ -845,7 +1270,12 @@ function prepareFirestorePayload(key: string, data: any): any {
  * Merges incoming remote payload with local data for collaborative collection/map keys
  * when local edits are pending, preventing either device's records from overwriting the other.
  */
-function mergePendingLocalWithRemote(key: string, remotePayload: any, localParsed: any): any {
+function mergePendingLocalWithRemote(
+  key: string,
+  remotePayload: any,
+  localParsed: any,
+  preferLocal: boolean = true
+): any {
   if (!localParsed) return remotePayload;
 
   if (key === 'school_messages' && Array.isArray(remotePayload) && Array.isArray(localParsed)) {
@@ -870,27 +1300,47 @@ function mergePendingLocalWithRemote(key: string, remotePayload: any, localParse
 
   if (key === 'school_sent_grade_sheets' && Array.isArray(remotePayload) && Array.isArray(localParsed)) {
     const deletedMonthsMap = getDeletedEvaluationMonthsMap();
+    const combined = preferLocal
+      ? [...remotePayload, ...localParsed]
+      : [...localParsed, ...remotePayload];
     return filterOutDeletedMonthsFromSheets(
-      deduplicateGradeSheetsPreservingTeachers([...remotePayload, ...localParsed]),
+      deduplicateGradeSheetsPreservingTeachers(combined),
       deletedMonthsMap
     );
   }
 
   if (key === 'school_grades' && Array.isArray(remotePayload) && Array.isArray(localParsed)) {
     const deletedMonthsMap = getDeletedEvaluationMonthsMap();
+    const deletedGradeMap = getDeletedRecordsMap().grades;
     const map = new Map<string, any>();
     const gradeKey = (g: any) =>
       `${String(g?.studentId || '').trim()}__${String(g?.subject || '').trim()}__${String(g?.examName || '').trim()}`;
     const isDeleted = (g: any) => {
-      const ts = g?.date ? new Date(g.date).getTime() || 0 : 0;
+      const ts = getGradeTimestampMs(g);
+      const gid = g?.id ? String(g.id).trim() : '';
+      if (gid && deletedGradeMap[gid] && deletedGradeMap[gid] >= ts) {
+        return true;
+      }
       return isItemDeletedByEvaluationMonth(g?.examName, ts, deletedMonthsMap);
     };
-    remotePayload.forEach((g: any) => {
-      if (g && g.studentId && g.subject && !isDeleted(g)) map.set(gradeKey(g), g);
-    });
-    localParsed.forEach((g: any) => {
-      if (g && g.studentId && g.subject && !isDeleted(g)) map.set(gradeKey(g), g);
-    });
+    const upsertGrade = (g: any, isLocalSource: boolean) => {
+      if (!g || !g.studentId || !g.subject || isDeleted(g)) return;
+      const k = gradeKey(g);
+      const existing = map.get(k);
+      if (!existing) {
+        map.set(k, g);
+        return;
+      }
+      const existingTs = getGradeTimestampMs(existing);
+      const candidateTs = getGradeTimestampMs(g);
+      if (candidateTs > existingTs) {
+        map.set(k, g);
+      } else if (candidateTs === existingTs && ((isLocalSource && preferLocal) || (!isLocalSource && !preferLocal))) {
+        map.set(k, g);
+      }
+    };
+    remotePayload.forEach((g: any) => upsertGrade(g, false));
+    localParsed.forEach((g: any) => upsertGrade(g, true));
     return Array.from(map.values());
   }
 
@@ -898,7 +1348,10 @@ function mergePendingLocalWithRemote(key: string, remotePayload: any, localParse
     const deletedMonthsMap = getDeletedEvaluationMonthsMap();
     const isEvalDeleted = (evalKey: string, val: any) => {
       const m = String(val?.month || '').trim() || (evalKey.includes('_') ? evalKey.slice(evalKey.indexOf('_') + 1).trim() : '');
-      return Boolean(m && deletedMonthsMap[m]);
+      const delTs = m ? Number(deletedMonthsMap[m]) || 0 : 0;
+      if (!delTs) return false;
+      const evalTs = Number(val?.updatedAt) || 0;
+      return evalTs <= 0 || delTs >= evalTs;
     };
     const merged: Record<string, any> = {};
     for (const [k, remVal] of Object.entries(remotePayload || {})) {
@@ -908,17 +1361,48 @@ function mergePendingLocalWithRemote(key: string, remotePayload: any, localParse
       if (isEvalDeleted(k, localVal)) continue;
       const remVal = merged[k];
       if (remVal && typeof remVal === 'object' && typeof localVal === 'object' && localVal !== null) {
+        const remTs = Number((remVal as any).updatedAt) || 0;
+        const locTs = Number((localVal as any).updatedAt) || 0;
+        const useLocalFirst = locTs > remTs || (locTs === remTs && preferLocal);
+        const primary = useLocalFirst ? (localVal as any) : (remVal as any);
+        const secondary = useLocalFirst ? (remVal as any) : (localVal as any);
         merged[k] = {
-          ...remVal,
-          ...localVal,
-          teacherText: (localVal as any).teacherText ?? (remVal as any).teacherText,
-          directorText: (localVal as any).directorText ?? (remVal as any).directorText
+          ...secondary,
+          ...primary,
+          teacherText: primary.teacherText ?? secondary.teacherText,
+          directorText: primary.directorText ?? secondary.directorText
         };
       } else {
         merged[k] = localVal;
       }
     }
     return merged;
+  }
+
+  if (key === 'school_deleted_records' && typeof remotePayload === 'object' && typeof localParsed === 'object') {
+    return mergeDeletedRecordsMaps(remotePayload, localParsed);
+  }
+
+  if (
+    (key === 'school_classes' || key === 'school_teachers' || key === 'school_parents') &&
+    Array.isArray(remotePayload) &&
+    Array.isArray(localParsed)
+  ) {
+    const cat: DeletedEntityCategory =
+      key === 'school_classes' ? 'classes' : key === 'school_teachers' ? 'teachers' : 'parents';
+    const deletedSet = getDeletedEntityIdsSet(cat);
+    const map = new Map<string, any>();
+    remotePayload.forEach((item: any) => {
+      if (item && item.id && !deletedSet.has(String(item.id).trim())) {
+        map.set(String(item.id), item);
+      }
+    });
+    localParsed.forEach((item: any) => {
+      if (item && item.id && !deletedSet.has(String(item.id).trim())) {
+        map.set(String(item.id), item);
+      }
+    });
+    return Array.from(map.values());
   }
 
   if (
@@ -941,11 +1425,13 @@ function mergePendingLocalWithRemote(key: string, remotePayload: any, localParse
 
 /**
  * Merges remote students with any newly added local students that haven't synced or arrived yet,
- * while respecting intentional deletions.
+ * while strictly respecting intentional deletions.
  */
 function mergeLocalAndRemoteStudents(remoteList: any[], localList: any[], remoteUpdatedAt: number, localMeta: LocalKeySyncMeta): { merged: any[]; didRecoverLocal: boolean } {
-  const deletedIds = getRecentlyDeletedStudentIds();
-  const cleanRemote = sanitizeAndDeduplicateStudents(Array.isArray(remoteList) ? remoteList : []);
+  const deletedIds = getDeletedEntityIdsSet('students');
+  const cleanRemote = sanitizeAndDeduplicateStudents(
+    (Array.isArray(remoteList) ? remoteList : []).filter((s: any) => !s?.id || !deletedIds.has(String(s.id).trim()))
+  );
   if (!Array.isArray(localList) || localList.length === 0) {
     return { merged: cleanRemote, didRecoverLocal: false };
   }
@@ -962,7 +1448,7 @@ function mergeLocalAndRemoteStudents(remoteList: any[], localList: any[], remote
 
   for (const localSt of localList) {
     if (!localSt || !localSt.id) continue;
-    const sid = String(localSt.id);
+    const sid = String(localSt.id).trim();
     if (deletedIds.has(sid)) continue;
 
     const alreadyInRemoteById = remoteIds.has(sid);
@@ -1050,9 +1536,37 @@ export async function hydrateFromOfflineVault(): Promise<boolean> {
     const items = await getAllVaultItems();
     if (!items || items.length === 0) return false;
 
+    const vaultPriority = (key: string): number => {
+      if (key === LOCAL_SYNC_META_KEY) return 0;
+      if (key === ADMIN_DELTA_SINCE_KEY || key === PARENT_PULSE_KEYS_MAP_KEY) return 0;
+      if (key === DELETED_STUDENTS_KEY) return 1;
+      if (key === DELETED_RECORDS_KEY) return 2;
+      if (key === 'school_deleted_evaluation_months') return 3;
+      return 10;
+    };
+    const sortedItems = [...items].sort((a, b) => vaultPriority(a?.key || '') - vaultPriority(b?.key || ''));
+
     let restoredAny = false;
-    for (const item of items) {
+    for (const item of sortedItems) {
       if (!item || !item.key || typeof item.value !== 'string') continue;
+
+      if (item.key === ADMIN_DELTA_SINCE_KEY) {
+        const vaultTs = Number(item.value) || 0;
+        if (vaultTs > getAdminDeltaSince()) {
+          safeSetLocalItem(ADMIN_DELTA_SINCE_KEY, String(vaultTs));
+        }
+        continue;
+      }
+
+      if (item.key === PARENT_PULSE_KEYS_MAP_KEY) {
+        try {
+          const parsedPulse = JSON.parse(item.value);
+          if (parsedPulse && typeof parsedPulse === 'object' && !Array.isArray(parsedPulse)) {
+            updateParentPulseKeysMap(parsedPulse as Record<string, number>);
+          }
+        } catch {}
+        continue;
+      }
 
       if (item.key === LOCAL_SYNC_META_KEY) {
         try {
@@ -1090,21 +1604,34 @@ export async function hydrateFromOfflineVault(): Promise<boolean> {
       const localMeta = getKeySyncMeta(item.key);
       const localVal = safeGetLocalItem(item.key);
       const isVaultNewer = item.updatedAt > localMeta.updatedAt;
-      const isLocalMissingOrEmpty = localVal === null || localVal === '[]' || localVal === '{}';
+      // Intentional empty arrays/objects ('[]', '{}') with a local timestamp must NEVER be treated as missing
+      const isLocalTrulyMissing = localVal === null || localVal.trim() === '';
+      const isLocalUnmarkedEmpty = (localVal === '[]' || localVal === '{}') && localMeta.updatedAt === 0 && !localMeta.pendingSync;
       const vaultHasData = item.value !== '[]' && item.value !== '{}' && item.value.trim() !== '';
 
-      if ((isVaultNewer && localVal !== item.value) || (isLocalMissingOrEmpty && vaultHasData)) {
+      let valueToRestore = item.value;
+      if (item.key === DELETED_RECORDS_KEY) {
+        try {
+          const mergedDeletes = mergeDeletedRecordsMaps(JSON.parse(item.value), getDeletedRecordsMap());
+          valueToRestore = JSON.stringify(mergedDeletes);
+        } catch {}
+      }
+
+      if ((isVaultNewer && localVal !== valueToRestore) || ((isLocalTrulyMissing || isLocalUnmarkedEmpty) && vaultHasData)) {
         isRemoteSyncing = true;
         try {
-          safeSetLocalItem(item.key, item.value);
+          safeSetLocalItem(item.key, valueToRestore);
         } finally {
           isRemoteSyncing = false;
         }
         setKeySyncMeta(item.key, item.updatedAt, item.pendingSync);
-        safeDispatchStorageUpdate(item.key, item.value);
+        safeDispatchStorageUpdate(item.key, valueToRestore);
         restoredAny = true;
       }
     }
+
+    // Ensure any deleted classes/teachers/parents/students/grades in IndexedDB vault are stripped by tombstones
+    pruneLocalCoreCollectionsByTombstones(getDeletedRecordsMap());
 
     if (restoredAny) {
       emitOfflineSyncStatus();
@@ -1155,7 +1682,7 @@ async function flushPendingNotifications(): Promise<void> {
 export async function persistDirectToFirestore(
   key: string,
   data: any,
-  options?: { timeoutMs?: number }
+  options?: { timeoutMs?: number; markClearedIfEmpty?: boolean }
 ): Promise<boolean> {
   try {
     const valueString = key === 'school_evaluation_current_month'
@@ -1166,12 +1693,14 @@ export async function persistDirectToFirestore(
     const prevMeta = getKeySyncMeta(key);
     const waitTimeoutMs = options?.timeoutMs ?? 6000;
 
+    const allowEmptyPush = initialLoadCompletedKeys.has(key) || Boolean(options?.markClearedIfEmpty);
+
     // 1. Skip redundant cloud write ONLY if identical value was genuinely confirmed on Firestore cloud
     if (!isOffline && db && !isFirestoreWriteQuotaExceeded() && !prevMeta.pendingSync && lastCloudConfirmedValues.get(key) === valueString) {
       safeSetLocalItem(key, valueString);
       safeDispatchStorageUpdate(key, valueString);
       broadcastLocalUpdate(key, valueString);
-      pushLiveRelayKey(key, valueString, now, { allowEmpty: initialLoadCompletedKeys.has(key) }).catch(() => {});
+      pushLiveRelayKey(key, valueString, now, { allowEmpty: allowEmptyPush }).catch(() => {});
       return true;
     }
 
@@ -1190,7 +1719,7 @@ export async function persistDirectToFirestore(
 
     // Always push immediately via server Live Relay so Director/Teacher/Parent browsers sync in <50ms
     const relayPromise = pushLiveRelayKey(key, valueString, now, {
-      allowEmpty: initialLoadCompletedKeys.has(key)
+      allowEmpty: allowEmptyPush
     }).catch(() => false);
 
     if (!db || isFirestoreWriteQuotaExceeded()) {
@@ -1217,12 +1746,16 @@ export async function persistDirectToFirestore(
     }
 
     const cloudPayload = prepareFirestorePayload(key, data);
+    const writeBody: Record<string, any> = { data: cloudPayload, updatedAt: now };
+    if (options?.markClearedIfEmpty && isDataEmpty(data)) {
+      writeBody.clearedAt = now;
+    }
     inFlightDirectWrites.set(key, valueString);
 
     const writePromise = writeFirestoreDocFast(
       'school_live_data',
       key,
-      { data: cloudPayload, updatedAt: now },
+      writeBody,
       { merge: true, sdkGraceMs: 1500, restTimeoutMs: 7500 }
     )
       .then(() => {
@@ -1243,6 +1776,10 @@ export async function persistDirectToFirestore(
         initialLoadCompletedKeys.add(key);
         markReadCacheFresh(`school_live_data:${key}`);
         notifyCrossDeviceKeyChanged(key);
+        if (!isStudentOrParentPortal()) {
+          advanceAdminDeltaSince(now);
+          scheduleParentPulseUpdate(key, now);
+        }
 
         if (key === 'school_students' && Array.isArray(data)) {
           syncStudentsDirectoryToFirestore(data).catch(() => {});
@@ -1423,7 +1960,7 @@ export async function flushPendingLocalSyncKeys(): Promise<boolean> {
         if (inFlightDirectWrites.get(key) === raw) {
           return;
         }
-        if (lastSyncedValues.get(key) === raw) {
+        if (lastCloudConfirmedValues.get(key) === raw) {
           const syncedAt = Math.max(Date.now(), Number(meta.updatedAt) || 0);
           setKeySyncMeta(key, syncedAt, false);
           await markVaultKeySynced(key, syncedAt);
@@ -1440,10 +1977,14 @@ export async function flushPendingLocalSyncKeys(): Promise<boolean> {
           const now = Math.max(Date.now(), targetUpdatedAt);
 
           inFlightDirectWrites.set(key, raw);
+          const pendingWriteBody: Record<string, any> = { data: cloudPayload, updatedAt: now };
+          if (isDataEmpty(cloudPayload) && initialLoadCompletedKeys.has(key)) {
+            pendingWriteBody.clearedAt = now;
+          }
           await writeFirestoreDocFast(
             'school_live_data',
             key,
-            { data: cloudPayload, updatedAt: now },
+            pendingWriteBody,
             { merge: true, sdkGraceMs: 1500, restTimeoutMs: 7500 }
           );
           if (inFlightDirectWrites.get(key) === raw) {
@@ -1459,6 +2000,10 @@ export async function flushPendingLocalSyncKeys(): Promise<boolean> {
           await markVaultKeySynced(key, now);
           trackFirestoreWrite(1, `مزامنة معلّقة (${key})`);
           notifyCrossDeviceKeyChanged(key);
+          if (!isStudentOrParentPortal()) {
+            advanceAdminDeltaSince(now);
+            scheduleParentPulseUpdate(key, now);
+          }
         } catch (err: any) {
           if (inFlightDirectWrites.get(key) === raw) {
             inFlightDirectWrites.delete(key);
@@ -1627,6 +2172,7 @@ export async function forceRefreshDataFromFirestore(options?: {
     const localMeta = getKeySyncMeta(key);
     const localVal = localStorage.getItem(key);
     const isMergeableKey =
+      key === 'school_deleted_records' ||
       key === 'school_messages' ||
       key === 'school_sent_grade_sheets' ||
       key === 'school_grades' ||
@@ -1688,15 +2234,79 @@ export async function forceRefreshDataFromFirestore(options?: {
 
     let payload = docData.data;
 
+    if (key === DELETED_RECORDS_KEY && payload && typeof payload === 'object') {
+      const mergedDeletes = mergeDeletedRecordsMaps(payload, getDeletedRecordsMap());
+      payload = mergedDeletes;
+      pruneLocalCoreCollectionsByTombstones(mergedDeletes);
+    }
+
+    const isCollaborativeGradesKey =
+      key === 'school_grades' ||
+      key === 'school_sent_grade_sheets' ||
+      key === 'school_monthly_evaluations';
+
+    let localEffectiveParsed: any = null;
+    if (localVal) {
+      try {
+        localEffectiveParsed = JSON.parse(localVal);
+      } catch {
+        localEffectiveParsed = localVal;
+      }
+    }
+    if (key === 'school_parents' && Array.isArray(localEffectiveParsed)) {
+      localEffectiveParsed = filterOutDeletedEntities('parents', localEffectiveParsed);
+    } else if (key === 'school_teachers' && Array.isArray(localEffectiveParsed)) {
+      localEffectiveParsed = filterOutDeletedEntities('teachers', localEffectiveParsed);
+    } else if (key === 'school_classes' && Array.isArray(localEffectiveParsed)) {
+      localEffectiveParsed = filterOutDeletedEntities('classes', localEffectiveParsed);
+    } else if (key === 'school_students' && Array.isArray(localEffectiveParsed)) {
+      localEffectiveParsed = filterOutDeletedEntities('students', localEffectiveParsed);
+    } else if (key === 'school_sent_grade_sheets' && Array.isArray(localEffectiveParsed)) {
+      localEffectiveParsed = filterOutDeletedMonthsFromSheets(localEffectiveParsed);
+    } else if (key === 'school_grades' && Array.isArray(localEffectiveParsed)) {
+      const deletedMonthsMap = getDeletedEvaluationMonthsMap();
+      const deletedGradeMap = getDeletedRecordsMap().grades;
+      localEffectiveParsed = localEffectiveParsed.filter((g: any) => {
+        if (!g) return false;
+        const ts = getGradeTimestampMs(g);
+        const gid = g.id ? String(g.id).trim() : '';
+        if (gid && deletedGradeMap[gid] && deletedGradeMap[gid] >= ts) return false;
+        return !isItemDeletedByEvaluationMonth(g.examName, ts, deletedMonthsMap);
+      });
+    }
+
+    let localHasRealData = false;
+    if (localEffectiveParsed !== null && localEffectiveParsed !== undefined) {
+      if (typeof localEffectiveParsed === 'string') {
+        localHasRealData = localEffectiveParsed.trim().length > 0;
+      } else {
+        localHasRealData = !isDataEmpty(localEffectiveParsed);
+      }
+    }
+
+    if (isCollaborativeGradesKey && !isDataEmpty(payload) && localHasRealData && localEffectiveParsed !== null) {
+      const preferLocal = localMeta.updatedAt > remoteUpdatedAt;
+      payload = mergePendingLocalWithRemote(key, payload, localEffectiveParsed, preferLocal);
+    }
+
     if (key === 'school_sent_grade_sheets' && Array.isArray(payload)) {
-      payload = deduplicateGradeSheetsPreservingTeachers(payload);
+      payload = filterOutDeletedMonthsFromSheets(deduplicateGradeSheetsPreservingTeachers(payload));
+    }
+
+    if (key === 'school_grades' && Array.isArray(payload)) {
+      const deletedMonthsMap = getDeletedEvaluationMonthsMap();
+      const deletedGradeMap = getDeletedRecordsMap().grades;
+      payload = payload.filter((g: any) => {
+        if (!g) return false;
+        const ts = getGradeTimestampMs(g);
+        const gid = g.id ? String(g.id).trim() : '';
+        if (gid && deletedGradeMap[gid] && deletedGradeMap[gid] >= ts) return false;
+        return !isItemDeletedByEvaluationMonth(g.examName, ts, deletedMonthsMap);
+      });
     }
 
     if (key === 'school_students' && Array.isArray(payload)) {
-      let localList: any[] = [];
-      try {
-        if (localVal) localList = JSON.parse(localVal);
-      } catch {}
+      const localList: any[] = Array.isArray(localEffectiveParsed) ? localEffectiveParsed : [];
       const { merged, didRecoverLocal } = mergeLocalAndRemoteStudents(payload, localList, remoteUpdatedAt, localMeta);
       payload = [...merged].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
       if (!isStudentOrParentPortal() && payload.length > 0) {
@@ -1715,60 +2325,48 @@ export async function forceRefreshDataFromFirestore(options?: {
       }
     }
 
+    let remoteEntitiesStrippedByTombstone = false;
     if (key === 'school_parents' && Array.isArray(payload)) {
-      try {
-        const localList = localVal ? JSON.parse(localVal) : null;
-        if (Array.isArray(localList) && localList.length > payload.length) {
-          const remoteIds = new Set(payload.map((p: any) => p.id));
-          const newLocal = localList.filter((p: any) => p.id && !remoteIds.has(p.id));
-          if (newLocal.length > 0 && !isOffline && !isFirestoreWriteQuotaExceeded()) {
-            payload = [...payload, ...newLocal];
-            await setDoc(docRef, { data: payload, updatedAt: Date.now() }, { merge: true });
-            trackFirestoreWrite(1, `تحديث أولياء الأمور (${key})`);
-          }
-        }
-      } catch {}
+      const beforeLen = payload.length;
+      payload = filterOutDeletedEntities('parents', payload);
+      remoteEntitiesStrippedByTombstone = payload.length < beforeLen;
     }
 
     if (key === 'school_teachers' && Array.isArray(payload)) {
-      try {
-        const localList = localVal ? JSON.parse(localVal) : null;
-        if (Array.isArray(localList) && localList.length > payload.length) {
-          const remoteIds = new Set(payload.map((t: any) => t.id));
-          const newLocal = localList.filter((t: any) => t.id && !remoteIds.has(t.id));
-          if (newLocal.length > 0 && !isOffline && !isFirestoreWriteQuotaExceeded()) {
-            payload = [...payload, ...newLocal];
-            await setDoc(docRef, { data: payload, updatedAt: Date.now() }, { merge: true });
-            trackFirestoreWrite(1, `تحديث المعلمين (${key})`);
-          }
-        }
-      } catch {}
-    }
-    if (key === 'school_classes' && Array.isArray(payload)) {
-      try {
-        const localList = localVal ? JSON.parse(localVal) : null;
-        if (Array.isArray(localList) && localList.length > payload.length) {
-          const remoteIds = new Set(payload.map((c: any) => c.id));
-          const newLocal = localList.filter((c: any) => c.id && !remoteIds.has(c.id));
-          if (newLocal.length > 0 && !isOffline && !isFirestoreWriteQuotaExceeded()) {
-            payload = [...payload, ...newLocal];
-            await setDoc(docRef, { data: payload, updatedAt: Date.now() }, { merge: true });
-            trackFirestoreWrite(1, `تحديث الصفوف (${key})`);
-          }
-        }
-      } catch {}
+      const beforeLen = payload.length;
+      payload = filterOutDeletedEntities('teachers', payload);
+      remoteEntitiesStrippedByTombstone = payload.length < beforeLen;
     }
 
-    let localHasRealData = false;
-    let localParsed: any = null;
-    if (localVal) {
-      try {
-        localParsed = JSON.parse(localVal);
-        if (!isDataEmpty(localParsed)) {
-          localHasRealData = true;
-        }
-      } catch {
-        if (localVal.trim().length > 0) localHasRealData = true;
+    if (key === 'school_classes' && Array.isArray(payload)) {
+      const beforeLen = payload.length;
+      payload = filterOutDeletedEntities('classes', payload);
+      remoteEntitiesStrippedByTombstone = payload.length < beforeLen;
+    }
+
+    // If Firestore/Relay still contained deleted entities that are already tombstoned in school_deleted_records,
+    // purge them from Firestore & Live Relay immediately so other devices never receive the deleted records again.
+    if (
+      remoteEntitiesStrippedByTombstone &&
+      !fromCache &&
+      !isOffline &&
+      !isFirestoreWriteQuotaExceeded() &&
+      !isStudentOrParentPortal() &&
+      !localMeta.pendingSync
+    ) {
+      const cleanStr = JSON.stringify(payload);
+      const cleanupSig = `${key}:${remoteUpdatedAt}:${cleanStr.length}`;
+      if (!cleanedRemoteTombstoneSignatures.has(cleanupSig)) {
+        cleanedRemoteTombstoneSignatures.add(cleanupSig);
+        const cleanupNow = Math.max(Date.now(), remoteUpdatedAt + 1);
+        const cleanupBody: Record<string, any> = { data: prepareFirestorePayload(key, payload), updatedAt: cleanupNow };
+        if (isDataEmpty(payload)) cleanupBody.clearedAt = cleanupNow;
+        writeFirestoreDocFast('school_live_data', key, cleanupBody, { merge: true, sdkGraceMs: 1500, restTimeoutMs: 6000 })
+          .then(() => {
+            trackFirestoreWrite(1, `تنظيف سجلات محذوفة (${key})`);
+            pushLiveRelayKey(key, cleanStr, cleanupNow, { allowEmpty: true }).catch(() => {});
+          })
+          .catch(() => {});
       }
     }
 
@@ -1778,12 +2376,27 @@ export async function forceRefreshDataFromFirestore(options?: {
         key === 'school_teachers' ||
         key === 'school_classes' ||
         key === 'school_parents' ||
-        key === 'school_grades';
-      const serverIsStrictlyNewerDelete = !fromCache && remoteUpdatedAt > 0 && remoteUpdatedAt > (localMeta.updatedAt + 1500);
-      if (!serverIsStrictlyNewerDelete && (protectedCoreKeys || fromCache || !initialLoadCompletedKeys.has(key) || remoteUpdatedAt <= localMeta.updatedAt)) {
+        key === 'school_grades' ||
+        key === 'school_sent_grade_sheets' ||
+        key === 'school_monthly_evaluations';
+      const explicitClearedAt = Number(docData.clearedAt) || 0;
+      const serverExplicitlyCleared =
+        explicitClearedAt > 0 && (localMeta.updatedAt === 0 || explicitClearedAt >= localMeta.updatedAt);
+      const serverIsIntentionalDelete =
+        !fromCache &&
+        !localMeta.pendingSync &&
+        !remoteEntitiesStrippedByTombstone &&
+        (
+          serverExplicitlyCleared ||
+          (remoteUpdatedAt > 0 && localMeta.updatedAt === 0) ||
+          (localMeta.updatedAt > 0 && remoteUpdatedAt > localMeta.updatedAt + 1500 && !isCollaborativeGradesKey)
+        );
+      if (!remoteEntitiesStrippedByTombstone && !serverIsIntentionalDelete && (protectedCoreKeys || fromCache || !initialLoadCompletedKeys.has(key) || remoteUpdatedAt <= localMeta.updatedAt)) {
         console.warn(`[Fast Sync] Protected local key ${key} from being wiped out by empty remote.`);
-        if (!isOffline && !isFirestoreWriteQuotaExceeded() && protectedCoreKeys && !localMeta.pendingSync) {
-          await setDoc(docRef, { data: prepareFirestorePayload(key, localParsed ?? localVal), updatedAt: Date.now() }, { merge: true });
+        // Only upload local data back to Firestore if this device genuinely edited it (localMeta.updatedAt > 0),
+        // NEVER upload seed/legacy cache (localMeta.updatedAt === 0) over a server document!
+        if (!isOffline && !isFirestoreWriteQuotaExceeded() && !isStudentOrParentPortal() && protectedCoreKeys && !localMeta.pendingSync && localMeta.updatedAt > 0 && !fromCache) {
+          await setDoc(docRef, { data: prepareFirestorePayload(key, localEffectiveParsed ?? localVal), updatedAt: Date.now() }, { merge: true });
           trackFirestoreWrite(1, `استعادة بيانات (${key})`);
         }
         initialLoadCompletedKeys.add(key);
@@ -1833,6 +2446,15 @@ export async function forceRefreshDataFromFirestore(options?: {
       }
     }
     initialLoadCompletedKeys.add(key);
+    if (!fromCache && remoteUpdatedAt > 0) {
+      if (isStudentOrParentPortal()) {
+        if (PARENT_REALTIME_KEYS.includes(key)) {
+          updateParentPulseKeysMap({ [key]: remoteUpdatedAt });
+        }
+      } else {
+        advanceAdminDeltaSince(remoteUpdatedAt);
+      }
+    }
   };
 
   try {
@@ -1850,14 +2472,21 @@ export async function forceRefreshDataFromFirestore(options?: {
         if (!fromCache && colSnap.size > 0) {
           trackFirestoreRead(colSnap.size, 'مزامنة سريعة عند الطلب');
         }
-        const applyTasks: Promise<void>[] = [];
+        const prioritySet = new Set(EVALUATION_CONFIG_KEYS);
+        const priorityDocs: Array<{ id: string; data: any }> = [];
+        const regularDocs: Array<{ id: string; data: any }> = [];
         colSnap.forEach((d) => {
           if (targetKeySet.has(d.id)) {
             if (!fromCache) markReadCacheFresh(`school_live_data:${d.id}`);
-            applyTasks.push(applyDocPayload(d.id, d.data(), fromCache));
+            if (prioritySet.has(d.id)) {
+              priorityDocs.push({ id: d.id, data: d.data() });
+            } else {
+              regularDocs.push({ id: d.id, data: d.data() });
+            }
           }
         });
-        await Promise.all(applyTasks);
+        await Promise.all(priorityDocs.map((d) => applyDocPayload(d.id, d.data, fromCache)));
+        await Promise.all(regularDocs.map((d) => applyDocPayload(d.id, d.data, fromCache)));
         if (!fromCache || colSnap.size > 0) {
           targetKeys.forEach((k) => {
             initialLoadCompletedKeys.add(k);
@@ -1987,6 +2616,7 @@ function processRemoteSnapshotDoc(key: string, docData: any, fromCache: boolean)
   const localMeta = getKeySyncMeta(key);
   const localVal = safeGetLocalItem(key);
   const isMergeableKey =
+    key === 'school_deleted_records' ||
     key === 'school_messages' ||
     key === 'school_sent_grade_sheets' ||
     key === 'school_grades' ||
@@ -2032,29 +2662,123 @@ function processRemoteSnapshotDoc(key: string, docData: any, fromCache: boolean)
     }
   }
 
+  const isCollaborativeGradesKey =
+    key === 'school_grades' ||
+    key === 'school_sent_grade_sheets' ||
+    key === 'school_monthly_evaluations';
+
+  let localParsedObj: any = null;
+  if (localVal) {
+    try {
+      localParsedObj = JSON.parse(localVal);
+    } catch {
+      localParsedObj = localVal;
+    }
+  }
+  if (key === 'school_parents' && Array.isArray(localParsedObj)) {
+    localParsedObj = filterOutDeletedEntities('parents', localParsedObj);
+  } else if (key === 'school_teachers' && Array.isArray(localParsedObj)) {
+    localParsedObj = filterOutDeletedEntities('teachers', localParsedObj);
+  } else if (key === 'school_classes' && Array.isArray(localParsedObj)) {
+    localParsedObj = filterOutDeletedEntities('classes', localParsedObj);
+  } else if (key === 'school_students' && Array.isArray(localParsedObj)) {
+    localParsedObj = filterOutDeletedEntities('students', localParsedObj);
+  } else if (key === 'school_sent_grade_sheets' && Array.isArray(localParsedObj)) {
+    localParsedObj = filterOutDeletedMonthsFromSheets(localParsedObj);
+  } else if (key === 'school_grades' && Array.isArray(localParsedObj)) {
+    const deletedMonthsMap = getDeletedEvaluationMonthsMap();
+    const deletedGradeMap = getDeletedRecordsMap().grades;
+    localParsedObj = localParsedObj.filter((g: any) => {
+      if (!g) return false;
+      const ts = getGradeTimestampMs(g);
+      const gid = g.id ? String(g.id).trim() : '';
+      if (gid && deletedGradeMap[gid] && deletedGradeMap[gid] >= ts) return false;
+      return !isItemDeletedByEvaluationMonth(g.examName, ts, deletedMonthsMap);
+    });
+  }
+
+  let localHasRealData = false;
+  if (localParsedObj !== null && localParsedObj !== undefined) {
+    if (typeof localParsedObj === 'string') {
+      localHasRealData = localParsedObj.trim().length > 0;
+    } else {
+      localHasRealData = !isDataEmpty(localParsedObj);
+    }
+  }
+
+  if (key === DELETED_RECORDS_KEY && payload && typeof payload === 'object') {
+    const mergedDeletes = mergeDeletedRecordsMaps(payload, getDeletedRecordsMap());
+    payload = mergedDeletes;
+    pruneLocalCoreCollectionsByTombstones(mergedDeletes);
+  }
+
+  if (!localMeta.pendingSync && isCollaborativeGradesKey && !isDataEmpty(payload) && localHasRealData && localParsedObj !== null) {
+    const preferLocal = localMeta.updatedAt > remoteUpdatedAt;
+    payload = mergePendingLocalWithRemote(key, payload, localParsedObj, preferLocal);
+  }
+
   if (key === 'school_sent_grade_sheets' && Array.isArray(payload)) {
     payload = filterOutDeletedMonthsFromSheets(deduplicateGradeSheetsPreservingTeachers(payload));
   }
 
+  if (key === 'school_grades' && Array.isArray(payload)) {
+    const deletedMonthsMap = getDeletedEvaluationMonthsMap();
+    const deletedGradeMap = getDeletedRecordsMap().grades;
+    payload = payload.filter((g: any) => {
+      if (!g) return false;
+      const ts = getGradeTimestampMs(g);
+      const gid = g.id ? String(g.id).trim() : '';
+      if (gid && deletedGradeMap[gid] && deletedGradeMap[gid] >= ts) return false;
+      return !isItemDeletedByEvaluationMonth(g.examName, ts, deletedMonthsMap);
+    });
+  }
+
   if (key === 'school_students' && Array.isArray(payload)) {
-    let localList: any[] = [];
-    try {
-      if (localVal) localList = JSON.parse(localVal);
-    } catch {}
+    const localList: any[] = Array.isArray(localParsedObj) ? localParsedObj : [];
     const { merged } = mergeLocalAndRemoteStudents(payload, localList, remoteUpdatedAt, localMeta);
     payload = [...merged].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
   }
 
-  // Anti-wipe safeguard: never overwrite real local data with empty remote snapshot
-  let localHasRealData = false;
-  if (localVal) {
-    try {
-      const localParsed = JSON.parse(localVal);
-      if (!isDataEmpty(localParsed)) {
-        localHasRealData = true;
-      }
-    } catch {
-      if (localVal.trim().length > 0) localHasRealData = true;
+  let remoteEntitiesStrippedByTombstone = false;
+  if (key === 'school_parents' && Array.isArray(payload)) {
+    const beforeLen = payload.length;
+    payload = filterOutDeletedEntities('parents', payload);
+    remoteEntitiesStrippedByTombstone = payload.length < beforeLen;
+  }
+  if (key === 'school_teachers' && Array.isArray(payload)) {
+    const beforeLen = payload.length;
+    payload = filterOutDeletedEntities('teachers', payload);
+    remoteEntitiesStrippedByTombstone = payload.length < beforeLen;
+  }
+  if (key === 'school_classes' && Array.isArray(payload)) {
+    const beforeLen = payload.length;
+    payload = filterOutDeletedEntities('classes', payload);
+    remoteEntitiesStrippedByTombstone = payload.length < beforeLen;
+  }
+
+  if (
+    remoteEntitiesStrippedByTombstone &&
+    !fromCache &&
+    db &&
+    typeof navigator !== 'undefined' &&
+    navigator.onLine !== false &&
+    !isFirestoreWriteQuotaExceeded() &&
+    !isStudentOrParentPortal() &&
+    !localMeta.pendingSync
+  ) {
+    const cleanStr = JSON.stringify(payload);
+    const cleanupSig = `${key}:${remoteUpdatedAt}:${cleanStr.length}`;
+    if (!cleanedRemoteTombstoneSignatures.has(cleanupSig)) {
+      cleanedRemoteTombstoneSignatures.add(cleanupSig);
+      const cleanupNow = Math.max(Date.now(), remoteUpdatedAt + 1);
+      const cleanupBody: Record<string, any> = { data: prepareFirestorePayload(key, payload), updatedAt: cleanupNow };
+      if (isDataEmpty(payload)) cleanupBody.clearedAt = cleanupNow;
+      writeFirestoreDocFast('school_live_data', key, cleanupBody, { merge: true, sdkGraceMs: 1500, restTimeoutMs: 6000 })
+        .then(() => {
+          trackFirestoreWrite(1, `تنظيف سجلات محذوفة (${key})`);
+          pushLiveRelayKey(key, cleanStr, cleanupNow, { allowEmpty: true }).catch(() => {});
+        })
+        .catch(() => {});
     }
   }
 
@@ -2063,9 +2787,23 @@ function processRemoteSnapshotDoc(key: string, docData: any, fromCache: boolean)
       key === 'school_students' ||
       key === 'school_teachers' ||
       key === 'school_classes' ||
-      key === 'school_parents';
-    const serverIsStrictlyNewerDelete = !fromCache && remoteUpdatedAt > 0 && remoteUpdatedAt > (localMeta.updatedAt + 1500);
-    if (!serverIsStrictlyNewerDelete && (protectedCoreKeys || fromCache || !initialLoadCompletedKeys.has(key) || remoteUpdatedAt <= localMeta.updatedAt)) {
+      key === 'school_parents' ||
+      key === 'school_grades' ||
+      key === 'school_sent_grade_sheets' ||
+      key === 'school_monthly_evaluations';
+    const explicitClearedAt = Number(docData.clearedAt) || 0;
+    const serverExplicitlyCleared =
+      explicitClearedAt > 0 && (localMeta.updatedAt === 0 || explicitClearedAt >= localMeta.updatedAt);
+    const serverIsIntentionalDelete =
+      !fromCache &&
+      !localMeta.pendingSync &&
+      !remoteEntitiesStrippedByTombstone &&
+      (
+        serverExplicitlyCleared ||
+        (remoteUpdatedAt > 0 && localMeta.updatedAt === 0) ||
+        (localMeta.updatedAt > 0 && remoteUpdatedAt > localMeta.updatedAt + 1500 && !isCollaborativeGradesKey)
+      );
+    if (!remoteEntitiesStrippedByTombstone && !serverIsIntentionalDelete && (protectedCoreKeys || fromCache || !initialLoadCompletedKeys.has(key) || remoteUpdatedAt <= localMeta.updatedAt)) {
       initialLoadCompletedKeys.add(key);
       return;
     }
@@ -2362,29 +3100,31 @@ export function startDeferredFirebaseSync() {
   if (backgroundSyncStarted) return;
   backgroundSyncStarted = true;
 
-  // Request persistent storage & hydrate any offline IndexedDB records
+  // Request persistent storage & hydrate IndexedDB cache + delta watermarks BEFORE attaching Firestore delta listeners
   requestPersistentStorage().catch(() => {});
-  hydrateFromOfflineVault().then(() => {
-    if (typeof navigator !== 'undefined' && navigator.onLine !== false && !isFirestoreWriteQuotaExceeded()) {
-      flushPendingLocalSyncKeys().catch(() => {});
-    }
-  }).catch(() => {});
+  hydrateFromOfflineVault()
+    .catch(() => false)
+    .then(() => {
+      if (typeof navigator !== 'undefined' && navigator.onLine !== false && !isFirestoreWriteQuotaExceeded()) {
+        flushPendingLocalSyncKeys().catch(() => {});
+      }
 
-  // Always connect instant Live Relay SSE channel across all three portals (0 Firestore reads!)
-  startLiveRelayClient(({ key, value, updatedAt, fromLiveSse }) => {
-    applyRelayKeyUpdate(key, value, updatedAt, !!fromLiveSse);
-  });
+      // Always connect instant Live Relay SSE channel across all three portals (0 Firestore reads!)
+      startLiveRelayClient(({ key, value, updatedAt, fromLiveSse }) => {
+        applyRelayKeyUpdate(key, value, updatedAt, !!fromLiveSse);
+      });
 
-  if (isStudentOrParentPortal()) {
-    stopSchoolLiveDataCollectionListener();
-    attachRealtimeListenersForKeys(PARENT_REALTIME_KEYS);
-    startParentScopedRealtimeListeners();
-    return;
-  }
+      if (isStudentOrParentPortal()) {
+        stopSchoolLiveDataCollectionListener();
+        attachRealtimeListenersForKeys(PARENT_REALTIME_KEYS);
+        startParentScopedRealtimeListeners();
+        return;
+      }
 
-  stopParentScopedRealtimeListeners();
-  attachRealtimeListenersForKeys(SYNC_KEYS);
-  startSchoolLiveDataCollectionListener();
+      stopParentScopedRealtimeListeners();
+      attachRealtimeListenersForKeys(SYNC_KEYS);
+      startSchoolLiveDataCollectionListener();
+    });
 }
 
 export function setupFirebaseSync(options?: { deferNetwork?: boolean }) {
@@ -2403,7 +3143,7 @@ export function setupFirebaseSync(options?: { deferNetwork?: boolean }) {
       lastRestoreSyncAt = now;
 
       const hiddenDuration = lastHiddenAt > 0 ? now - lastHiddenAt : 0;
-      const shouldForceFreshSync = source === 'online' || hiddenDuration >= 15000;
+      const isLongSleepOrReconnect = source === 'online' || hiddenDuration >= 60000;
       if (source === 'resume') {
         lastHiddenAt = 0;
       }
@@ -2412,28 +3152,33 @@ export function setupFirebaseSync(options?: { deferNetwork?: boolean }) {
         wentOffline = false;
         enableNetwork(db).catch(() => {});
       }
-      // On Android WebView resume after >=10s hidden or network reconnect, recycle onSnapshot so frozen sockets reconnect immediately
-      if (source === 'online' || hiddenDuration >= 10000) {
-        stopSchoolLiveDataCollectionListener();
-        stopParentScopedRealtimeListeners();
+
+      // Only recycle onSnapshot after genuine offline reconnect or >=60s sleep; restarting onSnapshot already fetches server state
+      let recycledListeners = false;
+      if (isLongSleepOrReconnect) {
+        if (schoolLiveDataColUnsubscribe || parentScopedUnsubscribes.length > 0) {
+          stopSchoolLiveDataCollectionListener();
+          stopParentScopedRealtimeListeners();
+          recycledListeners = true;
+        }
       }
+
       emitOfflineSyncStatus();
       ensureRealtimeSyncHealthy();
       if (!isFirestoreWriteQuotaExceeded()) {
         flushPendingLocalSyncKeys().catch(() => {});
       }
+      // Live Relay SSE snapshot is served from local Node memory (0 Firestore reads)
       fetchLiveRelaySnapshot().catch(() => {});
-      // Always pull lightweight evaluation month config on resume/focus/online so PC and APK stay 100% matched
-      syncEvaluationMonthConfigFromServer({ minCooldownMs: 4000 }).catch(() => {});
 
-      if (shouldForceFreshSync) {
-        syncLivePortalDataFromServer({ bypassCache: true, forceServer: true }).catch(() => {});
-      } else {
+      const listenerIsActive = Boolean(schoolLiveDataColUnsubscribe) || parentScopedUnsubscribes.length > 0;
+      if (isLongSleepOrReconnect && !recycledListeners && !listenerIsActive) {
+        syncEvaluationMonthConfigFromServer({ minCooldownMs: 60000 }).catch(() => {});
         syncLivePortalDataFromServer({ forceServer: true }).catch(() => {});
       }
 
       window.dispatchEvent(new CustomEvent('school_app_resumed', {
-        detail: { source, forceRefresh: shouldForceFreshSync, ts: now }
+        detail: { source, forceRefresh: isLongSleepOrReconnect && !listenerIsActive, ts: now }
       }));
     };
 
@@ -2458,14 +3203,25 @@ export function setupFirebaseSync(options?: { deferNetwork?: boolean }) {
       handleForegroundOrNetworkRestore('resume');
     });
 
-    // Keep live relay + Firestore listeners healthy while app stays open on PC or APK
+    window.addEventListener('firestore_quota_status_changed', (evt: Event) => {
+      const detail = (evt as CustomEvent<{ exceeded?: boolean }>)?.detail;
+      if (detail?.exceeded === false && navigator.onLine !== false) {
+        flushPendingLocalSyncKeys().catch(() => {});
+      }
+    });
+
+    // Keep live relay + Firestore listeners healthy while app stays open without idle polling reads
     setInterval(() => {
       if (document.visibilityState === 'visible' && navigator.onLine !== false) {
         ensureRealtimeSyncHealthy();
         fetchLiveRelaySnapshot().catch(() => {});
-        // Fallback check for silent Android WebView WebChannel stalls when no server snapshot arrived recently
-        if (Date.now() - lastRealtimeServerEventAt > 20000) {
-          syncEvaluationMonthConfigFromServer({ minCooldownMs: 20000 }).catch(() => {});
+        if (!isFirestoreWriteQuotaExceeded() && getOfflineSyncStatus().pendingCount > 0) {
+          flushPendingLocalSyncKeys().catch(() => {});
+        }
+        // Only fall back to manual config fetch if no Firestore realtime listener is attached
+        const hasActiveListener = Boolean(schoolLiveDataColUnsubscribe) || parentScopedUnsubscribes.length > 0;
+        if (!hasActiveListener && Date.now() - lastRealtimeServerEventAt > 300000) {
+          syncEvaluationMonthConfigFromServer({ minCooldownMs: 300000 }).catch(() => {});
         }
       }
     }, 30000);
@@ -2533,10 +3289,14 @@ export function setupFirebaseSync(options?: { deferNetwork?: boolean }) {
           if (db && !isFirestoreWriteQuotaExceeded()) {
             const cloudPayload = prepareFirestorePayload(key, parsedData);
             inFlightDirectWrites.set(key, targetValue);
+            const interceptorBody: Record<string, any> = { data: cloudPayload, updatedAt: ts };
+            if (isDataEmpty(cloudPayload) && initialLoadCompletedKeys.has(key)) {
+              interceptorBody.clearedAt = ts;
+            }
             const interceptorPromise = writeFirestoreDocFast(
               'school_live_data',
               key,
-              { data: cloudPayload, updatedAt: ts },
+              interceptorBody,
               { merge: true, sdkGraceMs: 1500, restTimeoutMs: 7500 }
             ).then(() => {
               if (inFlightDirectWrites.get(key) === targetValue) {
@@ -2556,6 +3316,10 @@ export function setupFirebaseSync(options?: { deferNetwork?: boolean }) {
               initialLoadCompletedKeys.add(key);
               markReadCacheFresh(`school_live_data:${key}`);
               notifyCrossDeviceKeyChanged(key);
+              if (!isStudentOrParentPortal()) {
+                advanceAdminDeltaSince(ts);
+                scheduleParentPulseUpdate(key, ts);
+              }
               if (key === 'school_students' && Array.isArray(parsedData)) {
                 syncStudentsDirectoryToFirestore(parsedData).catch(() => {});
               }
@@ -2634,6 +3398,8 @@ export async function resetAllSchoolLiveDataInCloudAndLocal(emptyDefaults: Recor
   try {
     originalRemoveItem('school_local_sync_meta');
     originalRemoveItem(DELETED_STUDENTS_KEY);
+    originalRemoveItem(ADMIN_DELTA_SINCE_KEY);
+    originalRemoveItem(PARENT_PULSE_KEYS_MAP_KEY);
     inMemorySyncMetaCache = {};
     lastCloudConfirmedValues.clear();
     keys.forEach((k) => {
@@ -2669,7 +3435,7 @@ export async function resetAllSchoolLiveDataInCloudAndLocal(emptyDefaults: Recor
     const chunk = keys.slice(i, i + 400);
     const batch = writeBatch(db);
     chunk.forEach((k) => {
-      batch.set(doc(db, 'school_live_data', k), { data: emptyDefaults[k], updatedAt: now }, { merge: true });
+      batch.set(doc(db, 'school_live_data', k), { data: emptyDefaults[k], updatedAt: now, clearedAt: now }, { merge: true });
     });
     let committed = false;
     try {
@@ -2688,7 +3454,7 @@ export async function resetAllSchoolLiveDataInCloudAndLocal(emptyDefaults: Recor
             chunk.map((k) => ({
               collectionName: 'school_live_data',
               docId: k,
-              data: { data: emptyDefaults[k], updatedAt: now },
+              data: { data: emptyDefaults[k], updatedAt: now, clearedAt: now },
               merge: true
             })),
             9000

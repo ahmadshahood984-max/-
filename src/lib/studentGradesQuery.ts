@@ -20,7 +20,7 @@ import {
   markFirestoreReadQuotaExceeded,
   isQuotaError
 } from './quotaManager';
-import { enqueuePendingGradeBatch, getPendingGradeBatches, removePendingGradeBatch, removePendingGradeBatchesForStudents, clearPendingGradeBatches, getVaultItem, setVaultItem } from './offlineVault';
+import { enqueuePendingGradeBatch, getPendingGradeBatches, removePendingGradeBatch, removePendingGradeBatchesForStudents, clearPendingGradeBatches, getVaultItem, setVaultItem, removeVaultItem } from './offlineVault';
 import { isReadCacheFresh, markReadCacheFresh, invalidateReadCache } from './readCache';
 
 /**
@@ -233,6 +233,42 @@ export async function fetchStudentGradesOnDemand(
 
 const consolidatedRecordMemoryCache = new Map<string, ConsolidatedStudentGradeRecord>();
 const serverConfirmedMissingStudentIds = new Set<string>();
+const CONSOLIDATED_VAULT_PREFIX = 'student_consolidated_cache_v1_';
+
+export async function cacheConsolidatedRecordToVault(rec: ConsolidatedStudentGradeRecord): Promise<void> {
+  const cleanId = normalizeId(rec?.studentId);
+  if (!cleanId) return;
+  consolidatedRecordMemoryCache.set(cleanId, rec);
+  serverConfirmedMissingStudentIds.delete(cleanId);
+  await setVaultItem(`${CONSOLIDATED_VAULT_PREFIX}${cleanId}`, JSON.stringify(rec)).catch(() => {});
+}
+
+export async function removeConsolidatedRecordFromVault(studentId: string): Promise<void> {
+  const cleanId = normalizeId(studentId);
+  if (!cleanId) return;
+  consolidatedRecordMemoryCache.delete(cleanId);
+  invalidateReadCache(`students_grades_record:${cleanId}`);
+  invalidateReadCache(`students_grades_on_demand:${cleanId}`);
+  await removeVaultItem(`${CONSOLIDATED_VAULT_PREFIX}${cleanId}`).catch(() => {});
+}
+
+export async function getCachedConsolidatedRecordFromVault(studentId: string): Promise<ConsolidatedStudentGradeRecord | null> {
+  const cleanId = normalizeId(studentId);
+  if (!cleanId) return null;
+  const mem = consolidatedRecordMemoryCache.get(cleanId);
+  if (mem) return mem;
+  try {
+    const raw = await getVaultItem(`${CONSOLIDATED_VAULT_PREFIX}${cleanId}`);
+    if (raw) {
+      const parsed = JSON.parse(raw) as ConsolidatedStudentGradeRecord;
+      if (parsed && parsed.studentId) {
+        consolidatedRecordMemoryCache.set(cleanId, parsed);
+        return parsed;
+      }
+    }
+  } catch {}
+  return null;
+}
 
 export function isConsolidatedRecordConfirmedMissingOnServer(studentId: string): boolean {
   const cleanId = normalizeId(studentId);
@@ -240,7 +276,7 @@ export function isConsolidatedRecordConfirmedMissingOnServer(studentId: string):
 }
 
 /**
- * Directly fetch the full consolidated record for a student (5-min TTL + cache-first by default)
+ * Directly fetch the full consolidated record for a student (IndexedDB Vault cache-first by default)
  */
 export async function fetchConsolidatedStudentRecord(
   studentId: string,
@@ -251,10 +287,12 @@ export async function fetchConsolidatedStudentRecord(
   if (!cleanId) return null;
 
   const cacheKey = `students_grades_record:${cleanId}`;
-  if (!forceServer && isReadCacheFresh(cacheKey)) {
+  if (!forceServer) {
     const mem = consolidatedRecordMemoryCache.get(cleanId);
     if (mem) return mem;
-    if (serverConfirmedMissingStudentIds.has(cleanId)) return null;
+    if (isReadCacheFresh(cacheKey) && serverConfirmedMissingStudentIds.has(cleanId)) return null;
+    const vaulted = await getCachedConsolidatedRecordFromVault(cleanId);
+    if (vaulted) return vaulted;
   }
 
   if (!db) {
@@ -276,8 +314,7 @@ export async function fetchConsolidatedStudentRecord(
     }
     if (snap && snap.exists()) {
       const rec = snap.data() as ConsolidatedStudentGradeRecord;
-      consolidatedRecordMemoryCache.set(cleanId, rec);
-      serverConfirmedMissingStudentIds.delete(cleanId);
+      void cacheConsolidatedRecordToVault({ ...rec, studentId: rec.studentId || cleanId });
       markReadCacheFresh(cacheKey);
       return rec;
     }
@@ -295,8 +332,7 @@ export async function fetchConsolidatedStudentRecord(
       }
       if (altSnap && altSnap.exists()) {
         const rec = altSnap.data() as ConsolidatedStudentGradeRecord;
-        consolidatedRecordMemoryCache.set(cleanId, rec);
-        serverConfirmedMissingStudentIds.delete(cleanId);
+        void cacheConsolidatedRecordToVault({ ...rec, studentId: rec.studentId || cleanId });
         markReadCacheFresh(cacheKey);
         return rec;
       }
@@ -372,7 +408,16 @@ export function getLocalStudentGrades(studentId: string, unifiedNo?: string): Gr
       const m = String(g.examName || '').trim();
       const delTs = m ? Number(deletedMonths[m]) || 0 : 0;
       if (delTs > 0) {
-        const gTs = g.date ? new Date(g.date).getTime() || 0 : 0;
+        let gTs = Number((g as any).updatedAt) || 0;
+        if (gTs <= 0 && g.date) {
+          const dStr = String(g.date).trim();
+          const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dStr);
+          if (dateOnlyMatch) {
+            gTs = Date.UTC(Number(dateOnlyMatch[1]), Number(dateOnlyMatch[2]) - 1, Number(dateOnlyMatch[3]), 23, 59, 59, 999);
+          } else {
+            gTs = new Date(dStr).getTime() || 0;
+          }
+        }
         if (gTs <= 0 || delTs >= gTs) return false;
       }
       return true;
@@ -1071,7 +1116,7 @@ export async function resyncAndClearDeletedSheetStudents(
   const cleanIds = Array.from(new Set((affectedStudentIds || []).map(normalizeId).filter(Boolean)));
   if (cleanIds.length === 0) return true;
 
-  // Invalidate cached sync signatures & read caches for affected students so updates/deletes are never skipped
+  // Invalidate cached sync signatures, memory & Vault caches for affected students so updates/deletes are never skipped
   cleanIds.forEach((cleanId) => {
     consolidatedRecordMemoryCache.delete(cleanId);
     invalidateReadCache(`students_grades_record:${cleanId}`);
@@ -1082,6 +1127,7 @@ export async function resyncAndClearDeletedSheetStudents(
       }
     });
   });
+  await Promise.all(cleanIds.map((cleanId) => removeConsolidatedRecordFromVault(cleanId)));
   persistConsolidatedSignaturesToStorage();
 
   const remainingApproved = (remainingSheets || []).filter(
@@ -1193,7 +1239,10 @@ export async function deleteStudentsGradesConsolidatedBulk(studentIds: string[])
     });
   });
   persistConsolidatedSignaturesToStorage();
-  await removePendingGradeBatchesForStudents(cleanIds).catch(() => {});
+  await Promise.all([
+    ...cleanIds.map((cleanId) => removeConsolidatedRecordFromVault(cleanId)),
+    removePendingGradeBatchesForStudents(cleanIds).catch(() => {})
+  ]);
 
   return await batchDeleteFirestoreDocs('students_grades', cleanIds, 'حذف درجات الطلاب المحذوفين');
 }
@@ -1240,6 +1289,7 @@ export async function clearStudentMonthlyEvaluationInConsolidated(
   const cleanId = normalizeId(studentId);
   if (!cleanId) return true;
   consolidatedRecordMemoryCache.delete(cleanId);
+  void removeConsolidatedRecordFromVault(cleanId);
   Array.from(lastSyncedConsolidatedSignatures.keys()).forEach((k) => {
     if (k === cleanId || k.startsWith(`${cleanId}_`)) {
       lastSyncedConsolidatedSignatures.delete(k);

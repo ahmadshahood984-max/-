@@ -87,7 +87,7 @@ import { db, writeFirestoreDocFast } from '../lib/firebase';
 import { collection, addDoc, setDoc, deleteDoc, doc, serverTimestamp, writeBatch, getDocs, query, where } from 'firebase/firestore';
 import { subscribeToFirestoreMetrics, FirestoreMetrics, trackFirestoreWrite, trackFirestoreRead, checkDailyRollover, fetchCentralizedConsumptionOnce, resetCentralizedFirestoreConsumption, calibrateCentralConsumptionBaseline, getTimeUntilFirebaseQuotaReset, probeFirestoreWriteAvailability, SPARK_DAILY_READ_LIMIT, SPARK_DAILY_WRITE_LIMIT, SPARK_STORAGE_LIMIT_MB, QUOTA_WARNING_RATIO, FIREBASE_PROJECT_ID, FIREBASE_DATABASE_ID } from '../lib/firestoreTracker';
 import { calculateStorageUsageReport, measureLiveCloudStorageAudit, StorageUsageReport } from '../lib/storageUsage';
-import { persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate, saveSyncedLocalOnly, recordDeletedStudentIds, queueOfflineNotification, deduplicateGradeSheetsPreservingTeachers, syncLivePortalDataFromServer, syncEvaluationMonthConfigFromServer, normalizeEvaluationMonthValue, flushPendingLocalSyncKeys, FAST_LIVE_SYNC_KEYS, SYNC_KEYS, filterOutDeletedMonthsFromSheets, getDeletedEvaluationMonthsMap, isItemDeletedByEvaluationMonth, isGradeMessageDeletedByMonth, resetAllSchoolLiveDataInCloudAndLocal } from '../lib/firebaseSync';
+import { persistDirectToFirestore, persistGradeReportBatchDirect, safeDispatchStorageUpdate, saveSyncedLocalOnly, recordDeletedStudentIds, recordDeletedEntityIds, unmarkDeletedEntityIds, filterOutDeletedEntities, getDeletedRecordsMap, queueOfflineNotification, deduplicateGradeSheetsPreservingTeachers, syncLivePortalDataFromServer, syncEvaluationMonthConfigFromServer, normalizeEvaluationMonthValue, flushPendingLocalSyncKeys, FAST_LIVE_SYNC_KEYS, SYNC_KEYS, filterOutDeletedMonthsFromSheets, getDeletedEvaluationMonthsMap, unmarkDeletedEvaluationMonth, isItemDeletedByEvaluationMonth, isGradeMessageDeletedByMonth, getGradeTimestampMs, resetAllSchoolLiveDataInCloudAndLocal, hasPortalBaselineCache } from '../lib/firebaseSync';
 import {
   submitGradeReportToFirestore,
   updateGradeReportInFirestore,
@@ -917,46 +917,48 @@ export default function DirectorPortal({
       const snapshot = JSON.parse(saved);
       if (confirm(`هل أنت متأكد من إلغاء آخر حذف واسترجاع كافة البيانات المحفوظة بتاريخ (${snapshot.dateStr || 'سابقاً'})؟`)) {
         if (snapshot.teachers) {
+          if (Array.isArray(snapshot.teachers)) unmarkDeletedEntityIds('teachers', snapshot.teachers.map((t: any) => String(t?.id || '')).filter(Boolean));
           setTeachers(snapshot.teachers);
           persistDirectToFirestore('school_teachers', snapshot.teachers);
         }
         if (snapshot.students) {
+          if (Array.isArray(snapshot.students)) unmarkDeletedEntityIds('students', snapshot.students.map((s: any) => String(s?.id || '')).filter(Boolean));
           setStudents(snapshot.students);
           persistDirectToFirestore('school_students', snapshot.students);
         }
         if (snapshot.classes) {
+          if (Array.isArray(snapshot.classes)) unmarkDeletedEntityIds('classes', snapshot.classes.map((c: any) => String(c?.id || '')).filter(Boolean));
           setClasses(snapshot.classes);
           persistDirectToFirestore('school_classes', snapshot.classes);
         }
         if (snapshot.parents) {
+          if (Array.isArray(snapshot.parents)) unmarkDeletedEntityIds('parents', snapshot.parents.map((p: any) => String(p?.id || '')).filter(Boolean));
           setParents(snapshot.parents);
-          localStorage.setItem('school_parents', JSON.stringify(snapshot.parents));
-          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_parents', value: JSON.stringify(snapshot.parents) } }));
+          persistDirectToFirestore('school_parents', snapshot.parents);
         }
         if (snapshot.grades) {
           setGrades(snapshot.grades);
-          localStorage.setItem('school_grades', JSON.stringify(snapshot.grades));
-          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_grades', value: JSON.stringify(snapshot.grades) } }));
+          if (Array.isArray(snapshot.grades)) {
+            const monthsToRestore = new Set<string>(snapshot.grades.map((g: any) => String(g?.examName || '').trim()).filter(Boolean));
+            monthsToRestore.forEach(m => unmarkDeletedEvaluationMonth(m));
+          }
+          persistDirectToFirestore('school_grades', snapshot.grades);
         }
         if (snapshot.attendance) {
           setAttendance(snapshot.attendance);
-          localStorage.setItem('school_attendance', JSON.stringify(snapshot.attendance));
-          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_attendance', value: JSON.stringify(snapshot.attendance) } }));
+          persistDirectToFirestore('school_attendance', snapshot.attendance);
         }
         if (snapshot.announcements) {
           setAnnouncements(snapshot.announcements);
-          localStorage.setItem('school_announcements', JSON.stringify(snapshot.announcements));
-          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_announcements', value: JSON.stringify(snapshot.announcements) } }));
+          persistDirectToFirestore('school_announcements', snapshot.announcements);
         }
         if (snapshot.messages) {
           setMessages(snapshot.messages);
-          localStorage.setItem('school_messages', JSON.stringify(snapshot.messages));
-          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_messages', value: JSON.stringify(snapshot.messages) } }));
+          persistDirectToFirestore('school_messages', snapshot.messages);
         }
         if (snapshot.excuses) {
           setExcuses(snapshot.excuses);
-          localStorage.setItem('school_excuses', JSON.stringify(snapshot.excuses));
-          window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_excuses', value: JSON.stringify(snapshot.excuses) } }));
+          persistDirectToFirestore('school_excuses', snapshot.excuses);
         }
 
         alert('🎉 تم بنجاح إلغاء الحذف واسترجاع كافة الأسماء والبيانات المحفوظة بنجاح!');
@@ -1133,6 +1135,13 @@ export default function DirectorPortal({
   const [newClassName, setNewClassName] = useState('');
   const [newClassRoom, setNewClassRoom] = useState('');
   const [newClassTeacherId, setNewClassTeacherId] = useState('');
+
+  // Class merge modal state (strictly isolated per morning/evening cohort)
+  const [showMergeClassesModal, setShowMergeClassesModal] = useState(false);
+  const [mergeCohortShift, setMergeCohortShift] = useState<'morning' | 'evening'>('morning');
+  const [mergeTargetClassId, setMergeTargetClassId] = useState<string>('');
+  const [mergeSourceClassIds, setMergeSourceClassIds] = useState<string[]>([]);
+  const [isMergingClasses, setIsMergingClasses] = useState(false);
 
   const markAsRead = (msgId: string) => {
     if (setMessages) {
@@ -1334,27 +1343,38 @@ export default function DirectorPortal({
       setMessages(cleanedMessages);
     }
 
+    if (sheet.month) {
+      unmarkDeletedEvaluationMonth(sheet.month);
+    }
+
     let reportResult: any = null;
     let batchSyncedOk = false;
+    let batchDirectOk = false;
     try {
       const allApprovedForConsolidated = updatedSentSheets.filter(
         s => s && (s.status === 'approved' || (!s.teacherId && s.status !== 'submitted' && s.status !== 'draft'))
       );
-      const [resReport, resConsolidated] = await Promise.all([
+      const [resReport, resConsolidated, resBatchDirect] = await Promise.all([
         updateGradeReportInFirestore(updatedSheet),
         syncSentGradeSheetsToConsolidatedCollection(allApprovedForConsolidated, {
           onlyStudentIds: updatedSummaryList.map(s => s.studentId)
-        })
+        }),
+        persistGradeReportBatchDirect({
+          grades,
+          monthlyEvaluations,
+          ...(hadAutoGradeMsgs ? { messages: cleanedMessages } : {}),
+          sentSheets: updatedSentSheets,
+          currentMonth: sheet.month || currentEvaluationMonth
+        }).catch(() => false)
       ]);
       reportResult = resReport;
       batchSyncedOk = Boolean(resConsolidated);
-      persistGradeReportBatchDirect({
-        ...(hadAutoGradeMsgs ? { messages: cleanedMessages } : {}),
-        sentSheets: updatedSentSheets
-      }).catch(() => false);
+      batchDirectOk = Boolean(resBatchDirect);
     } catch (error: any) {
       if (isFirestoreQuotaError(error) || isQuotaError(error) || isFirestoreQuotaExceeded()) {
         const syncedBatch = await persistGradeReportBatchDirect({
+          grades,
+          monthlyEvaluations,
           ...(hadAutoGradeMsgs ? { messages: cleanedMessages } : {}),
           sentSheets: updatedSentSheets,
           currentMonth: sheet.month
@@ -1371,7 +1391,7 @@ export default function DirectorPortal({
       return;
     }
 
-    if (reportResult?.__deliveredViaRelay || !batchSyncedOk || isFirestoreWriteQuotaExceeded()) {
+    if (reportResult?.__deliveredViaRelay || !batchSyncedOk || !batchDirectOk || isFirestoreWriteQuotaExceeded()) {
       alert(`⚠️ تم اعتماد كشف (${sheet.className}) وحفظه محلياً وعبر القناة الفورية، ولكن لم يكتمل الرفع السحابي إلى Firestore بسبب بلوغ الحصة اليومية للكتابة (تتجدد الحصة تلقائياً غداً).\n\nملاحظة: لن يظهر هذا التعديل في المتصفحات الخارجية حتى يتوفر رصيد كتابة في Firestore.`);
       return;
     }
@@ -2134,7 +2154,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
             const delMap = getDeletedEvaluationMonthsMap();
             setSentGradeSheets(prev => filterOutDeletedMonthsFromSheets(prev, delMap));
             setGrades(prev => prev.filter(g => {
-              const ts = g?.date ? new Date(g.date).getTime() || 0 : 0;
+              const ts = getGradeTimestampMs(g);
               return !isItemDeletedByEvaluationMonth(g?.examName, ts, delMap);
             }));
             setMonthlyEvaluations(prev => {
@@ -2142,7 +2162,8 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
               let changed = false;
               for (const k of Object.keys(next)) {
                 const m = String(next[k]?.month || '').trim() || (k.includes('_') ? k.slice(k.indexOf('_') + 1).trim() : '');
-                if (m && delMap[m]) {
+                const evalTs = Number((next[k] as any)?.updatedAt) || 0;
+                if (m && delMap[m] && (evalTs <= 0 || delMap[m] >= evalTs)) {
                   delete next[k];
                   changed = true;
                 }
@@ -2151,22 +2172,49 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
             });
             break;
           }
+          case 'school_deleted_records': {
+            const delRecords = getDeletedRecordsMap();
+            setClasses(prev => filterOutDeletedEntities('classes', prev, delRecords));
+            setTeachers(prev => filterOutDeletedEntities('teachers', prev, delRecords));
+            setParents(prev => filterOutDeletedEntities('parents', prev, delRecords));
+            setStudents(prev => filterOutDeletedEntities('students', prev, delRecords));
+            const delGrades = delRecords.grades || {};
+            if (Object.keys(delGrades).length > 0) {
+              setGrades(prev => prev.filter(g => {
+                const gid = g?.id ? String(g.id).trim() : '';
+                if (!gid || !delGrades[gid]) return true;
+                return getGradeTimestampMs(g) > delGrades[gid];
+              }));
+            }
+            const delReports = delRecords.gradeReports || {};
+            if (Object.keys(delReports).length > 0) {
+              setSentGradeSheets(prev => prev.filter(sh => {
+                const rid = sh?.id ? String(sh.id).trim() : '';
+                if (!rid || !delReports[rid]) return true;
+                const ts = Number((sh as any)?.updatedAt) || (sh?.dateSent ? new Date(sh.dateSent).getTime() || 0 : 0);
+                return ts > delReports[rid];
+              }));
+            }
+            break;
+          }
           case 'school_grades':
             setGrades(parsed);
             break;
           case 'school_students': {
-            const cleanList = sanitizeAndDeduplicateStudents(Array.isArray(parsed) ? parsed : []);
+            const cleanList = sanitizeAndDeduplicateStudents(
+              filterOutDeletedEntities('students', Array.isArray(parsed) ? parsed : [])
+            );
             setStudents(cleanList.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar')));
             break;
           }
           case 'school_teachers':
-            setTeachers(parsed);
+            setTeachers(filterOutDeletedEntities('teachers', Array.isArray(parsed) ? parsed : []));
             break;
           case 'school_classes':
-            setClasses(parsed);
+            setClasses(filterOutDeletedEntities('classes', Array.isArray(parsed) ? parsed : []));
             break;
           case 'school_parents':
-            setParents(parsed);
+            setParents(filterOutDeletedEntities('parents', Array.isArray(parsed) ? parsed : []));
             break;
           case 'school_attendance':
             setAttendance(parsed);
@@ -2322,7 +2370,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
           if (Array.isArray(parsedGrades)) {
             const delMap = getDeletedEvaluationMonthsMap();
             setGrades(parsedGrades.filter(g => {
-              const ts = g?.date ? new Date(g.date).getTime() || 0 : 0;
+              const ts = getGradeTimestampMs(g);
               return !isItemDeletedByEvaluationMonth(g?.examName, ts, delMap);
             }));
           }
@@ -2330,12 +2378,14 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       }
     };
     reloadFromLocalStorage();
-    syncEvaluationMonthConfigFromServer({ force: true })
-      .then(() => reloadFromLocalStorage())
-      .catch(() => {});
-    syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS })
-      .then(() => reloadFromLocalStorage())
-      .catch(() => {});
+    if (!hasPortalBaselineCache(false)) {
+      syncEvaluationMonthConfigFromServer({ force: true })
+        .then(() => reloadFromLocalStorage())
+        .catch(() => {});
+      syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS })
+        .then(() => reloadFromLocalStorage())
+        .catch(() => {});
+    }
 
     // Directly subscribe & fetch all grade reports (including pending 'submitted' reports) from Firestore `grade_reports`
     const applyDirectGradeReports = (directReports: SentGradeSheet[]) => {
@@ -2437,11 +2487,15 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
 
   React.useEffect(() => {
     if (selectedClassForStudentAffairs && selectedClassForStudentAffairs !== 'all') {
+      const matchedCls = classes.find(c => c.id === selectedClassForStudentAffairs);
       setNewStudent(prev => ({ ...prev, classId: selectedClassForStudentAffairs }));
+      if (matchedCls?.shift) {
+        setNewStudentShift(matchedCls.shift);
+      }
     } else {
       setNewStudent(prev => ({ ...prev, classId: '' }));
     }
-  }, [selectedClassForStudentAffairs]);
+  }, [selectedClassForStudentAffairs, classes]);
 
   // New Teacher state
   const [newTeacher, setNewTeacher] = useState({
@@ -2649,66 +2703,6 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     return null;
   };
 
-  // Ensures classes exist up to the required unified number range (e.g. up to index 7 for numbers 211-240)
-  const ensureClassesForUnifiedNumbers = (
-    allClasses: Class[],
-    targetNumbers: (number | string)[]
-  ): { updatedClasses: Class[]; didChange: boolean } => {
-    let currentList = [...allClasses];
-    let didChange = false;
-
-    const validNums = targetNumbers
-      .map(n => parseInt(String(n).replace(/\D/g, ''), 10))
-      .filter(n => !isNaN(n) && n > 0);
-
-    const maxNum = validNums.length > 0 ? Math.max(...validNums) : 0;
-    const maxIdx = maxNum > 0 ? Math.floor((maxNum - 1) / 30) : -1;
-
-    if (maxIdx >= 0) {
-      // If maxIdx >= 6, ensure morning classes 0..5 exist first
-      if (maxIdx >= 6) {
-        const morningGrades = ['الأول', 'الثاني', 'الثالث', 'الرابع', 'الخامس', 'السادس'];
-        for (let i = 0; i < 6; i++) {
-          const s = getSortedClassesForUnifiedNumbers(currentList);
-          const morningCount = s.filter(c => c.shift !== 'evening').length;
-          if (morningCount <= i) {
-            const g = morningGrades[i] || `الصف ${i + 1}`;
-            currentList.push({
-              id: `class-auto-m-${i + 1}`,
-              name: `الصف ${g}`,
-              grade: g,
-              room: `شعبة أ`,
-              teacherId: '',
-              shift: 'morning'
-            });
-            didChange = true;
-          }
-        }
-      }
-
-      // Now ensure evening classes exist up to maxIdx
-      const eveningGrades = ['الأول', 'الثاني', 'الثالث', 'الرابع', 'الخامس', 'السادس', 'السابع', 'الثامن', 'التاسع'];
-      for (let i = 6; i <= maxIdx; i++) {
-        const s = getSortedClassesForUnifiedNumbers(currentList);
-        if (s.length <= i) {
-          const gradeIdx = (i - 6) % eveningGrades.length;
-          const g = eveningGrades[gradeIdx] || `الصف ${gradeIdx + 1}`;
-          currentList.push({
-            id: `class-auto-e-${i - 5}`,
-            name: `الصف ${g} (الفوج المسائي)`,
-            grade: g,
-            room: `شعبة أ (مسائي)`,
-            teacherId: '',
-            shift: 'evening'
-          });
-          didChange = true;
-        }
-      }
-    }
-
-    return { updatedClasses: currentList, didChange };
-  };
-
   const getNextUnifiedNoForClass = (
     classIdentifier: string,
     allClasses: Class[],
@@ -2716,14 +2710,23 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
   ): { nextNo: string; isFull: boolean; countUsed: number; total: number } => {
     const range = getClassUnifiedRange(classIdentifier, allClasses);
     const usedNumbers = new Set<number>();
+    let maxGlobal = 0;
     for (const s of currentStudents) {
       if (s.id.startsWith('demo-')) continue;
       const val = s.unifiedNo || s.rollNo;
       if (val) {
         const num = parseInt(String(val).replace(/\D/g, ''), 10);
-        if (!isNaN(num) && num >= range.start && num <= range.end) {
+        if (!isNaN(num) && num > 0) {
           usedNumbers.add(num);
+          if (num > maxGlobal) maxGlobal = num;
         }
+      }
+    }
+
+    let rangeUsedCount = 0;
+    for (let n = range.start; n <= range.end; n++) {
+      if (usedNumbers.has(n)) {
+        rangeUsedCount++;
       }
     }
 
@@ -2732,16 +2735,22 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
         return {
           nextNo: String(n),
           isFull: false,
-          countUsed: usedNumbers.size,
+          countUsed: rangeUsedCount,
           total: 30
         };
       }
     }
 
+    // Fallback: pick first unused number above maxGlobal so suggestions never collide
+    let fallbackNum = Math.max(range.end + 1, maxGlobal + 1);
+    while (usedNumbers.has(fallbackNum)) {
+      fallbackNum++;
+    }
+
     return {
-      nextNo: String(range.start),
+      nextNo: String(fallbackNum),
       isFull: true,
-      countUsed: 30,
+      countUsed: rangeUsedCount,
       total: 30
     };
   };
@@ -2753,7 +2762,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     currentStudents: Student[] = [],
     excludeStudentId?: string,
     preferredShift?: 'morning' | 'evening'
-  ): { isValid: boolean; start: number; end: number; message?: string; className: string } => {
+  ): { isValid: boolean; start: number; end: number; message?: string; className: string; isOutOfSuggestedRange?: boolean } => {
     const range = getClassUnifiedRange(classIdentifier, allClasses, preferredShift);
     const className = range.classObj ? range.classObj.name : 'الصف المحدد';
 
@@ -2763,40 +2772,20 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
         start: range.start,
         end: range.end,
         className,
-        message: `الرقم الموحد مطلوب. الأرقام المخصصة لـ (${className}) هي حصراً من ${range.start} إلى ${range.end} (30 رقماً فقط).`
+        message: `الرقم الموحد مطلوب. (المقترح لـ ${className}: ${range.start} - ${range.end})`
       };
     }
 
-    const num = parseInt(String(unifiedNo).replace(/\D/g, ''), 10);
-    if (isNaN(num)) {
-      return {
-        isValid: false,
-        start: range.start,
-        end: range.end,
-        className,
-        message: `الرقم الموحد غير صحيح. يجب أن يكون رقماً بين ${range.start} و ${range.end}.`
-      };
-    }
-
-    if (num < range.start || num > range.end) {
-      // Check if this unified number belongs to another class (e.g. evening class)
-      const allocatedClass = findClassByAllocatedUnifiedNo(num, allClasses);
-      const allocatedNote = allocatedClass
-        ? ` (ملاحظة: هذا الرقم مخصص لـ "${allocatedClass.name}" [الفوج: ${allocatedClass.shift === 'evening' ? 'المسائي' : 'الصباحي'}])`
-        : '';
-      return {
-        isValid: false,
-        start: range.start,
-        end: range.end,
-        className,
-        message: `الرقم الموحد (${num}) غير مخصص لهذا الصف! الأرقام المخصصة لـ (${className}) هي من ${range.start} إلى ${range.end} فقط (30 رقماً).${allocatedNote}`
-      };
-    }
+    const cleanVal = String(unifiedNo).trim();
+    const num = parseInt(cleanVal.replace(/\D/g, ''), 10);
 
     const duplicateStudent = currentStudents.find(s => {
       if (excludeStudentId && s.id === excludeStudentId) return false;
-      const sNum = parseInt(String(s.unifiedNo || s.rollNo || '').replace(/\D/g, ''), 10);
-      return sNum === num;
+      const rawExisting = String(s.unifiedNo || s.rollNo || '').trim();
+      if (!rawExisting) return false;
+      if (rawExisting === cleanVal) return true;
+      const sNum = parseInt(rawExisting.replace(/\D/g, ''), 10);
+      return !isNaN(num) && !isNaN(sNum) && sNum === num;
     });
 
     if (duplicateStudent) {
@@ -2805,15 +2794,17 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
         start: range.start,
         end: range.end,
         className,
-        message: `الرقم الموحد (${num}) مستخدم ومسجل مسبقاً للطالب (${duplicateStudent.name}) في هذا الصف!`
+        message: `الرقم الموحد (${cleanVal}) مستخدم ومسجل مسبقاً للطالب (${duplicateStudent.name})!`
       };
     }
 
+    const isOutOfSuggestedRange = !isNaN(num) && (num < range.start || num > range.end);
     return {
       isValid: true,
       start: range.start,
       end: range.end,
-      className
+      className,
+      isOutOfSuggestedRange
     };
   };
 
@@ -3386,15 +3377,9 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       const parentPhone = getCellVal(row, ['رقم هاتف ولي الأمر (واتساب)', 'رقم هاتف ولي الأمر', 'هاتف ولي الأمر', 'جوال ولي الأمر', 'هاتف', 'جوال', 'phone', 'mobile', 'whatsapp']);
       const parentBackupPhone = getCellVal(row, ['هاتف احتياطي إضافي', 'هاتف احتياطي', 'جوال احتياطي', 'backup phone']) || '';
 
-      // 1. Check if unified number directly maps to an allocated class in the school
+      // 1. Respect explicit class name or explicit default class first; only infer by unified number if neither is specified
       let matchedClass: Class | null = null;
-      if (unifiedNo) {
-        matchedClass = findClassByAllocatedUnifiedNo(unifiedNo, classes);
-      }
-
-      // 2. Flexible Class Matching respecting shift and class name
-      if (!matchedClass && classNameRaw) {
-        // Try within the matching shift first
+      if (classNameRaw) {
         matchedClass = classes.find(c => 
           (c.shift === shift || (!c.shift && shift === 'morning')) &&
           (c.name.trim().toLowerCase() === classNameRaw.toLowerCase() ||
@@ -3404,7 +3389,6 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
            c.id === classNameRaw)
         ) || null;
 
-        // If not found in this shift and shift is evening, try any evening class with similar grade
         if (!matchedClass && shift === 'evening') {
           matchedClass = classes.find(c =>
             c.shift === 'evening' && (
@@ -3415,7 +3399,6 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
           ) || null;
         }
 
-        // Fallback: any class matching classNameRaw
         if (!matchedClass) {
           matchedClass = classes.find(c => 
             c.name.trim().toLowerCase() === classNameRaw.toLowerCase() ||
@@ -3429,6 +3412,10 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
 
       if (!matchedClass && regExcelDefaultClassId && regExcelDefaultClassId !== 'auto') {
         matchedClass = classes.find(c => c.id === regExcelDefaultClassId) || null;
+      }
+
+      if (!matchedClass && unifiedNo) {
+        matchedClass = findClassByAllocatedUnifiedNo(unifiedNo, classes);
       }
 
       if (matchedClass?.shift) {
@@ -3524,15 +3511,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       const updatedStudents = [...students];
       const updatedParents = [...parents];
 
-      let currentClassesList = [...classes];
-      const allParsedUnifiedNos = regExcelParsedRows.map(r => r.unifiedNo).filter(Boolean);
-      const classesEnsured = ensureClassesForUnifiedNumbers(currentClassesList, allParsedUnifiedNos);
-      if (classesEnsured.didChange) {
-        currentClassesList = classesEnsured.updatedClasses;
-        setClasses(currentClassesList);
-        localStorage.setItem('school_classes', JSON.stringify(currentClassesList));
-        window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_classes', value: JSON.stringify(currentClassesList) } }));
-      }
+      const currentClassesList = [...classes];
 
       regExcelParsedRows.forEach((row) => {
         const studentName = String(row.name || '').trim();
@@ -3541,36 +3520,22 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
         let finalClassId = row.matchedClassId;
         let targetUnifiedNo = row.unifiedNo ? String(row.unifiedNo).trim() : '';
 
-        // If row has unified number, match it directly to the pre-allocated class
-        if (targetUnifiedNo) {
-          const uNum = parseInt(targetUnifiedNo.replace(/\D/g, ''), 10);
-          if (!isNaN(uNum) && uNum > 0) {
-            const allocatedClass = findClassByAllocatedUnifiedNo(uNum, currentClassesList);
-            if (allocatedClass) {
-              finalClassId = allocatedClass.id;
-              row.shift = allocatedClass.shift || (uNum > 180 ? 'evening' : 'morning');
-            }
-          }
-        }
-
         if (!finalClassId || finalClassId === 'auto') {
           if (regExcelDefaultClassId && regExcelDefaultClassId !== 'auto') {
             finalClassId = regExcelDefaultClassId;
-          } else {
+          } else if (targetUnifiedNo) {
+            const uNum = parseInt(targetUnifiedNo.replace(/\D/g, ''), 10);
+            if (!isNaN(uNum) && uNum > 0) {
+              const allocatedClass = findClassByAllocatedUnifiedNo(uNum, currentClassesList);
+              if (allocatedClass) {
+                finalClassId = allocatedClass.id;
+              }
+            }
+          }
+          if (!finalClassId || finalClassId === 'auto') {
             const shiftTarget = row.shift === 'evening' ? 'evening' : 'morning';
             const clsForShift = currentClassesList.find(c => c.shift === shiftTarget);
-            finalClassId = clsForShift?.id || currentClassesList[0]?.id || 'class-default';
-          }
-        }
-
-        // Ensure evening shift students map to an evening class
-        if (row.shift === 'evening') {
-          const curr = currentClassesList.find(c => c.id === finalClassId);
-          if (curr && curr.shift !== 'evening') {
-            const eveningMatch = currentClassesList.find(c => c.shift === 'evening' && (c.grade === curr.grade || c.name.includes(curr.grade || '')));
-            if (eveningMatch) {
-              finalClassId = eveningMatch.id;
-            }
+            finalClassId = clsForShift?.id || currentClassesList[0]?.id || '';
           }
         }
 
@@ -3701,36 +3666,38 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
 
         updatedStudents.push({
           id: studentId,
-          serialNo: row.serialNo,
+          serialNo: row.serialNo || String(updatedStudents.length + 1),
           unifiedNo: targetUnifiedNo,
-          rollNo: targetUnifiedNo || row.nationalId,
-          nationalId: row.nationalId,
+          rollNo: targetUnifiedNo || row.nationalId || '',
+          nationalId: row.nationalId || '',
           name: studentName,
           classId: finalClassId,
           parentId: finalParentId,
-          gender: row.gender,
-          dob: row.dob,
-          birthPlace: row.birthPlace,
-          healthStatus: row.healthStatus,
-          bloodTypeOrHealth: row.healthStatus,
-          fatherName: row.fatherName,
-          fatherJob: row.fatherJob,
-          grandfatherName: row.grandfatherName,
-          motherName: row.motherName,
-          motherJob: row.motherJob,
-          motherMaidenName: row.motherMaidenName,
-          residencePlace: row.residencePlace,
-          address: row.address,
-          shift: row.shift || currentClass?.shift || (activeCohort === 'evening' ? 'evening' : 'morning'),
-          previousSchool: row.previousSchool,
-          transportation: row.transportation,
-          booksStatus: row.booksStatus,
-          uniformStatus: row.uniformStatus,
+          gender: row.gender || 'male',
+          dob: row.dob || '2015-01-01',
+          birthPlace: row.birthPlace || '',
+          healthStatus: row.healthStatus || 'سليم / ممتاز',
+          bloodTypeOrHealth: row.healthStatus || 'سليم / ممتاز',
+          fatherName: row.fatherName || '',
+          fatherJob: row.fatherJob || '',
+          grandfatherName: row.grandfatherName || '',
+          motherName: row.motherName || '',
+          motherJob: row.motherJob || '',
+          motherMaidenName: row.motherMaidenName || '',
+          residencePlace: row.residencePlace || '',
+          address: row.address || '',
+          shift: currentClass?.shift || row.shift || (activeCohort === 'evening' ? 'evening' : 'morning'),
+          previousSchool: row.previousSchool || '',
+          transportation: row.transportation || 'حافلة المدرسة',
+          booksStatus: row.booksStatus || 'تم التسليم',
+          uniformStatus: row.uniformStatus || 'تم التسليم',
           parentName: parentName,
-          guardianRelation: row.guardianRelation,
-          guardianNationalId: row.guardianNationalId,
+          guardianRelation: row.guardianRelation || 'أب',
+          guardianNationalId: row.guardianNationalId || '',
           parentPhone: parentPhone,
-          parentBackupPhone: row.parentBackupPhone,
+          parentBackupPhone: row.parentBackupPhone || '',
+          avatar: row.gender === 'female' ? '👧' : '👦',
+          photo: '',
           createdAt: Date.now()
         });
 
@@ -4003,7 +3970,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       return;
     }
 
-    // Determine final class ID and Class Name
+    // Determine exact selected class ID and Name without ever reassigning behind the Director's back
     let finalClassId = regStudent.classId;
     let finalClassName = '';
     const matchById = classes.find(c => c.id === finalClassId);
@@ -4022,71 +3989,30 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       finalClassId = classes[0].id;
       finalClassName = classes[0].name;
     } else {
-      finalClassId = 'class-1';
-      finalClassName = 'الصف الدراسي';
+      alert('الرجاء إنشاء واختيار الصف الدراسي أولاً قبل إضافة الطالب.');
+      return;
     }
 
-    const finalRollNo = regStudent.nationalId.trim() || regStudent.serialNo || String(Date.now()).slice(-6);
+    const selectedClassObj = classes.find(c => c.id === finalClassId);
+    const chosenShift: 'morning' | 'evening' =
+      selectedClassObj?.shift || regStudent.shift || (activeCohort === 'evening' ? 'evening' : 'morning');
+
     const finalPhone = regStudent.parentPhone.trim();
     const finalEmail = `${regStudent.parentName.trim().replace(/\s+/g, '') || 'parent'}@school.edu`;
 
-    const chosenShift = regStudent.shift || (activeCohort === 'evening' ? 'evening' : 'morning');
-
-    let currentClasses = [...classes];
-
-    // If unifiedNo is provided, check if it matches a pre-allocated class
-    if (regStudent.unifiedNo) {
-      const uNum = parseInt(regStudent.unifiedNo.replace(/\D/g, ''), 10);
-      if (!isNaN(uNum) && uNum > 0) {
-        const ensured = ensureClassesForUnifiedNumbers(currentClasses, [uNum]);
-        if (ensured.didChange) {
-          currentClasses = ensured.updatedClasses;
-          setClasses(currentClasses);
-          localStorage.setItem('school_classes', JSON.stringify(currentClasses));
-        }
-        const allocated = findClassByAllocatedUnifiedNo(uNum, currentClasses);
-        if (allocated) {
-          finalClassId = allocated.id;
-          finalClassName = allocated.name;
-        }
-      }
-    }
-
-    // If chosenShift is evening, ensure finalClassId belongs to an evening class!
-    if (chosenShift === 'evening') {
-      const curr = currentClasses.find(c => c.id === finalClassId);
-      if (curr && curr.shift !== 'evening') {
-        let eveningCls = currentClasses.find(c => c.shift === 'evening' && (c.grade === curr.grade || c.name.includes(curr.grade || '')));
-        if (!eveningCls) {
-          const ensured = ensureClassesForUnifiedNumbers(currentClasses, [181, 211, 241]);
-          if (ensured.didChange) {
-            currentClasses = ensured.updatedClasses;
-            setClasses(currentClasses);
-            localStorage.setItem('school_classes', JSON.stringify(currentClasses));
-          }
-          eveningCls = currentClasses.find(c => c.shift === 'evening' && (c.grade === curr.grade || c.name.includes(curr.grade || ''))) ||
-                       currentClasses.find(c => c.shift === 'evening');
-        }
-        if (eveningCls) {
-          finalClassId = eveningCls.id;
-          finalClassName = eveningCls.name;
-        }
-      }
-    }
-
-    // Strict validation: Unified Number must be within the 30-number range allocated for this class
+    // Validate Unified Number uniqueness (preserving exact selected classId)
     const unifiedToValidate = regStudent.unifiedNo ? regStudent.unifiedNo.trim() : getNextUnifiedNo(finalClassId, students);
     const unifiedValidation = isUnifiedNoValidForClass(
       unifiedToValidate,
       finalClassId,
-      currentClasses,
+      classes,
       students,
       undefined,
       chosenShift
     );
 
     if (!unifiedValidation.isValid) {
-      alert(`⚠️ تنبيه التحقق من الرقم الموحد:\n${unifiedValidation.message}\n\nيُشترط أن يلتزم الرقم الموحد بالنطاق المخصص للصف (30 رقماً حصراً لكل صف).`);
+      alert(`⚠️ تنبيه التحقق من الرقم الموحد:\n${unifiedValidation.message}`);
       return;
     }
 
@@ -4095,14 +4021,14 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
         name: regStudent.name.trim(),
         classId: finalClassId,
         parentId: '',
-        rollNo: finalRollNo,
+        rollNo: unifiedToValidate,
         gender: regStudent.gender,
-        dob: regStudent.dob || '2012-05-15',
+        dob: regStudent.dob || '2015-01-01',
         parentName: regStudent.parentName.trim(),
         shift: chosenShift,
-        serialNo: regStudent.serialNo,
+        serialNo: regStudent.serialNo || String(students.length + 1),
         unifiedNo: unifiedToValidate,
-        nationalId: regStudent.nationalId,
+        nationalId: regStudent.nationalId.trim(),
         fatherName: regStudent.fatherName,
         fatherJob: regStudent.fatherJob,
         motherName: regStudent.motherName,
@@ -4137,8 +4063,8 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       setRegShiftFilter('all');
     }
 
-    alert(`🎉 تم حفظ وتسجيل بيانات الطالب (${regStudent.name}) بنجاح!\n- الصف الدراسي: ${finalClassName}\n- الفوج: [${chosenShift === 'evening' ? 'الفوج المسائي 🌙' : 'الفوج الصباحي ☀️'}]\nتم إرسال وحفظ البيانات للصف والفوج المحدد وتأسيس حساب ولي الأمر وتحديث الكشوفات.`);
-    handleClearRegForm();
+    alert(`🎉 تم حفظ وتسجيل بيانات الطالب (${regStudent.name}) بنجاح في شؤون الطلاب وسجل الطلاب!\n- الصف الدراسي: ${finalClassName}\n- الفوج: [${chosenShift === 'evening' ? 'الفوج المسائي 🌙' : 'الفوج الصباحي ☀️'}]`);
+    handleClearRegForm(finalClassId);
   };
 
   // New Announcement state
@@ -4314,6 +4240,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
         });
       }
 
+      const targetClassObj = classes.find(c => c.id === finalClassId);
       updatedStudents.push({
         id: studentId,
         name: name,
@@ -4321,10 +4248,20 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
         parentId: finalParentId,
         rollNo: rollNo,
         unifiedNo: rollNo,
+        serialNo: String(updatedStudents.length + 1),
+        nationalId: '',
         gender: 'male',
-        dob: '2018-01-01',
+        dob: '2015-01-01',
+        healthStatus: 'سليم / ممتاز',
+        bloodTypeOrHealth: 'سليم / ممتاز',
+        transportation: 'حافلة المدرسة',
+        booksStatus: 'تم التسليم',
+        uniformStatus: 'تم التسليم',
+        guardianRelation: 'أب',
+        avatar: '👦',
+        photo: '',
         parentName: parentName,
-        shift: activeCohort === 'evening' ? 'evening' : 'morning',
+        shift: targetClassObj?.shift || (activeCohort === 'evening' ? 'evening' : 'morning'),
         parentPhone: parentPhone,
         createdAt: Date.now()
       });
@@ -4460,6 +4397,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
             });
           }
           
+          const targetClassObj = classes.find(c => c.id === finalClassId);
           updatedStudents.push({
             id: studentId,
             name: nameStr,
@@ -4467,10 +4405,20 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
             parentId: finalParentId,
             rollNo: rollNo,
             unifiedNo: rollNo,
+            serialNo: String(updatedStudents.length + 1),
+            nationalId: '',
             gender: gender,
-            dob: dob,
+            dob: '2015-01-01',
+            healthStatus: 'سليم / ممتاز',
+            bloodTypeOrHealth: 'سليم / ممتاز',
+            transportation: 'حافلة المدرسة',
+            booksStatus: 'تم التسليم',
+            uniformStatus: 'تم التسليم',
+            guardianRelation: 'أب',
+            avatar: '👦',
+            photo: '',
             parentName: parentName,
-            shift: activeCohort === 'evening' ? 'evening' : 'morning',
+            shift: targetClassObj?.shift || (activeCohort === 'evening' ? 'evening' : 'morning'),
             parentPhone: parentPhone,
             createdAt: Date.now()
           });
@@ -4685,8 +4633,9 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
             month: currentEvaluationMonth,
             teacherText: tText,
             directorText: dText,
-            text: tText
-          };
+            text: tText,
+            updatedAt: Date.now()
+          } as any;
           newMonthlyEvaluations[student.id] = newMonthlyEvaluations[evalKey];
           behaviorUpdatedCount++;
         }
@@ -4712,7 +4661,8 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
               newGradesList[existingIdx] = {
                 ...newGradesList[existingIdx],
                 score: score,
-                maxScore: maxScoreVal
+                maxScore: maxScoreVal,
+                updatedAt: Date.now()
               };
             } else {
               newGradesList.push({
@@ -4723,6 +4673,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
                 score: score,
                 maxScore: maxScoreVal,
                 date: new Date().toISOString().split('T')[0],
+                updatedAt: Date.now(),
                 teacherId: 'director'
               });
             }
@@ -4732,13 +4683,14 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       });
 
       if (updatedCount > 0 || behaviorUpdatedCount > 0) {
+        unmarkDeletedEvaluationMonth(currentEvaluationMonth);
         if (updatedCount > 0) {
           setGrades(newGradesList);
-          localStorage.setItem('school_grades', JSON.stringify(newGradesList));
+          persistDirectToFirestore('school_grades', newGradesList).catch(() => false);
         }
         if (behaviorUpdatedCount > 0) {
           setMonthlyEvaluations(newMonthlyEvaluations);
-          localStorage.setItem('school_monthly_evaluations', JSON.stringify(newMonthlyEvaluations));
+          persistDirectToFirestore('school_monthly_evaluations', newMonthlyEvaluations).catch(() => false);
         }
         setPastedGradeData('');
         setShowPastedGradeInput(false);
@@ -4875,8 +4827,9 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
               month: currentEvaluationMonth,
               teacherText: tText,
               directorText: dText,
-              text: tText
-            };
+              text: tText,
+              updatedAt: Date.now()
+            } as any;
             newMonthlyEvaluations[student.id] = newMonthlyEvaluations[evalKey];
             behaviorUpdatedCount++;
           }
@@ -4897,7 +4850,8 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
                 newGradesList[existingIdx] = {
                   ...newGradesList[existingIdx],
                   score: score,
-                  maxScore: maxScoreVal
+                  maxScore: maxScoreVal,
+                  updatedAt: Date.now()
                 };
               } else {
                 newGradesList.push({
@@ -4908,6 +4862,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
                   score: score,
                   maxScore: maxScoreVal,
                   date: new Date().toISOString().split('T')[0],
+                  updatedAt: Date.now(),
                   teacherId: 'director'
                 });
               }
@@ -4917,13 +4872,14 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
         });
         
         if (updatedCount > 0 || behaviorUpdatedCount > 0) {
+          unmarkDeletedEvaluationMonth(currentEvaluationMonth);
           if (updatedCount > 0) {
             setGrades(newGradesList);
-            localStorage.setItem('school_grades', JSON.stringify(newGradesList));
+            persistDirectToFirestore('school_grades', newGradesList).catch(() => false);
           }
           if (behaviorUpdatedCount > 0) {
             setMonthlyEvaluations(newMonthlyEvaluations);
-            localStorage.setItem('school_monthly_evaluations', JSON.stringify(newMonthlyEvaluations));
+            persistDirectToFirestore('school_monthly_evaluations', newMonthlyEvaluations).catch(() => false);
           }
           alert(`🎉 تم بنجاح استيراد وتوثيق رصد درجات كامل الفوج!\n\n📊 إجمالي الدرجات: ${updatedCount}\n👨‍🎓 إجمالي الطلاب المعتمدة درجاتهم: ${matchedStudentIds.size} طالب\n🏫 عدد الصفوف والشعب المحدثة: ${matchedClassIds.size} صف/شعبة\n\n✅ تم توزيع العلامات حسب الرقم الموحد والصف بدقة تامة! 🚀`);
         } else {
@@ -5168,10 +5124,14 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       saveSyncedLocalOnly('school_sent_grade_sheets', JSON.stringify(updatedSentSheets));
       safeDispatchStorageUpdate('school_sent_grade_sheets', JSON.stringify(updatedSentSheets));
 
-      // 4. Critical fast path FIRST (parent-facing students_grades + grade_reports + current month)
-      // Heavy archive keys run right after so large arrays never congest the Firestore write stream!
+      if (trimmedTargetMonth) {
+        unmarkDeletedEvaluationMonth(trimmedTargetMonth);
+      }
+
+      // 4. Critical fast path FIRST (parent-facing students_grades + grade_reports + raw grades + evaluations + current month)
       let mainReportResult: any = null;
       let batchSyncedOk = false;
+      let batchDirectOk = false;
       try {
         const newlyApprovedTeacherSheets = updatedExistingSheets.filter(
           s => s.month === currentEvaluationMonth && s.status === 'approved' && s.teacherId && (s.classId === targetClassId || s.className === scopeTitle)
@@ -5185,19 +5145,22 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
             onlyStudentIds: studentsSummary.map(s => s.studentId)
           }),
           persistDirectToFirestore('school_evaluation_current_month', currentEvaluationMonth, { timeoutMs: 4000 }),
+          persistGradeReportBatchDirect({
+            grades,
+            monthlyEvaluations,
+            ...(hadAutoGradeMsgs ? { messages: cleanedMessages } : {}),
+            sentSheets: updatedSentSheets
+          }).catch(() => false),
           ...newlyApprovedTeacherSheets.map(s => updateGradeReportInFirestore(s))
         ]);
         mainReportResult = criticalResults[0];
         batchSyncedOk = Boolean(criticalResults[1]);
-
-        // Persist updated sheet list (and cleaned messages only if auto-messages were cleaned)
-        persistGradeReportBatchDirect({
-          ...(hadAutoGradeMsgs ? { messages: cleanedMessages } : {}),
-          sentSheets: updatedSentSheets
-        }).catch(() => false);
+        batchDirectOk = Boolean(criticalResults[3]);
       } catch (error: any) {
         if (isFirestoreQuotaError(error) || isQuotaError(error) || isFirestoreQuotaExceeded()) {
           const syncedBatch = await persistGradeReportBatchDirect({
+            grades,
+            monthlyEvaluations,
             ...(hadAutoGradeMsgs ? { messages: cleanedMessages } : {}),
             sentSheets: updatedSentSheets,
             currentMonth: currentEvaluationMonth
@@ -5214,7 +5177,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
         return;
       }
 
-      if (mainReportResult?.__deliveredViaRelay || !batchSyncedOk || isFirestoreWriteQuotaExceeded()) {
+      if (mainReportResult?.__deliveredViaRelay || !batchSyncedOk || !batchDirectOk || isFirestoreWriteQuotaExceeded()) {
         alert(`⚠️ تم حفظ كشف الدرجات لشهر (${currentEvaluationMonth}) محلياً، ولكن لم يكتمل رفعه إلى سحابة Firestore بسبب اكتمال الحصة اليومية للكتابة أو انقطاع الشبكة (تتجدد الحصة غداً).`);
         return;
       }
@@ -5241,8 +5204,9 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
 
       const affectedIds = (sheet.studentsSummary || []).map(sm => sm.studentId).filter(Boolean);
       await Promise.all([
+        recordDeletedEntityIds('gradeReports', [sheet.id]),
         deleteGradeReportFromFirestore(sheet.id).catch(() => {}),
-        persistDirectToFirestore('school_sent_grade_sheets', next, { timeoutMs: 5000 }).catch(() => false),
+        persistDirectToFirestore('school_sent_grade_sheets', next, { timeoutMs: 5000, markClearedIfEmpty: true }).catch(() => false),
         resyncAndClearDeletedSheetStudents(affectedIds, next).catch(() => false)
       ]);
       setConfirmDeleteKey(null);
@@ -5376,16 +5340,17 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
 
       const affectedIds = Array.from(affectedIdsSet);
       const cloudTasks: Promise<any>[] = [
+        ...(deletedSheetIds.length > 0 ? [recordDeletedEntityIds('gradeReports', deletedSheetIds)] : []),
         deleteGradeReportsBulkFromFirestore(deletedSheetIds).catch(() => {}),
         persistDirectToFirestore('school_deleted_evaluation_months', nextDeletedMonths, { timeoutMs: 5000 }).catch(() => false),
-        persistDirectToFirestore('school_sent_grade_sheets', nextSheets, { timeoutMs: 5000 }).catch(() => false),
+        persistDirectToFirestore('school_sent_grade_sheets', nextSheets, { timeoutMs: 5000, markClearedIfEmpty: true }).catch(() => false),
         resyncAndClearDeletedSheetStudents(affectedIds, nextSheets).catch(() => false)
       ];
       if (gradesChanged) {
-        cloudTasks.push(persistDirectToFirestore('school_grades', nextGrades, { timeoutMs: 5000 }).catch(() => false));
+        cloudTasks.push(persistDirectToFirestore('school_grades', nextGrades, { timeoutMs: 5000, markClearedIfEmpty: true }).catch(() => false));
       }
       if (evalsChanged) {
-        cloudTasks.push(persistDirectToFirestore('school_monthly_evaluations', nextEvals, { timeoutMs: 5000 }).catch(() => false));
+        cloudTasks.push(persistDirectToFirestore('school_monthly_evaluations', nextEvals, { timeoutMs: 5000, markClearedIfEmpty: true }).catch(() => false));
       }
       if (monthsChanged) {
         cloudTasks.push(persistDirectToFirestore('school_saved_evaluation_months', nextSavedMonths, { timeoutMs: 5000 }).catch(() => false));
@@ -5722,50 +5687,63 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
 
     // 10. Persist changed `school_live_data` documents immediately
     const cloudTasks: Promise<any>[] = [];
-    if (studentsChanged) cloudTasks.push(persistDirectToFirestore('school_students', nextStudents, { timeoutMs: 6000 }).catch(() => false));
-    if (gradesChanged) cloudTasks.push(persistDirectToFirestore('school_grades', nextGrades, { timeoutMs: 6000 }).catch(() => false));
-    if (attChanged) cloudTasks.push(persistDirectToFirestore('school_attendance', nextAttendance, { timeoutMs: 6000 }).catch(() => false));
-    if (excChanged) cloudTasks.push(persistDirectToFirestore('school_excuses', nextExcuses, { timeoutMs: 6000 }).catch(() => false));
-    if (msgsChanged) cloudTasks.push(persistDirectToFirestore('school_messages', nextMessages, { timeoutMs: 6000 }).catch(() => false));
-    if (parentsChanged) cloudTasks.push(persistDirectToFirestore('school_parents', nextParents, { timeoutMs: 6000 }).catch(() => false));
-    if (tuitionsChanged) cloudTasks.push(persistDirectToFirestore('school_tuitions', nextTuitions, { timeoutMs: 6000 }).catch(() => false));
-    if (evalsChanged) cloudTasks.push(persistDirectToFirestore('school_monthly_evaluations', nextEvaluations, { timeoutMs: 6000 }).catch(() => false));
-    if (sheetsChanged) cloudTasks.push(persistDirectToFirestore('school_sent_grade_sheets', nextSentSheets, { timeoutMs: 6000 }).catch(() => false));
+    if (studentsChanged) cloudTasks.push(persistDirectToFirestore('school_students', nextStudents, { timeoutMs: 6000, markClearedIfEmpty: true }).catch(() => false));
+    if (gradesChanged) cloudTasks.push(persistDirectToFirestore('school_grades', nextGrades, { timeoutMs: 6000, markClearedIfEmpty: true }).catch(() => false));
+    if (attChanged) cloudTasks.push(persistDirectToFirestore('school_attendance', nextAttendance, { timeoutMs: 6000, markClearedIfEmpty: true }).catch(() => false));
+    if (excChanged) cloudTasks.push(persistDirectToFirestore('school_excuses', nextExcuses, { timeoutMs: 6000, markClearedIfEmpty: true }).catch(() => false));
+    if (msgsChanged) cloudTasks.push(persistDirectToFirestore('school_messages', nextMessages, { timeoutMs: 6000, markClearedIfEmpty: true }).catch(() => false));
+    if (parentsChanged) cloudTasks.push(persistDirectToFirestore('school_parents', nextParents, { timeoutMs: 6000, markClearedIfEmpty: true }).catch(() => false));
+    if (tuitionsChanged) cloudTasks.push(persistDirectToFirestore('school_tuitions', nextTuitions, { timeoutMs: 6000, markClearedIfEmpty: true }).catch(() => false));
+    if (evalsChanged) cloudTasks.push(persistDirectToFirestore('school_monthly_evaluations', nextEvaluations, { timeoutMs: 6000, markClearedIfEmpty: true }).catch(() => false));
+    if (sheetsChanged) cloudTasks.push(persistDirectToFirestore('school_sent_grade_sheets', nextSentSheets, { timeoutMs: 6000, markClearedIfEmpty: true }).catch(() => false));
 
     if (extra?.teachersToKeep) {
+      const keepTeacherIds = new Set(extra.teachersToKeep.map(t => String(t.id)));
+      const removedTeacherIds = teachers.filter(t => !keepTeacherIds.has(String(t.id))).map(t => String(t.id));
+      if (removedTeacherIds.length > 0) {
+        cloudTasks.push(recordDeletedEntityIds('teachers', removedTeacherIds));
+      }
       setTeachers(extra.teachersToKeep);
       const tStr = JSON.stringify(extra.teachersToKeep);
       saveSyncedLocalOnly('school_teachers', tStr);
       safeDispatchStorageUpdate('school_teachers', tStr);
-      cloudTasks.push(persistDirectToFirestore('school_teachers', extra.teachersToKeep, { timeoutMs: 6000 }).catch(() => false));
+      cloudTasks.push(persistDirectToFirestore('school_teachers', extra.teachersToKeep, { timeoutMs: 6000, markClearedIfEmpty: true }).catch(() => false));
     }
     if (extra?.classesToKeep) {
+      const keepClassIds = new Set(extra.classesToKeep.map(c => String(c.id)));
+      const removedClassIds = classes.filter(c => !keepClassIds.has(String(c.id))).map(c => String(c.id));
+      if (removedClassIds.length > 0) {
+        cloudTasks.push(recordDeletedEntityIds('classes', removedClassIds));
+      }
       setClasses(extra.classesToKeep);
       const cStr = JSON.stringify(extra.classesToKeep);
       saveSyncedLocalOnly('school_classes', cStr);
       safeDispatchStorageUpdate('school_classes', cStr);
-      cloudTasks.push(persistDirectToFirestore('school_classes', extra.classesToKeep, { timeoutMs: 6000 }).catch(() => false));
+      cloudTasks.push(persistDirectToFirestore('school_classes', extra.classesToKeep, { timeoutMs: 6000, markClearedIfEmpty: true }).catch(() => false));
     }
     if (extra?.announcementsToKeep) {
       setAnnouncements(extra.announcementsToKeep);
       const anStr = JSON.stringify(extra.announcementsToKeep);
       saveSyncedLocalOnly('school_announcements', anStr);
       safeDispatchStorageUpdate('school_announcements', anStr);
-      cloudTasks.push(persistDirectToFirestore('school_announcements', extra.announcementsToKeep, { timeoutMs: 6000 }).catch(() => false));
+      cloudTasks.push(persistDirectToFirestore('school_announcements', extra.announcementsToKeep, { timeoutMs: 6000, markClearedIfEmpty: true }).catch(() => false));
     }
 
     // 11. Delete individual documents from dedicated Firestore collections (`students`, `students_grades`, `grade_reports`, `fcm_tokens`, `notifications`)
     if (cleanIds.length > 0) {
+      cloudTasks.push(recordDeletedEntityIds('students', cleanIds));
       cloudTasks.push(deleteStudentsFromDirectoryFirestore(cleanIds).catch(() => false));
       cloudTasks.push(deleteStudentsGradesConsolidatedBulk(cleanIds).catch(() => false));
     }
     if (deletedReportIds.length > 0) {
+      cloudTasks.push(recordDeletedEntityIds('gradeReports', deletedReportIds));
       cloudTasks.push(deleteGradeReportsBulkFromFirestore(deletedReportIds).catch(() => {}));
     }
     if (modifiedReports.length > 0) {
       cloudTasks.push(Promise.allSettled(modifiedReports.map(r => updateGradeReportInFirestore(r).catch(() => {}))));
     }
     if (removedParentIds.length > 0) {
+      cloudTasks.push(recordDeletedEntityIds('parents', removedParentIds));
       cloudTasks.push(batchDeleteFirestoreDocs('fcm_tokens', removedParentIds, 'حذف رموز إشعارات أولياء أمور محذوفين').catch(() => false));
     }
     if (removedMessageIds.length > 0) {
@@ -5773,6 +5751,367 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     }
 
     await Promise.allSettled(cloudTasks);
+  };
+
+  const deleteClassesCascade = async (classIdsToDelete: string[]): Promise<boolean> => {
+    const cleanIds = Array.from(new Set((classIdsToDelete || []).map(id => String(id || '').trim()).filter(Boolean)));
+    if (cleanIds.length === 0) return true;
+    const idSet = new Set(cleanIds);
+
+    const remainingClasses = classes.filter(c => !idSet.has(String(c.id)));
+    setClasses(remainingClasses);
+    const cStr = JSON.stringify(remainingClasses);
+    saveSyncedLocalOnly('school_classes', cStr);
+    safeDispatchStorageUpdate('school_classes', cStr);
+
+    let teachersChanged = false;
+    const nextTeachers = teachers.map(t => {
+      if (!Array.isArray(t.classes) || !t.classes.some(cid => idSet.has(String(cid)))) return t;
+      teachersChanged = true;
+      return { ...t, classes: t.classes.filter(cid => !idSet.has(String(cid))) };
+    });
+    if (teachersChanged) {
+      setTeachers(nextTeachers);
+      const tStr = JSON.stringify(nextTeachers);
+      saveSyncedLocalOnly('school_teachers', tStr);
+      safeDispatchStorageUpdate('school_teachers', tStr);
+    }
+
+    let studentsChanged = false;
+    const nextStudents = students.map(s => {
+      if (!idSet.has(String(s.classId))) return s;
+      studentsChanged = true;
+      return { ...s, classId: '' };
+    });
+    if (studentsChanged) {
+      setStudents(nextStudents);
+      const sStr = JSON.stringify(nextStudents);
+      saveSyncedLocalOnly('school_students', sStr);
+      safeDispatchStorageUpdate('school_students', sStr);
+    }
+
+    if (selectedClassForStudentAffairs && idSet.has(selectedClassForStudentAffairs)) {
+      setSelectedClassForStudentAffairs('all');
+    }
+    if (selectedClassForGrades && idSet.has(selectedClassForGrades)) {
+      setSelectedClassForGrades('');
+    }
+    if (importTargetClassId && idSet.has(importTargetClassId)) {
+      setImportTargetClassId('');
+    }
+
+    const tombstonePromise = recordDeletedEntityIds('classes', cleanIds).catch(() => false);
+    const classesCloudPromise = persistDirectToFirestore('school_classes', remainingClasses, {
+      timeoutMs: 6000,
+      markClearedIfEmpty: true
+    }).catch(() => false);
+
+    const tasks: Promise<any>[] = [tombstonePromise, classesCloudPromise];
+    if (teachersChanged) {
+      tasks.push(persistDirectToFirestore('school_teachers', nextTeachers, { timeoutMs: 6000, markClearedIfEmpty: true }).catch(() => false));
+    }
+    if (studentsChanged) {
+      tasks.push(persistDirectToFirestore('school_students', nextStudents, { timeoutMs: 6000, markClearedIfEmpty: true }).catch(() => false));
+      tasks.push(syncStudentsDirectoryToFirestore(nextStudents).catch(() => {}));
+    }
+    await Promise.allSettled(tasks);
+    const [tombOk, clsOk] = await Promise.all([tombstonePromise, classesCloudPromise]);
+    return Boolean(tombOk && clsOk);
+  };
+
+  const openMergeClassesModal = () => {
+    const initialCohort: 'morning' | 'evening' = activeCohort === 'evening' ? 'evening' : 'morning';
+    const cohortClasses = classes.filter(c => (c.shift || 'morning') === initialCohort);
+    const sortedByStudents = [...cohortClasses].sort(
+      (a, b) => students.filter(s => s.classId === b.id).length - students.filter(s => s.classId === a.id).length
+    );
+    setMergeCohortShift(initialCohort);
+    setMergeTargetClassId(sortedByStudents[0]?.id || '');
+    setMergeSourceClassIds([]);
+    setShowMergeClassesModal(true);
+  };
+
+  const handleMergeCohortSwitch = (nextShift: 'morning' | 'evening') => {
+    setMergeCohortShift(nextShift);
+    const cohortClasses = classes.filter(c => (c.shift || 'morning') === nextShift);
+    const sortedByStudents = [...cohortClasses].sort(
+      (a, b) => students.filter(s => s.classId === b.id).length - students.filter(s => s.classId === a.id).length
+    );
+    setMergeTargetClassId(sortedByStudents[0]?.id || '');
+    setMergeSourceClassIds([]);
+  };
+
+  const executeMergeClasses = async (targetId: string, rawSourceIds: string[]) => {
+    const targetClass = classes.find(c => c.id === targetId);
+    if (!targetClass) {
+      alert('يرجى اختيار الصف الأساسي (الهدف) أولاً.');
+      return;
+    }
+    const targetShift: 'morning' | 'evening' = targetClass.shift === 'evening' ? 'evening' : 'morning';
+    const validSourceClasses = classes.filter(c =>
+      rawSourceIds.includes(c.id) &&
+      c.id !== targetClass.id &&
+      (c.shift || 'morning') === targetShift
+    );
+    if (validSourceClasses.length === 0) {
+      alert('يرجى تحديد صف واحد على الأقل من نفس الفوج لدمجه مع الصف الأساسي.');
+      return;
+    }
+
+    const sourceIds = validSourceClasses.map(c => c.id);
+    const sourceIdSet = new Set(sourceIds);
+
+    setIsMergingClasses(true);
+    try {
+      // 1. Move all students from source classes into targetClass (strictly keeping targetShift)
+      let movedStudentsCount = 0;
+      const movedStudentIds: string[] = [];
+      const updatedStudentsRaw = students.map(s => {
+        if (!sourceIdSet.has(String(s.classId))) return s;
+        movedStudentsCount += 1;
+        movedStudentIds.push(s.id);
+        return { ...s, classId: targetClass.id, shift: targetShift };
+      });
+      const nextStudents = sanitizeAndDeduplicateStudents(updatedStudentsRaw)
+        .sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
+      if (movedStudentsCount > 0) {
+        setStudents(nextStudents);
+        const sStr = JSON.stringify(nextStudents);
+        saveSyncedLocalOnly('school_students', sStr);
+        safeDispatchStorageUpdate('school_students', sStr);
+      }
+
+      // 2. Reassign teachers from source classes to targetClass (deduplicated)
+      let teachersChanged = false;
+      const nextTeachers = teachers.map(t => {
+        if (!Array.isArray(t.classes) || !t.classes.some(cid => sourceIdSet.has(String(cid)))) return t;
+        teachersChanged = true;
+        const remapped = t.classes.map(cid => (sourceIdSet.has(String(cid)) ? targetClass.id : cid));
+        return { ...t, classes: Array.from(new Set(remapped)) };
+      });
+      if (teachersChanged) {
+        setTeachers(nextTeachers);
+        const tStr = JSON.stringify(nextTeachers);
+        saveSyncedLocalOnly('school_teachers', tStr);
+        safeDispatchStorageUpdate('school_teachers', tStr);
+      }
+
+      // 3. Remap grades referencing source classIds
+      let gradesChanged = false;
+      const nextGrades = grades.map(g => {
+        if (!g.classId || !sourceIdSet.has(String(g.classId))) return g;
+        gradesChanged = true;
+        return { ...g, classId: targetClass.id };
+      });
+      if (gradesChanged) {
+        setGrades(nextGrades);
+        const gStr = JSON.stringify(nextGrades);
+        saveSyncedLocalOnly('school_grades', gStr);
+        safeDispatchStorageUpdate('school_grades', gStr);
+      }
+
+      // 4. Remap & merge sentGradeSheets by (month + roleTag) so no student summaries are dropped
+      let sheetsChanged = false;
+      const remappedSheets = sentGradeSheets.map(sh => {
+        if (!sh || !sourceIdSet.has(String(sh.classId))) return sh;
+        sheetsChanged = true;
+        return {
+          ...sh,
+          classId: targetClass.id,
+          className: targetClass.name,
+          cohort: targetShift
+        };
+      });
+
+      const deletedMergedReportIds: string[] = [];
+      const modifiedMergedReports: SentGradeSheet[] = [];
+      let nextSentSheets = remappedSheets;
+      if (sheetsChanged) {
+        const grouped = new Map<string, SentGradeSheet[]>();
+        const unmergedOther: SentGradeSheet[] = [];
+        for (const sh of remappedSheets) {
+          if (!sh) continue;
+          if (sh.classId !== targetClass.id) {
+            unmergedOther.push(sh);
+            continue;
+          }
+          const roleTag = sh.teacherId ? `t_${sh.teacherId}` : (sh.status === 'submitted' ? `sub_${sh.id || 't'}` : 'director');
+          const key = `${sh.classId}_${sh.month || ''}_${roleTag}`;
+          const arr = grouped.get(key) || [];
+          arr.push(sh);
+          grouped.set(key, arr);
+        }
+
+        const mergedTargetSheets: SentGradeSheet[] = [];
+        grouped.forEach((group) => {
+          if (group.length === 1) {
+            const single = group[0];
+            mergedTargetSheets.push(single);
+            modifiedMergedReports.push(single);
+            return;
+          }
+          // Prefer approved or target-original sheet as base, sorted newest first
+          const sortedGroup = [...group].sort((a, b) => {
+            const aApp = a.status === 'approved' ? 1 : 0;
+            const bApp = b.status === 'approved' ? 1 : 0;
+            if (aApp !== bApp) return bApp - aApp;
+            return (new Date(b.dateSent || 0).getTime() || 0) - (new Date(a.dateSent || 0).getTime() || 0);
+          });
+          const primary = sortedGroup[0];
+          const studentMap = new Map<string, SentGradeSheetStudentSummary>();
+          // Insert oldest first so newer student summaries override older ones
+          [...sortedGroup].reverse().forEach((sheet) => {
+            if (sheet.id && sheet.id !== primary.id) {
+              deletedMergedReportIds.push(sheet.id);
+            }
+            (sheet.studentsSummary || []).forEach((sm) => {
+              if (!sm || !sm.studentId) return;
+              const prev = studentMap.get(sm.studentId);
+              if (!prev) {
+                studentMap.set(sm.studentId, sm);
+              } else {
+                const prevHasScores = (prev.scores || []).some(sc => sc.score !== null && sc.score !== undefined);
+                const nextHasScores = (sm.scores || []).some(sc => sc.score !== null && sc.score !== undefined);
+                studentMap.set(sm.studentId, nextHasScores || !prevHasScores ? sm : prev);
+              }
+            });
+          });
+          const mergedSummary = Array.from(studentMap.values());
+          const combinedSheet: SentGradeSheet = {
+            ...primary,
+            classId: targetClass.id,
+            className: targetClass.name,
+            cohort: targetShift,
+            studentCount: mergedSummary.length,
+            studentsSummary: mergedSummary
+          };
+          mergedTargetSheets.push(combinedSheet);
+          modifiedMergedReports.push(combinedSheet);
+        });
+
+        nextSentSheets = deduplicateGradeSheets([...unmergedOther, ...mergedTargetSheets]);
+        if (deletedMergedReportIds.length > 0) {
+          recordDeletedGradeReportIdsLocally(deletedMergedReportIds);
+        }
+        setSentGradeSheets(nextSentSheets);
+        const shStr = JSON.stringify(nextSentSheets);
+        saveSyncedLocalOnly('school_sent_grade_sheets', shStr);
+        safeDispatchStorageUpdate('school_sent_grade_sheets', shStr);
+      }
+
+      // 5. Remap examQuestions referencing source classIds
+      let examChanged = false;
+      const nextExamQuestions = (examQuestions || []).map(q => {
+        if (!q || !sourceIdSet.has(String(q.classId))) return q;
+        examChanged = true;
+        return {
+          ...q,
+          classId: targetClass.id,
+          className: targetClass.name,
+          shift: targetShift
+        };
+      });
+      if (examChanged) {
+        const eqStr = JSON.stringify(nextExamQuestions);
+        saveSyncedLocalOnly('school_exam_questions', eqStr);
+        safeDispatchStorageUpdate('school_exam_questions', eqStr);
+      }
+
+      // 6. Preserve advisor teacherId if targetClass had none and a source class did
+      const inheritedTeacherId =
+        targetClass.teacherId ||
+        validSourceClasses.find(c => Boolean(c.teacherId))?.teacherId ||
+        '';
+      const remainingClasses = classes
+        .filter(c => !sourceIdSet.has(String(c.id)))
+        .map(c => (c.id === targetClass.id ? { ...c, teacherId: inheritedTeacherId, shift: targetShift } : c));
+
+      setClasses(remainingClasses);
+      const cStr = JSON.stringify(remainingClasses);
+      saveSyncedLocalOnly('school_classes', cStr);
+      safeDispatchStorageUpdate('school_classes', cStr);
+
+      // Update active UI filters if they pointed to a merged class
+      if (selectedClassForStudentAffairs && sourceIdSet.has(selectedClassForStudentAffairs)) {
+        setSelectedClassForStudentAffairs(targetClass.id);
+      }
+      if (selectedClassForGrades && sourceIdSet.has(selectedClassForGrades)) {
+        setSelectedClassForGrades(targetClass.id);
+      }
+      if (selectedClassForAttendance && sourceIdSet.has(selectedClassForAttendance)) {
+        setSelectedClassForAttendance(targetClass.id);
+      }
+      if (selectedClassForTuition && sourceIdSet.has(selectedClassForTuition)) {
+        setSelectedClassForTuition(targetClass.id);
+      }
+      if (chatSelectedClassId && sourceIdSet.has(chatSelectedClassId)) {
+        setChatSelectedClassId(targetClass.id);
+      }
+      if (regClassFilter && sourceIdSet.has(regClassFilter)) {
+        setRegClassFilter(targetClass.id);
+      }
+      if (importTargetClassId && sourceIdSet.has(importTargetClassId)) {
+        setImportTargetClassId(targetClass.id);
+      }
+      if (quickDeleteClassId && sourceIdSet.has(quickDeleteClassId)) {
+        setQuickDeleteClassId(targetClass.id);
+      }
+
+      // 7. Persist all updated collections + tombstones to Firestore & Live Relay
+      const tombstonePromise = recordDeletedEntityIds('classes', sourceIds).catch(() => false);
+      const classesCloudPromise = persistDirectToFirestore('school_classes', remainingClasses, {
+        timeoutMs: 6000,
+        markClearedIfEmpty: true
+      }).catch(() => false);
+      const tasks: Promise<any>[] = [tombstonePromise, classesCloudPromise];
+      if (movedStudentsCount > 0) {
+        tasks.push(persistDirectToFirestore('school_students', nextStudents, { timeoutMs: 6000 }).catch(() => false));
+        tasks.push(syncStudentsDirectoryToFirestore(nextStudents).catch(() => {}));
+      }
+      if (teachersChanged) {
+        tasks.push(persistDirectToFirestore('school_teachers', nextTeachers, { timeoutMs: 6000 }).catch(() => false));
+      }
+      if (gradesChanged) {
+        tasks.push(persistDirectToFirestore('school_grades', nextGrades, { timeoutMs: 6000 }).catch(() => false));
+      }
+      if (sheetsChanged) {
+        tasks.push(persistDirectToFirestore('school_sent_grade_sheets', nextSentSheets, { timeoutMs: 6000 }).catch(() => false));
+        if (deletedMergedReportIds.length > 0) {
+          tasks.push(recordDeletedEntityIds('gradeReports', deletedMergedReportIds));
+          tasks.push(deleteGradeReportsBulkFromFirestore(deletedMergedReportIds).catch(() => {}));
+        }
+        if (modifiedMergedReports.length > 0) {
+          tasks.push(Promise.allSettled(modifiedMergedReports.map(r => updateGradeReportInFirestore(r).catch(() => {}))));
+        }
+        const approvedToSync = nextSentSheets.filter(
+          s => s && (s.status === 'approved' || (!s.teacherId && s.status !== 'submitted' && s.status !== 'draft'))
+        );
+        if (approvedToSync.length > 0 && movedStudentIds.length > 0) {
+          tasks.push(syncSentGradeSheetsToConsolidatedCollection(approvedToSync, { onlyStudentIds: movedStudentIds }).catch(() => false));
+        }
+      }
+      if (examChanged) {
+        tasks.push(persistDirectToFirestore('school_exam_questions', nextExamQuestions, { timeoutMs: 6000 }).catch(() => false));
+      }
+
+      await Promise.allSettled(tasks);
+      const [tombOk, clsOk] = await Promise.all([tombstonePromise, classesCloudPromise]);
+
+      setShowMergeClassesModal(false);
+      setMergeSourceClassIds([]);
+
+      const shiftLabel = targetShift === 'evening' ? 'الفوج المسائي 🌙' : 'الفوج الصباحي ☀️';
+      const cloudNote = tombOk && clsOk
+        ? 'وتم حفظ الدمج في قاعدة البيانات السحابية نهائياً.'
+        : 'تم الدمج محلياً وسيُستكمل الرفع السحابي تلقائياً عند توفر الاتصال/الحصة.';
+      alert(
+        `✅ تم دمج (${validSourceClasses.length}) صف في "${targetClass.name}" (${shiftLabel}) بنجاح!\n` +
+        `• الطلاب المنقولون: ${movedStudentsCount} طالب\n` +
+        `• ${cloudNote}`
+      );
+    } finally {
+      setIsMergingClasses(false);
+    }
   };
 
   const handleDeleteStudents = () => {
@@ -5854,7 +6193,27 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
           const serialized = JSON.stringify(updated);
           saveSyncedLocalOnly('school_teachers', serialized);
           safeDispatchStorageUpdate('school_teachers', serialized);
-          await persistDirectToFirestore('school_teachers', updated, { timeoutMs: 6000 });
+
+          let classesChanged = false;
+          const updatedClasses = classes.map(c => {
+            if (c.teacherId === itemId) {
+              classesChanged = true;
+              return { ...c, teacherId: '' };
+            }
+            return c;
+          });
+          if (classesChanged) {
+            setClasses(updatedClasses);
+            const cStr = JSON.stringify(updatedClasses);
+            saveSyncedLocalOnly('school_classes', cStr);
+            safeDispatchStorageUpdate('school_classes', cStr);
+          }
+
+          await Promise.allSettled([
+            recordDeletedEntityIds('teachers', [itemId]),
+            persistDirectToFirestore('school_teachers', updated, { timeoutMs: 6000, markClearedIfEmpty: true }),
+            ...(classesChanged ? [persistDirectToFirestore('school_classes', updatedClasses, { timeoutMs: 6000, markClearedIfEmpty: true })] : [])
+          ]);
           alert(`✅ تم حذف المعلم (${teacher.name}) من النظام وقاعدة البيانات بنجاح.`);
         }
       );
@@ -5912,17 +6271,13 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
     } else if (category === 'classes') {
       const cls = classes.find(c => c.id === itemId);
       if (!cls) return;
+      const assignedCount = students.filter(s => s.classId === cls.id).length;
       confirmAndExecute(
         '⚠️ حذف الصف/الشعبة',
-        `هل أنت متأكد من حذف الصف/الشعبة (${cls.name})؟ سيتم إلغاء تعيين أي طلاب أو معلمين منتسبين لها وحذفها من قاعدة البيانات.`,
+        `هل أنت متأكد من حذف الصف/الشعبة (${cls.name}) نهائياً من التطبيق وقاعدة البيانات؟${assignedCount > 0 ? `\nيوجد (${assignedCount}) طالب منتسب حالياً: سيتم إلغاء تعيينهم من الصف المحذوف مع الاحتفاظ بسجلاتهم ودرجاتهم.` : ''}`,
         async () => {
-          const updated = classes.filter(c => c.id !== itemId);
-          setClasses(updated);
-          const serialized = JSON.stringify(updated);
-          saveSyncedLocalOnly('school_classes', serialized);
-          safeDispatchStorageUpdate('school_classes', serialized);
-          await persistDirectToFirestore('school_classes', updated, { timeoutMs: 6000 });
-          alert(`✅ تم حذف الصف/الشعبة من النظام وقاعدة البيانات بنجاح.`);
+          await deleteClassesCascade([itemId]);
+          alert(`✅ تم حذف الصف/الشعبة (${cls.name}) من التطبيق وقاعدة البيانات نهائياً.`);
         }
       );
     } else if (category === 'grades') {
@@ -5938,7 +6293,8 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
           saveSyncedLocalOnly('school_grades', serialized);
           safeDispatchStorageUpdate('school_grades', serialized);
           const tasks: Promise<any>[] = [
-            persistDirectToFirestore('school_grades', updated, { timeoutMs: 6000 }).catch(() => false)
+            recordDeletedEntityIds('grades', [itemId]),
+            persistDirectToFirestore('school_grades', updated, { timeoutMs: 6000, markClearedIfEmpty: true }).catch(() => false)
           ];
           const studentStillHasRawGrades = updated.some(g => g.studentId === gd.studentId);
           if (!studentStillHasRawGrades) {
@@ -5994,12 +6350,34 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
           const removedIds = students.filter(s => matchesCohort(s)).map(s => s.id);
           await purgeStudentsCascadeFromSystemAndFirestore(removedIds);
         } else if (category === 'teachers') {
-          const remaining = teachers.filter(t => !matchesCohort(t));
+          const removedIds = teachers.filter(t => matchesCohort(t)).map(t => String(t.id));
+          const removedSet = new Set(removedIds);
+          const remaining = teachers.filter(t => !removedSet.has(String(t.id)));
           setTeachers(remaining);
           const serialized = JSON.stringify(remaining);
           saveSyncedLocalOnly('school_teachers', serialized);
           safeDispatchStorageUpdate('school_teachers', serialized);
-          await persistDirectToFirestore('school_teachers', remaining, { timeoutMs: 6000 });
+
+          let classesChanged = false;
+          const nextClasses = classes.map(c => {
+            if (c.teacherId && removedSet.has(String(c.teacherId))) {
+              classesChanged = true;
+              return { ...c, teacherId: '' };
+            }
+            return c;
+          });
+          if (classesChanged) {
+            setClasses(nextClasses);
+            const cStr = JSON.stringify(nextClasses);
+            saveSyncedLocalOnly('school_classes', cStr);
+            safeDispatchStorageUpdate('school_classes', cStr);
+          }
+
+          await Promise.allSettled([
+            recordDeletedEntityIds('teachers', removedIds),
+            persistDirectToFirestore('school_teachers', remaining, { timeoutMs: 6000, markClearedIfEmpty: true }),
+            ...(classesChanged ? [persistDirectToFirestore('school_classes', nextClasses, { timeoutMs: 6000, markClearedIfEmpty: true })] : [])
+          ]);
         } else if (category === 'announcements') {
           const remaining = announcements.filter(a => !matchesCohort(a));
           setAnnouncements(remaining);
@@ -6031,15 +6409,15 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
           safeDispatchStorageUpdate('school_excuses', serialized);
           await persistDirectToFirestore('school_excuses', remaining, { timeoutMs: 6000 });
         } else if (category === 'classes') {
-          const remaining = classes.filter(c => !matchesCohort(c));
-          setClasses(remaining);
-          const serialized = JSON.stringify(remaining);
-          saveSyncedLocalOnly('school_classes', serialized);
-          safeDispatchStorageUpdate('school_classes', serialized);
-          await persistDirectToFirestore('school_classes', remaining, { timeoutMs: 6000 });
+          const removedClassIds = classes.filter(c => matchesCohort(c)).map(c => String(c.id));
+          await deleteClassesCascade(removedClassIds);
         } else if (category === 'grades') {
           const cohortStudentIds = students.filter(s => matchesCohort(s)).map(s => s.id);
           const cohortStudentIdSet = new Set(cohortStudentIds);
+          const removedGradeIds = grades
+            .filter(g => matchesCohort(g) || cohortStudentIdSet.has(g.studentId))
+            .map(g => g.id)
+            .filter(Boolean);
           const remainingGrades = grades.filter(g => !matchesCohort(g) && !cohortStudentIdSet.has(g.studentId));
           setGrades(remainingGrades);
           const gSerialized = JSON.stringify(remainingGrades);
@@ -6072,9 +6450,11 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
           safeDispatchStorageUpdate('school_monthly_evaluations', evSerialized);
 
           const tasks: Promise<any>[] = [
-            persistDirectToFirestore('school_grades', remainingGrades, { timeoutMs: 6000 }).catch(() => false),
-            persistDirectToFirestore('school_sent_grade_sheets', remainingSheets, { timeoutMs: 6000 }).catch(() => false),
-            persistDirectToFirestore('school_monthly_evaluations', nextEvals, { timeoutMs: 6000 }).catch(() => false)
+            ...(removedGradeIds.length > 0 ? [recordDeletedEntityIds('grades', removedGradeIds)] : []),
+            ...(deletedReportIds.length > 0 ? [recordDeletedEntityIds('gradeReports', deletedReportIds)] : []),
+            persistDirectToFirestore('school_grades', remainingGrades, { timeoutMs: 6000, markClearedIfEmpty: true }).catch(() => false),
+            persistDirectToFirestore('school_sent_grade_sheets', remainingSheets, { timeoutMs: 6000, markClearedIfEmpty: true }).catch(() => false),
+            persistDirectToFirestore('school_monthly_evaluations', nextEvals, { timeoutMs: 6000, markClearedIfEmpty: true }).catch(() => false)
           ];
           if (activeCohort === 'all') {
             tasks.push(deleteEntireFirestoreCollection('grade_reports', 'حذف كافة كشوفات الدرجات').catch(() => 0));
@@ -6215,6 +6595,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
           school_saved_evaluation_months: [],
           school_evaluation_saved_months: [],
           school_deleted_evaluation_months: {},
+          school_deleted_records: { classes: {}, teachers: {}, parents: {}, students: {}, grades: {}, gradeReports: {} },
           school_evaluation_current_month: '',
           school_exam_questions: [],
           school_blocked_grades: []
@@ -6325,19 +6706,23 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       throw new Error('ملف غير صالح');
     }
     if (Array.isArray(backup.teachers)) {
+      unmarkDeletedEntityIds('teachers', backup.teachers.map((t: any) => String(t?.id || '')).filter(Boolean));
       setTeachers(backup.teachers);
       persistDirectToFirestore('school_teachers', backup.teachers).catch(() => {});
     }
     if (Array.isArray(backup.students)) {
+      unmarkDeletedEntityIds('students', backup.students.map((s: any) => String(s?.id || '')).filter(Boolean));
       setStudents(backup.students);
       persistDirectToFirestore('school_students', backup.students).catch(() => {});
       syncStudentsDirectoryToFirestore(backup.students).catch(() => {});
     }
     if (Array.isArray(backup.classes)) {
+      unmarkDeletedEntityIds('classes', backup.classes.map((c: any) => String(c?.id || '')).filter(Boolean));
       setClasses(backup.classes);
       persistDirectToFirestore('school_classes', backup.classes).catch(() => {});
     }
     if (Array.isArray(backup.parents)) {
+      unmarkDeletedEntityIds('parents', backup.parents.map((p: any) => String(p?.id || '')).filter(Boolean));
       setParents(backup.parents);
       persistDirectToFirestore('school_parents', backup.parents).catch(() => {});
     }
@@ -6793,32 +7178,58 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
 
   const handleAddStudent = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newStudent.name || !newStudent.classId || !newStudent.parentName || !newStudent.rollNo) {
+    if (!newStudent.name.trim() || !newStudent.classId || !newStudent.parentName.trim() || !newStudent.rollNo.trim()) {
       alert('الرجاء تعبئة كافة الحقول المطلوبة: اسم الطالب، الرقم الموحد، اسم ولي الأمر، والصف الدراسي.');
       return;
     }
 
-    const finalRollNo = newStudent.rollNo;
-    const finalPhone = newStudent.parentPhone || ('05' + finalRollNo.padEnd(8, '0').slice(0, 8));
-    const finalEmail = newStudent.parentEmail || `${newStudent.parentName.replace(/\s+/g, '') || 'parent'}@school.edu`;
+    const finalUnifiedNo = newStudent.rollNo.trim();
+    const selectedCls = classes.find(c => c.id === newStudent.classId);
+    const targetShift: 'morning' | 'evening' =
+      selectedCls?.shift || newStudentShift || (activeCohort === 'evening' ? 'evening' : 'morning');
 
-    const targetShift = newStudentShift || (activeCohort === 'evening' ? 'evening' : 'morning');
+    const unifiedValidation = isUnifiedNoValidForClass(
+      finalUnifiedNo,
+      newStudent.classId,
+      classes,
+      students,
+      undefined,
+      targetShift
+    );
+    if (!unifiedValidation.isValid) {
+      alert(`⚠️ تنبيه التحقق من الرقم الموحد:\n${unifiedValidation.message}`);
+      return;
+    }
+
+    const finalPhone = (newStudent.parentPhone || '').trim() || ('05' + finalUnifiedNo.padEnd(8, '0').slice(0, 8));
+    const finalEmail = newStudent.parentEmail || `${newStudent.parentName.trim().replace(/\s+/g, '') || 'parent'}@school.edu`;
+    const gender = newStudent.gender || 'male';
 
     addStudent(
       {
-        name: newStudent.name,
+        name: newStudent.name.trim(),
         classId: newStudent.classId,
-        parentId: '', // generated inside App.tsx
-        rollNo: finalRollNo,
-        unifiedNo: finalRollNo,
-        gender: newStudent.gender || 'male',
-        dob: newStudent.dob || '2018-01-01',
-        parentName: newStudent.parentName,
+        parentId: '',
+        rollNo: finalUnifiedNo,
+        unifiedNo: finalUnifiedNo,
+        serialNo: String(students.length + 1),
+        nationalId: '',
+        gender,
+        dob: newStudent.dob || '2015-01-01',
+        healthStatus: 'سليم / ممتاز',
+        bloodTypeOrHealth: 'سليم / ممتاز',
+        transportation: 'حافلة المدرسة',
+        booksStatus: 'تم التسليم',
+        uniformStatus: 'تم التسليم',
+        guardianRelation: 'أب',
+        avatar: gender === 'female' ? '👧' : '👦',
+        photo: '',
+        parentName: newStudent.parentName.trim(),
         shift: targetShift,
         parentPhone: finalPhone
       },
       {
-        name: newStudent.parentName,
+        name: newStudent.parentName.trim(),
         email: finalEmail,
         phone: finalPhone
       }
@@ -6826,7 +7237,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
 
     setNewStudent({
       name: '',
-      classId: '',
+      classId: selectedClassForStudentAffairs !== 'all' ? selectedClassForStudentAffairs : '',
       rollNo: '',
       gender: 'male',
       dob: '',
@@ -6834,7 +7245,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
       parentEmail: '',
       parentPhone: ''
     });
-    alert(`🎉 تم إضافة الطالب بنجاح في [${targetShift === 'evening' ? 'الفوج المسائي 🌙' : 'الفوج الصباحي ☀️'}] وتأسيس حساب لولي أمره!`);
+    alert(`🎉 تم إضافة الطالب (${newStudent.name.trim()}) بنجاح في صف [${selectedCls?.name || ''}] (${targetShift === 'evening' ? 'الفوج المسائي 🌙' : 'الفوج الصباحي ☀️'}) وحفظه في شؤون الطلاب وسجل الطلاب!`);
     setShowStudentForm(false);
   };
 
@@ -9033,29 +9444,18 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
                           }
                         }
 
-                        // Check if unifiedNo directly resolves to an allocated class
-                        if (regStudent.unifiedNo) {
-                          const uNum = parseInt(regStudent.unifiedNo.replace(/\D/g, ''), 10);
-                          if (!isNaN(uNum) && uNum > 0) {
-                            const allocated = findClassByAllocatedUnifiedNo(uNum, classes);
-                            if (allocated && (allocated.shift === regStudent.shift || !targetClsId)) {
-                              targetClsId = allocated.id;
-                            }
-                          }
-                        }
-
                         const classRange = getClassUnifiedRange(targetClsId, classes, regStudent.shift);
                         const validation = isUnifiedNoValidForClass(regStudent.unifiedNo, targetClsId, classes, students, undefined, regStudent.shift);
                         return (
                           <div>
                             <label className="block text-xs font-bold text-emerald-900 mb-1.5 flex items-center justify-between">
-                              <span>الرقم الموحد <span className="text-emerald-600 font-extrabold">(30 رقماً للصف)</span></span>
+                              <span>الرقم الموحد <span className="text-emerald-600 font-extrabold">(معرف الطالب)</span></span>
                               <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md font-mono ${
                                 validation.isValid
                                   ? 'bg-emerald-100 text-emerald-800'
                                   : 'bg-rose-100 text-rose-800'
                               }`}>
-                                النطاق: [{classRange.start} - {classRange.end}]
+                                المقترح: [{classRange.start} - {classRange.end}]
                               </span>
                             </label>
                             <input
@@ -9073,7 +9473,7 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
                               validation.isValid ? 'text-emerald-700' : 'text-rose-600'
                             }`}>
                               {validation.isValid
-                                ? `✅ مخصص لـ (${classRange.label}): من ${classRange.start} إلى ${classRange.end}`
+                                ? `✅ سيتم تسجيل الطالب في (${classRange.label}) بهذا الرقم الموحد`
                                 : `⚠️ ${validation.message}`}
                             </p>
                           </div>
@@ -9424,23 +9824,13 @@ ${getShareableOrigin()}${window.location.pathname}?portal=parent&unified=${encod
                           <button
                             type="button"
                             onClick={() => {
-                              let workingClasses = [...classes];
-                              const currentCls = workingClasses.find(c => c.id === regStudent.classId);
+                              const currentCls = classes.find(c => c.id === regStudent.classId);
                               let eveningCls: Class | undefined;
                               if (currentCls) {
-                                eveningCls = workingClasses.find(c => c.shift === 'evening' && (c.grade === currentCls.grade || c.name.includes(currentCls.grade || '')));
+                                eveningCls = classes.find(c => c.shift === 'evening' && (c.grade === currentCls.grade || c.name.includes(currentCls.grade || '')));
                               }
                               if (!eveningCls) {
-                                eveningCls = workingClasses.find(c => c.shift === 'evening');
-                              }
-                              if (!eveningCls) {
-                                const ensured = ensureClassesForUnifiedNumbers(workingClasses, [181, 211, 241]);
-                                if (ensured.didChange) {
-                                  workingClasses = ensured.updatedClasses;
-                                  setClasses(workingClasses);
-                                  persistDirectToFirestore('school_classes', workingClasses);
-                                }
-                                eveningCls = workingClasses.find(c => c.shift === 'evening');
+                                eveningCls = classes.find(c => c.shift === 'evening');
                               }
                               const finalId = eveningCls ? eveningCls.id : regStudent.classId;
                               const nextUni = eveningCls ? getNextUnifiedNo(eveningCls.id, students) : regStudent.unifiedNo;
@@ -10251,12 +10641,17 @@ if __name__ == "__main__":
                   <button
                     type="button"
                     onClick={() => {
+                      const initialClsId = selectedClassForStudentAffairs !== 'all'
+                        ? selectedClassForStudentAffairs
+                        : (classes.find(matchesCohort)?.id || '');
+                      const initialCls = classes.find(c => c.id === initialClsId);
+                      setNewStudentShift(initialCls?.shift || (activeCohort === 'evening' ? 'evening' : 'morning'));
                       setNewStudent({
                         name: '',
-                        classId: selectedClassForStudentAffairs !== 'all' ? selectedClassForStudentAffairs : '',
-                        rollNo: '',
+                        classId: initialClsId,
+                        rollNo: initialClsId ? getNextUnifiedNo(initialClsId, students) : '',
                         gender: 'male',
-                        dob: '2018-01-01',
+                        dob: '2015-01-01',
                         parentName: '',
                         parentEmail: '',
                         parentPhone: ''
@@ -10628,7 +11023,14 @@ if __name__ == "__main__":
                               onChange={e => {
                                 const selectedId = e.target.value;
                                 const foundCls = classes.find(c => c.id === selectedId);
-                                setNewStudent(prev => ({ ...prev, classId: selectedId }));
+                                const suggestedUnified = selectedId ? getNextUnifiedNo(selectedId, students) : '';
+                                setNewStudent(prev => ({
+                                  ...prev,
+                                  classId: selectedId,
+                                  rollNo: prev.rollNo && !classes.some(c => getNextUnifiedNo(c.id, students) === prev.rollNo)
+                                    ? prev.rollNo
+                                    : (suggestedUnified || prev.rollNo)
+                                }));
                                 if (foundCls?.shift) {
                                   setNewStudentShift(foundCls.shift);
                                 }
@@ -11713,18 +12115,61 @@ ${sampleEval}
 
                   <div className="overflow-x-auto">
                     {(() => {
-                      const classStudentIds = new Set(students.filter(s => s.classId === selectedClassForGrades).map(s => s.id));
+                      const classStudentsList = students.filter(s => s.classId === selectedClassForGrades);
+                      const classStudentIdentifiers = new Set<string>();
+                      classStudentsList.forEach(s => {
+                        if (s.id) classStudentIdentifiers.add(String(s.id).trim());
+                        if (s.unifiedNo) classStudentIdentifiers.add(String(s.unifiedNo).trim());
+                        if (s.rollNo) classStudentIdentifiers.add(String(s.rollNo).trim());
+                      });
+                      const trimmedActiveMonth = String(currentEvaluationMonth || '').trim();
+                      const hasGradesInActiveMonth = grades.some(g => {
+                        const gid = String(g.studentId || '').trim();
+                        const gm = String(g.examName || '').trim();
+                        return classStudentIdentifiers.has(gid) && (!gm || gm === trimmedActiveMonth);
+                      });
+                      const otherMonthsWithGrades = !hasGradesInActiveMonth
+                        ? Array.from(new Set([
+                            ...grades
+                              .filter(g => classStudentIdentifiers.has(String(g.studentId || '').trim()) && String(g.examName || '').trim())
+                              .map(g => String(g.examName || '').trim()),
+                            ...sentGradeSheets
+                              .filter(sh => (sh.classId === selectedClassForGrades) && String(sh.month || '').trim())
+                              .map(sh => String(sh.month || '').trim())
+                          ])).filter(m => m && m !== trimmedActiveMonth)
+                        : [];
+
                       const baseSubs = (customSubjects && customSubjects.length > 0)
                         ? customSubjects 
                         : ['الرياضيات', 'العلوم', 'اللغة العربية', 'التربية الإسلامية', 'اللغة الإنجليزية', 'الاجتماعيات'];
                       const recordedClassSubs = grades
-                        .filter(g => classStudentIds.has(g.studentId) && (g.examName === currentEvaluationMonth || !g.examName))
+                        .filter(g => classStudentIdentifiers.has(String(g.studentId || '').trim()) && (!g.examName || String(g.examName).trim() === trimmedActiveMonth))
                         .map(g => g.subject)
                         .filter(Boolean);
                       const uniqueSubjects = Array.from(new Set([...baseSubs, ...recordedClassSubs]));
 
                       return (
-                        <table className="w-full text-right border-collapse">
+                        <>
+                          {otherMonthsWithGrades.length > 0 && (
+                            <div className="mb-3 bg-indigo-50 border border-indigo-200 rounded-xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+                              <span className="font-bold text-indigo-900">
+                                💡 الشهر الحالي ({trimmedActiveMonth || 'غير محدد'}) لا يحتوي درجات مرصودة لهذا الصف، لكن توجد درجات محفوظة تحت:
+                              </span>
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                {otherMonthsWithGrades.map(m => (
+                                  <button
+                                    key={m}
+                                    type="button"
+                                    onClick={() => handleAddNewMonth(m)}
+                                    className="px-3 py-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg transition cursor-pointer shadow-2xs"
+                                  >
+                                    عرض شهر: {m}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          <table className="w-full text-right border-collapse">
                           <thead>
                             <tr className="bg-slate-50 text-slate-600 text-xs font-semibold border-b border-slate-100">
                               <th rowSpan={2} className="p-3 border-b border-slate-200">الرقم الموحد</th>
@@ -11766,7 +12211,14 @@ ${sampleEval}
                                 return (a.name || '').localeCompare(b.name || '', 'ar');
                               })
                               .map((student, idx) => {
-                              const studentGrades = grades.filter(g => g.studentId === student.id && (g.examName === currentEvaluationMonth || !g.examName));
+                              const stUnif = student.unifiedNo ? String(student.unifiedNo).trim() : '';
+                              const stRoll = student.rollNo ? String(student.rollNo).trim() : '';
+                              const studentGrades = grades.filter(g => {
+                                const gid = String(g.studentId || '').trim();
+                                const matchesSt = gid === student.id || (stUnif && gid === stUnif) || (stRoll && gid === stRoll);
+                                const gMonth = String(g.examName || '').trim();
+                                return matchesSt && (!gMonth || gMonth === trimmedActiveMonth);
+                              });
                               
                               let totalScore = 0;
                               let scoredCount = 0;
@@ -11862,6 +12314,9 @@ ${sampleEval}
                                 const hasParts = hasSubGradeParts(subGrade);
                                 const totalVal = computeGradeTotal(subGrade);
                                 const handlePartChange = (part: 'oralScore' | 'homeworkScore' | 'quizScore' | 'total', score: number | null) => {
+                                  if (score !== null && currentEvaluationMonth) {
+                                    unmarkDeletedEvaluationMonth(currentEvaluationMonth);
+                                  }
                                   const next = applyGradePartUpdate(grades, {
                                     studentId: student.id,
                                     subject: sub,
@@ -11873,6 +12328,13 @@ ${sampleEval}
                                     idPrefix: 'g_dir_edt',
                                     matchEmptyMonth: true
                                   });
+                                  if (next.length < grades.length) {
+                                    const nextIdSet = new Set(next.map(item => item.id));
+                                    const removedIds = grades.filter(item => !nextIdSet.has(item.id)).map(item => item.id).filter(Boolean);
+                                    if (removedIds.length > 0) {
+                                      recordDeletedEntityIds('grades', removedIds).catch(() => {});
+                                    }
+                                  }
                                   setGrades(next);
                                   const serialized = JSON.stringify(next);
                                   localStorage.setItem('school_grades', serialized);
@@ -11963,69 +12425,81 @@ ${sampleEval}
                                 <textarea
                                   rows={1}
                                   value={evalForMonth?.teacherText !== undefined ? evalForMonth.teacherText : (evalForMonth?.text || '')}
-                                  onChange={e => {
-                                    const val = e.target.value;
-                                    const currentTeacher = val;
-                                    const currentDirector = evalForMonth?.directorText || '';
-                                    const updated = {
-                                      ...monthlyEvaluations,
-                                      [`${student.id}_${currentEvaluationMonth}`]: {
-                                        ...evalForMonth,
-                                        month: currentEvaluationMonth,
-                                        teacherText: currentTeacher,
-                                        directorText: currentDirector,
-                                        text: currentTeacher
-                                      },
-                                      [student.id]: {
-                                        ...monthlyEvaluations[student.id],
-                                        month: currentEvaluationMonth,
-                                        teacherText: currentTeacher,
-                                        directorText: currentDirector,
-                                        text: currentTeacher
+                                    onChange={e => {
+                                      const val = e.target.value;
+                                      const currentTeacher = val;
+                                      const currentDirector = evalForMonth?.directorText || '';
+                                      if (val.trim() && currentEvaluationMonth) {
+                                        unmarkDeletedEvaluationMonth(currentEvaluationMonth);
                                       }
-                                    };
-                                    setMonthlyEvaluations(updated);
-                                    localStorage.setItem('school_monthly_evaluations', JSON.stringify(updated));
-                                    window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_monthly_evaluations', value: JSON.stringify(updated) } }));
-                                  }}
-                                  className="w-full text-xs border border-slate-200 hover:border-indigo-400 focus:border-indigo-600 rounded-lg p-1.5 focus:outline-none text-right bg-slate-50/50 focus:bg-white"
-                                  placeholder="توجيهات المعلم..."
-                                />
-                              </td>
-                              {/* Director Directives Column */}
-                              <td className="p-2 text-center min-w-[180px]">
-                                <textarea
-                                  rows={1}
-                                  value={evalForMonth?.directorText || ''}
-                                  onChange={e => {
-                                    const val = e.target.value;
-                                    const currentTeacher = evalForMonth?.teacherText !== undefined ? evalForMonth.teacherText : (evalForMonth?.text || '');
-                                    const currentDirector = val;
-                                    const updated = {
-                                      ...monthlyEvaluations,
-                                      [`${student.id}_${currentEvaluationMonth}`]: {
-                                        ...evalForMonth,
-                                        month: currentEvaluationMonth,
-                                        teacherText: currentTeacher,
-                                        directorText: currentDirector,
-                                        text: currentTeacher
-                                      },
-                                      [student.id]: {
-                                        ...monthlyEvaluations[student.id],
-                                        month: currentEvaluationMonth,
-                                        teacherText: currentTeacher,
-                                        directorText: currentDirector,
-                                        text: currentTeacher
+                                      const nowEvalTs = Date.now();
+                                      const updated = {
+                                        ...monthlyEvaluations,
+                                        [`${student.id}_${currentEvaluationMonth}`]: {
+                                          ...evalForMonth,
+                                          month: currentEvaluationMonth,
+                                          teacherText: currentTeacher,
+                                          directorText: currentDirector,
+                                          text: currentTeacher,
+                                          updatedAt: nowEvalTs
+                                        },
+                                        [student.id]: {
+                                          ...monthlyEvaluations[student.id],
+                                          month: currentEvaluationMonth,
+                                          teacherText: currentTeacher,
+                                          directorText: currentDirector,
+                                          text: currentTeacher,
+                                          updatedAt: nowEvalTs
+                                        }
+                                      };
+                                      setMonthlyEvaluations(updated);
+                                      localStorage.setItem('school_monthly_evaluations', JSON.stringify(updated));
+                                      window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_monthly_evaluations', value: JSON.stringify(updated) } }));
+                                    }}
+                                    className="w-full text-xs border border-slate-200 hover:border-indigo-400 focus:border-indigo-600 rounded-lg p-1.5 focus:outline-none text-right bg-slate-50/50 focus:bg-white"
+                                    placeholder="توجيهات المعلم..."
+                                  />
+                                </td>
+                                {/* Director Directives Column */}
+                                <td className="p-2 text-center min-w-[180px]">
+                                  <textarea
+                                    rows={1}
+                                    value={evalForMonth?.directorText || ''}
+                                    onChange={e => {
+                                      const val = e.target.value;
+                                      const currentTeacher = evalForMonth?.teacherText !== undefined ? evalForMonth.teacherText : (evalForMonth?.text || '');
+                                      const currentDirector = val;
+                                      if (val.trim() && currentEvaluationMonth) {
+                                        unmarkDeletedEvaluationMonth(currentEvaluationMonth);
                                       }
-                                    };
-                                    setMonthlyEvaluations(updated);
-                                    localStorage.setItem('school_monthly_evaluations', JSON.stringify(updated));
-                                    window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_monthly_evaluations', value: JSON.stringify(updated) } }));
-                                  }}
-                                  className="w-full text-xs border border-slate-200 hover:border-indigo-400 focus:border-indigo-600 rounded-lg p-1.5 focus:outline-none text-right bg-amber-50/30 focus:bg-white"
-                                  placeholder="توجيهات الإدارة..."
-                                />
-                              </td>
+                                      const nowEvalTs = Date.now();
+                                      const updated = {
+                                        ...monthlyEvaluations,
+                                        [`${student.id}_${currentEvaluationMonth}`]: {
+                                          ...evalForMonth,
+                                          month: currentEvaluationMonth,
+                                          teacherText: currentTeacher,
+                                          directorText: currentDirector,
+                                          text: currentTeacher,
+                                          updatedAt: nowEvalTs
+                                        },
+                                        [student.id]: {
+                                          ...monthlyEvaluations[student.id],
+                                          month: currentEvaluationMonth,
+                                          teacherText: currentTeacher,
+                                          directorText: currentDirector,
+                                          text: currentTeacher,
+                                          updatedAt: nowEvalTs
+                                        }
+                                      };
+                                      setMonthlyEvaluations(updated);
+                                      localStorage.setItem('school_monthly_evaluations', JSON.stringify(updated));
+                                      window.dispatchEvent(new CustomEvent('school_storage_update', { detail: { key: 'school_monthly_evaluations', value: JSON.stringify(updated) } }));
+                                    }}
+                                    className="w-full text-xs border border-slate-200 hover:border-indigo-400 focus:border-indigo-600 rounded-lg p-1.5 focus:outline-none text-right bg-amber-50/30 focus:bg-white"
+                                    placeholder="توجيهات الإدارة..."
+                                  />
+                                </td>
                               {/* Block/Withhold Grades Column */}
                               <td className="p-4 text-center min-w-[320px]">
                                 <div className="flex items-center gap-2">
@@ -12089,6 +12563,7 @@ ${sampleEval}
                         )}
                       </tbody>
                     </table>
+                        </>
                       );
                     })()}
                   </div>
@@ -14097,8 +14572,21 @@ ${sampleEval}
 
                 {/* Classes List Grid */}
                 <div className="bg-white p-6 rounded-3xl border border-slate-100 shadow-sm lg:col-span-2 space-y-4">
-                  <div className="border-b border-slate-100 pb-3 flex justify-between items-center">
-                    <span className="text-xs text-slate-400 font-semibold font-sans">إجمالي عدد الشعب المفعلة: {classes.filter(matchesCohort).length}</span>
+                  <div className="border-b border-slate-100 pb-3 flex flex-wrap justify-between items-center gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-slate-400 font-semibold font-sans">إجمالي عدد الشعب المفعلة: {classes.filter(matchesCohort).length}</span>
+                      {classes.filter(c => (c.shift || 'morning') === (activeCohort === 'evening' ? 'evening' : 'morning')).length >= 2 || activeCohort === 'all' ? (
+                        <button
+                          type="button"
+                          onClick={openMergeClassesModal}
+                          className="bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 px-3 py-1.5 rounded-xl text-[11px] font-black transition cursor-pointer flex items-center gap-1.5 shadow-2xs"
+                          title="دمج الصفوف المتكررة في نفس الفوج دون خلط الصباحي مع المسائي"
+                        >
+                          <ArrowLeftRight className="w-3.5 h-3.5 text-amber-600" />
+                          <span>دمج الصفوف المتكررة</span>
+                        </button>
+                      ) : null}
+                    </div>
                     <h4 className="font-bold text-slate-800 text-sm">قائمة الصفوف والشعب المفعلة بالمنصة 📋</h4>
                   </div>
 
@@ -14120,12 +14608,17 @@ ${sampleEval}
                             </button>
                             <button
                               type="button"
-                              onClick={async () => {
-                                if (confirm(`هل أنت متأكد من حذف الصف "${cls.name}"؟`)) {
-                                  const updated = classes.filter(c => c.id !== cls.id);
-                                  setClasses(updated);
-                                  await persistDirectToFirestore('school_classes', updated);
-                                }
+                              onClick={() => {
+                                confirmAndExecute(
+                                  '⚠️ حذف الصف/الشعبة نهائياً',
+                                  `هل أنت متأكد من حذف الصف "${cls.name}" نهائياً من التطبيق وقاعدة البيانات؟${studentCount > 0 ? `\nيوجد (${studentCount}) طالب مسجل حالياً فيه: سيتم إلغاء تعيينهم من الصف مع الاحتفاظ بملفاتهم ودرجاتهم.` : ''}`,
+                                  async () => {
+                                    const synced = await deleteClassesCascade([cls.id]);
+                                    if (!synced) {
+                                      alert(`✅ تم حذف الصف "${cls.name}" محلياً وسيتم تأكيد الحذف في السحابة فور توفر الاتصال/الحصة. إذا كان هناك جهاز آخر مفتوح بالصفوف القديمة يرجى تحديثه.`);
+                                    }
+                                  }
+                                );
                               }}
                               className="p-1.5 bg-rose-50 text-rose-500 hover:bg-rose-100 rounded-lg transition cursor-pointer"
                               title="حذف الصف"
@@ -15996,11 +16489,12 @@ ${sampleEval}
 
                     setStudents(cleanList);
                     persistDirectToFirestore('school_students', cleanList);
+                    syncStudentsDirectoryToFirestore(cleanList).catch(() => {});
 
                     setParents(updatedParents);
                     persistDirectToFirestore('school_parents', updatedParents);
 
-                    alert(`✅ تم حفظ وتحديث بيانات الطالب (${studentToSave.name}) بنجاح.\n📲 تم تحديث رقم الواتساب لهذا الطالب المحدد فقط.`);
+                    alert(`✅ تم حفظ وتحديث بيانات الطالب (${studentToSave.name}) بنجاح.\n📲 تم تحديث رقم الواتساب وبيانات الطالب في قاعدة البيانات.`);
                     setEditingStudent(null);
                   }}
                   className="space-y-5 text-xs font-normal"
@@ -16296,7 +16790,15 @@ ${sampleEval}
                         </label>
                         <select
                           value={editingStudent.classId}
-                          onChange={e => setEditingStudent({ ...editingStudent, classId: e.target.value })}
+                          onChange={e => {
+                            const nextClassId = e.target.value;
+                            const nextCls = classes.find(c => c.id === nextClassId);
+                            setEditingStudent({
+                              ...editingStudent,
+                              classId: nextClassId,
+                              shift: nextCls?.shift || editingStudent.shift
+                            });
+                          }}
                           className="w-full text-xs font-bold border border-slate-300 bg-white px-3.5 py-2.5 rounded-xl focus:border-indigo-600 focus:outline-none cursor-pointer text-slate-900 shadow-2xs"
                         >
                           {classes.map(c => (
@@ -18982,6 +19484,216 @@ ${smartUrl}
               </motion.div>
             </div>
           )}
+        </AnimatePresence>
+
+        {/* Class Merge Modal (Cohort-Isolated) */}
+        <AnimatePresence>
+          {showMergeClassesModal && (() => {
+            const cohortClasses = classes.filter(c => (c.shift || 'morning') === mergeCohortShift);
+            const targetClassObj = cohortClasses.find(c => c.id === mergeTargetClassId) || null;
+            const candidateSources = cohortClasses.filter(c => c.id !== mergeTargetClassId);
+            const selectedSources = candidateSources.filter(c => mergeSourceClassIds.includes(c.id));
+            const movingStudentsCount = students.filter(s => mergeSourceClassIds.includes(String(s.classId))).length;
+            const movingSheetsCount = sentGradeSheets.filter(sh => mergeSourceClassIds.includes(String(sh.classId))).length;
+
+            return (
+              <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50" style={{ direction: 'rtl' }}>
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.95 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.95 }}
+                  className="bg-white rounded-3xl max-w-xl w-full p-5 sm:p-6 shadow-2xl border border-slate-200 space-y-4 text-right max-h-[90vh] overflow-y-auto"
+                >
+                  <div className="flex items-center justify-between gap-2 border-b border-slate-100 pb-3">
+                    <div className="flex items-center gap-2">
+                      <div className="p-2 rounded-xl bg-amber-100 text-amber-700">
+                        <ArrowLeftRight className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h3 className="font-black text-slate-800 text-sm">دمج بيانات الصفوف المتكررة</h3>
+                        <p className="text-[11px] text-slate-500 font-sans">نقل الطلاب والمعلمين والدرجات والكشوفات إلى صف واحد موحد وحذف الصف المكرر نهائياً</p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowMergeClassesModal(false)}
+                      disabled={isMergingClasses}
+                      className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 cursor-pointer"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  {/* Cohort selector - Strictly prevents mixing Morning and Evening */}
+                  <div className="space-y-1.5">
+                    <label className="block text-xs font-bold text-slate-700">1. اختر الفوج المطلوب دمج صفوفه (معزول تماماً عن الفوج الآخر):</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleMergeCohortSwitch('morning')}
+                        disabled={isMergingClasses}
+                        className={`py-2 px-3 rounded-xl text-xs font-black transition cursor-pointer border flex items-center justify-center gap-1.5 ${
+                          mergeCohortShift === 'morning'
+                            ? 'bg-amber-50 border-amber-400 text-amber-900 shadow-2xs'
+                            : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                        }`}
+                      >
+                        <span>☀️ الفوج الصباحي ({classes.filter(c => (c.shift || 'morning') === 'morning').length})</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleMergeCohortSwitch('evening')}
+                        disabled={isMergingClasses}
+                        className={`py-2 px-3 rounded-xl text-xs font-black transition cursor-pointer border flex items-center justify-center gap-1.5 ${
+                          mergeCohortShift === 'evening'
+                            ? 'bg-indigo-50 border-indigo-400 text-indigo-900 shadow-2xs'
+                            : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                        }`}
+                      >
+                        <span>🌙 الفوج المسائي ({classes.filter(c => (c.shift || 'morning') === 'evening').length})</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {cohortClasses.length < 2 ? (
+                    <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 text-center text-xs text-slate-500">
+                      يوجد أقل من صفين في {mergeCohortShift === 'evening' ? 'الفوج المسائي 🌙' : 'الفوج الصباحي ☀️'}، ولا توجد صفوف مكررة للدمج حالياً.
+                    </div>
+                  ) : (
+                    <>
+                      {/* Step 2: Target class to KEEP */}
+                      <div className="space-y-1.5">
+                        <label className="block text-xs font-bold text-slate-700">
+                          2. الصف الأساسي الذي سيبقى (الهدف):
+                        </label>
+                        <select
+                          value={mergeTargetClassId}
+                          onChange={(e) => {
+                            const nextTarget = e.target.value;
+                            setMergeTargetClassId(nextTarget);
+                            setMergeSourceClassIds(prev => prev.filter(id => id !== nextTarget));
+                          }}
+                          disabled={isMergingClasses}
+                          className="w-full text-xs font-bold border border-indigo-200 bg-indigo-50/40 px-3 py-2.5 rounded-xl focus:border-indigo-500 focus:bg-white focus:outline-none text-slate-800"
+                        >
+                          {cohortClasses.map(c => {
+                            const cnt = students.filter(s => s.classId === c.id).length;
+                            const rng = getClassUnifiedRange(c.id, classes);
+                            return (
+                              <option key={c.id} value={c.id}>
+                                {c.name} — ({cnt} طالب) [موحد: {rng.start}-{rng.end}]
+                              </option>
+                            );
+                          })}
+                        </select>
+                      </div>
+
+                      {/* Step 3: Source classes to MERGE INTO target and DELETE */}
+                      <div className="space-y-1.5">
+                        <label className="block text-xs font-bold text-slate-700">
+                          3. حدد الصفوف المكررة المراد دمج بياناتها داخل "{targetClassObj?.name || 'الصف الأساسي'}" ثم حذفها:
+                        </label>
+                        <div className="max-h-52 overflow-y-auto space-y-2 border border-slate-200 rounded-2xl p-2.5 bg-slate-50/60">
+                          {candidateSources.map(src => {
+                            const checked = mergeSourceClassIds.includes(src.id);
+                            const cnt = students.filter(s => s.classId === src.id).length;
+                            const rng = getClassUnifiedRange(src.id, classes);
+                            return (
+                              <label
+                                key={src.id}
+                                className={`flex items-center justify-between gap-3 p-2.5 rounded-xl border cursor-pointer transition ${
+                                  checked
+                                    ? 'bg-amber-50 border-amber-300 text-amber-950'
+                                    : 'bg-white border-slate-200 hover:border-slate-300 text-slate-700'
+                                }`}
+                              >
+                                <div className="flex items-center gap-2.5">
+                                  <input
+                                    type="checkbox"
+                                    checked={checked}
+                                    disabled={isMergingClasses}
+                                    onChange={(e) => {
+                                      if (e.target.checked) {
+                                        setMergeSourceClassIds(prev => Array.from(new Set([...prev, src.id])));
+                                      } else {
+                                        setMergeSourceClassIds(prev => prev.filter(id => id !== src.id));
+                                      }
+                                    }}
+                                    className="w-4 h-4 accent-amber-600 rounded cursor-pointer"
+                                  />
+                                  <div>
+                                    <span className="font-black text-xs block">{src.name}</span>
+                                    <span className="text-[10px] text-slate-500 font-sans">
+                                      المرحلة: {src.grade} • موحد: [{rng.start} - {rng.end}]
+                                    </span>
+                                  </div>
+                                </div>
+                                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-lg shrink-0 ${
+                                  cnt > 0 ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-500'
+                                }`}>
+                                  {cnt} طالب
+                                </span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* Preview Summary */}
+                      <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-3 space-y-1 text-[11px] text-emerald-900">
+                        <p className="font-black flex items-center gap-1.5">
+                          <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                          <span>
+                            {selectedSources.length > 0
+                              ? `سيتم دمج (${selectedSources.length}) صف في "${targetClassObj?.name}" (${mergeCohortShift === 'evening' ? 'الفوج المسائي 🌙' : 'الفوج الصباحي ☀️'})`
+                              : 'اختر صفاً واحداً على الأقل من القائمة أعلاه لمعاينة تفاصيل الدمج'}
+                          </span>
+                        </p>
+                        {selectedSources.length > 0 && (
+                          <p className="text-[10px] text-emerald-800 font-sans leading-relaxed">
+                            • نقل ({movingStudentsCount}) طالب، وتوحيد ({movingSheetsCount}) كشف درجات، ونقل المعلمين المرتبطين، وحذف الصفوف المدمجة نهائياً.
+                            <br />• سيبقى {mergeCohortShift === 'evening' ? 'الفوج الصباحي ☀️' : 'الفوج المسائي 🌙'} كما هو تماماً دون أي تعديل على بياناته.
+                          </p>
+                        )}
+                      </div>
+                    </>
+                  )}
+
+                  <div className="flex items-center justify-end gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => setShowMergeClassesModal(false)}
+                      disabled={isMergingClasses}
+                      className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl cursor-pointer"
+                    >
+                      إلغاء
+                    </button>
+                    {cohortClasses.length >= 2 && (
+                      <button
+                        type="button"
+                        disabled={isMergingClasses || !targetClassObj || selectedSources.length === 0}
+                        onClick={() => {
+                          if (!targetClassObj || selectedSources.length === 0) return;
+                          const sourceNames = selectedSources.map(s => s.name).join('، ');
+                          confirmAndExecute(
+                            '⚠️ تأكيد دمج الصفوف في نفس الفوج',
+                            `سيتم دمج الصفوف التالية:\n(${sourceNames})\n\nداخل الصف الأساسي:\n(${targetClassObj.name} - ${mergeCohortShift === 'evening' ? 'الفوج المسائي 🌙' : 'الفوج الصباحي ☀️'})\n\nسيتم نقل (${movingStudentsCount}) طالب وجميع المعلمين والدرجات والكشوفات ثم حذف الصفوف المكررة نهائياً من قاعدة البيانات دون المساس بالفوج الآخر. هل تريد المتابعة؟`,
+                            async () => {
+                              await executeMergeClasses(targetClassObj.id, selectedSources.map(s => s.id));
+                            }
+                          );
+                        }}
+                        className="px-4 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-black rounded-xl cursor-pointer flex items-center gap-1.5 shadow-sm"
+                      >
+                        {isMergingClasses ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ArrowLeftRight className="w-3.5 h-3.5" />}
+                        <span>{isMergingClasses ? 'جاري الدمج والحفظ...' : 'تنفيذ الدمج وحفظ السحابة'}</span>
+                      </button>
+                    )}
+                  </div>
+                </motion.div>
+              </div>
+            );
+          })()}
         </AnimatePresence>
 
         {/* Floating Copy Toast Notification */}

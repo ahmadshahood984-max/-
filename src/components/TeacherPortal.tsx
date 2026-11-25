@@ -65,7 +65,10 @@ import {
   FAST_LIVE_SYNC_KEYS,
   filterOutDeletedMonthsFromSheets,
   getDeletedEvaluationMonthsMap,
-  isItemDeletedByEvaluationMonth
+  unmarkDeletedEvaluationMonth,
+  recordDeletedEntityIds,
+  isItemDeletedByEvaluationMonth,
+  hasPortalBaselineCache
 } from '../lib/firebaseSync';
 import { getDeletedRelayGradeReportIds } from '../lib/liveRelayClient';
 import {
@@ -283,12 +286,14 @@ export default function TeacherPortal({
     };
 
     window.addEventListener('school_storage_update', handleStorageUpdate);
-    syncEvaluationMonthConfigFromServer({ force: true })
-      .then(() => reloadTeacherSyncedData())
-      .catch(() => {});
-    syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS })
-      .then(() => reloadTeacherSyncedData())
-      .catch(() => {});
+    if (!hasPortalBaselineCache(false)) {
+      syncEvaluationMonthConfigFromServer({ force: true })
+        .then(() => reloadTeacherSyncedData())
+        .catch(() => {});
+      syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS })
+        .then(() => reloadTeacherSyncedData())
+        .catch(() => {});
+    }
 
     const mergeDirectReports = (directReports: SentGradeSheet[]) => {
       if (!Array.isArray(directReports)) return;
@@ -851,6 +856,9 @@ export default function TeacherPortal({
 
     setIsSendingSheetToDirector(true);
     try {
+      if (currentEvaluationMonth) {
+        unmarkDeletedEvaluationMonth(currentEvaluationMonth);
+      }
       // STRICT FIRESTORE WRITE: Must directly succeed in Firestore `grade_reports/{id}`
       const savedSheet = await submitGradeReportToFirestore(sheetRecord);
 
@@ -1387,8 +1395,10 @@ export default function TeacherPortal({
             safeDispatchStorageUpdate('school_active_teacher_id', targetTeacher.id);
             setTeacherLoginError('');
             setTeacherPasswordInput('');
-            syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS }).catch(() => {});
-            fetchGradeReportsFromFirestore({ force: false }).catch(() => {});
+            if (!hasPortalBaselineCache(false)) {
+              syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS }).catch(() => {});
+              fetchGradeReportsFromFirestore({ force: false }).catch(() => {});
+            }
           } else {
             setTeacherLoginError('رقم الهاتف أو المعرف المدخل غير مسجل لدينا، يرجى مراجعة إدارة المدرسة.');
           }
@@ -1908,6 +1918,9 @@ export default function TeacherPortal({
                                     const totalVal = computeGradeTotal(subGrade);
                                     const handlePartChange = (part: 'oralScore' | 'homeworkScore' | 'quizScore' | 'total', score: number | null) => {
                                       if (!setGrades) return;
+                                      if (score !== null && currentEvaluationMonth) {
+                                        unmarkDeletedEvaluationMonth(currentEvaluationMonth);
+                                      }
                                       const next = applyGradePartUpdate(grades, {
                                         studentId: student.id,
                                         subject: sub,
@@ -1918,6 +1931,13 @@ export default function TeacherPortal({
                                         teacherId: selectedTeacherId,
                                         idPrefix: 'g_t_edt'
                                       });
+                                      if (next.length < grades.length) {
+                                        const nextIdSet = new Set(next.map(item => item.id));
+                                        const removedIds = grades.filter(item => !nextIdSet.has(item.id)).map(item => item.id).filter(Boolean);
+                                        if (removedIds.length > 0) {
+                                          recordDeletedEntityIds('grades', removedIds).catch(() => {});
+                                        }
+                                      }
                                       setGrades(next);
                                       const serialized = JSON.stringify(next);
                                       localStorage.setItem('school_grades', serialized);
@@ -2010,6 +2030,9 @@ export default function TeacherPortal({
                                       onChange={e => {
                                         const val = e.target.value;
                                         const currentDirector = evalForMonth?.directorText || '';
+                                        if (val.trim() && currentEvaluationMonth) {
+                                          unmarkDeletedEvaluationMonth(currentEvaluationMonth);
+                                        }
                                         const updated = {
                                           ...monthlyEvaluations,
                                           [`${student.id}_${currentEvaluationMonth}`]: {
@@ -2017,7 +2040,8 @@ export default function TeacherPortal({
                                             month: currentEvaluationMonth,
                                             teacherText: val,
                                             directorText: currentDirector,
-                                            text: val
+                                            text: val,
+                                            updatedAt: Date.now()
                                           }
                                         };
                                         setMonthlyEvaluations(updated);

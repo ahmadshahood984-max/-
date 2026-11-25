@@ -10,9 +10,23 @@ import { Student } from '../types';
 export const sanitizeAndDeduplicateStudents = (rawList: Student[]): Student[] => {
   if (!Array.isArray(rawList)) return [];
 
-  const seenIds = new Set<string>();
-  const seenEntities = new Set<string>();
+  const idToIndex = new Map<string, number>();
+  const entityToIndex = new Map<string, number>();
   const cleaned: Student[] = [];
+
+  const mergeRichStudent = (existing: Student, incoming: Student): Student => {
+    const out: any = { ...existing };
+    for (const [k, v] of Object.entries(incoming || {})) {
+      if (v !== undefined && v !== null && v !== '') {
+        out[k] = v;
+      }
+    }
+    out.id = existing.id;
+    out.name = (incoming.name || existing.name || '').trim();
+    out.unifiedNo = out.unifiedNo || out.rollNo || '';
+    out.rollNo = out.rollNo || out.unifiedNo || '';
+    return out as Student;
+  };
 
   for (let i = 0; i < rawList.length; i++) {
     const s = rawList[i];
@@ -24,29 +38,36 @@ export const sanitizeAndDeduplicateStudents = (rawList: Student[]): Student[] =>
     const normName = trimmedName.toLowerCase().replace(/\s+/g, ' ');
     const normClass = (s.classId || '').trim();
     const normRoll = String(s.unifiedNo || s.rollNo || '').trim();
+    const rawId = s.id ? String(s.id).trim() : '';
 
-    // Check for exact duplicate student records in the same class
-    const entitySignature = `${normName}__${normClass}__${normRoll}`;
-    if (seenEntities.has(entitySignature)) {
+    // 1. If exact ID already exists, merge fields in place rather than duplicating
+    if (rawId && idToIndex.has(rawId)) {
+      const idx = idToIndex.get(rawId)!;
+      cleaned[idx] = mergeRichStudent(cleaned[idx], s);
       continue;
     }
-    seenEntities.add(entitySignature);
 
-    let finalId = s.id ? String(s.id).trim() : '';
-
-    // If ID is missing or has already been used by another student, assign a new unique ID
-    if (!finalId || seenIds.has(finalId)) {
-      finalId = `s_${i + 1}_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 7)}`;
+    // 2. Check for duplicate student identity (same name+class+unifiedNo, or same unifiedNo+name)
+    const entitySignature = `${normName}__${normClass}__${normRoll}`;
+    if (entityToIndex.has(entitySignature)) {
+      const idx = entityToIndex.get(entitySignature)!;
+      cleaned[idx] = mergeRichStudent(cleaned[idx], s);
+      continue;
     }
-    seenIds.add(finalId);
 
-    cleaned.push({
+    const finalId = rawId || `s_${i + 1}_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 7)}`;
+    const normalizedStudent: Student = {
       ...s,
       id: finalId,
       name: trimmedName,
       unifiedNo: s.unifiedNo || s.rollNo || '',
       rollNo: s.rollNo || s.unifiedNo || ''
-    });
+    };
+
+    const nextIdx = cleaned.length;
+    cleaned.push(normalizedStudent);
+    idToIndex.set(finalId, nextIdx);
+    entityToIndex.set(entitySignature, nextIdx);
   }
 
   return cleaned;

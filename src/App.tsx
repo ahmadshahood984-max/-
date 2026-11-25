@@ -48,9 +48,17 @@ import {
   deduplicateGradeSheetsPreservingTeachers,
   syncLivePortalDataFromServer,
   syncEvaluationMonthConfigFromServer,
+  filterOutDeletedEntities,
+  filterOutDeletedMonthsFromSheets,
+  getDeletedRecordsMap,
+  getGradeTimestampMs,
+  unmarkDeletedEvaluationMonth,
+  hasPortalBaselineCache,
   FAST_LIVE_SYNC_KEYS,
   PARENT_FAST_LIVE_KEYS
 } from './lib/firebaseSync';
+import { fetchGradeReportsFromFirestore } from './lib/gradeReportsFirestore';
+import { syncStudentsDirectoryToFirestore } from './lib/parentStudentQuery';
 import { isFirestoreQuotaExceeded, resetFirestoreQuotaBreaker } from './lib/quotaManager';
 import { 
   Building, 
@@ -97,15 +105,17 @@ function safeParseStorageArray<T>(key: string, fallback: T[] = []): T[] {
 
 export default function App() {
   // --- Persistent State Hooks (instant read from localStorage; seed/cloud merged asynchronously after first paint) ---
-  const [teachers, setTeachers] = useState<Teacher[]>(() => safeParseStorageArray<Teacher>('school_teachers'));
-  const [classes, setClasses] = useState<Class[]>(() => safeParseStorageArray<Class>('school_classes'));
-  const [parents, setParents] = useState<Parent[]>(() => safeParseStorageArray<Parent>('school_parents'));
-  const [students, setStudents] = useState<Student[]>(() => safeParseStorageArray<Student>('school_students'));
+  const [teachers, setTeachers] = useState<Teacher[]>(() => filterOutDeletedEntities('teachers', safeParseStorageArray<Teacher>('school_teachers')));
+  const [classes, setClasses] = useState<Class[]>(() => filterOutDeletedEntities('classes', safeParseStorageArray<Class>('school_classes')));
+  const [parents, setParents] = useState<Parent[]>(() => filterOutDeletedEntities('parents', safeParseStorageArray<Parent>('school_parents')));
+  const [students, setStudents] = useState<Student[]>(() => filterOutDeletedEntities('students', safeParseStorageArray<Student>('school_students')));
 
   const studentsRef = React.useRef<Student[]>(students);
   studentsRef.current = students;
   const parentsRef = React.useRef<Parent[]>(parents);
   parentsRef.current = parents;
+  const classesRef = React.useRef<Class[]>(classes);
+  classesRef.current = classes;
 
   // Safe wrapper that enforces deduplication and unique keys across all portals
   const safeSetStudents: React.Dispatch<React.SetStateAction<Student[]>> = (action) => {
@@ -290,10 +300,14 @@ export default function App() {
         resetFirestoreQuotaBreaker();
       }
       const targetKeys = activePortal === 'parent' ? PARENT_FAST_LIVE_KEYS : FAST_LIVE_SYNC_KEYS;
-      await Promise.all([
+      const syncTasks: Promise<any>[] = [
         syncEvaluationMonthConfigFromServer({ force: true }),
         syncLivePortalDataFromServer({ keys: targetKeys, bypassCache: true, forceServer: true })
-      ]);
+      ];
+      if (activePortal !== 'parent') {
+        syncTasks.push(fetchGradeReportsFromFirestore({ force: true }));
+      }
+      await Promise.all(syncTasks);
       if (activePortal === 'parent') {
         window.dispatchEvent(new CustomEvent('school_force_parent_refresh'));
       }
@@ -315,7 +329,9 @@ export default function App() {
     }
     if (activePortal === 'director' || activePortal === 'teacher') {
       ensureAllRealtimeListeners();
-      syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS }).catch(() => {});
+      if (!hasPortalBaselineCache(false)) {
+        syncLivePortalDataFromServer({ keys: FAST_LIVE_SYNC_KEYS }).catch(() => {});
+      }
     } else if (activePortal === 'parent') {
       ensureParentRealtimeListeners();
     }
@@ -332,17 +348,35 @@ export default function App() {
         const parsed = JSON.parse(value);
         switch (key) {
           case 'school_teachers':
-            setTeachers(parsed);
+            setTeachers(filterOutDeletedEntities('teachers', Array.isArray(parsed) ? parsed : []));
             break;
           case 'school_classes':
-            setClasses(parsed);
+            setClasses(filterOutDeletedEntities('classes', Array.isArray(parsed) ? parsed : []));
             break;
           case 'school_parents':
-            setParents(parsed);
+            setParents(filterOutDeletedEntities('parents', Array.isArray(parsed) ? parsed : []));
             break;
           case 'school_students': {
-            const cleanList = sanitizeAndDeduplicateStudents(Array.isArray(parsed) ? parsed : []);
+            const cleanList = sanitizeAndDeduplicateStudents(
+              filterOutDeletedEntities('students', Array.isArray(parsed) ? parsed : [])
+            );
             setStudents(cleanList.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar')));
+            break;
+          }
+          case 'school_deleted_records': {
+            const delMap = getDeletedRecordsMap();
+            setTeachers(prev => filterOutDeletedEntities('teachers', prev, delMap));
+            setClasses(prev => filterOutDeletedEntities('classes', prev, delMap));
+            setParents(prev => filterOutDeletedEntities('parents', prev, delMap));
+            setStudents(prev => filterOutDeletedEntities('students', prev, delMap));
+            const delGrades = delMap.grades || {};
+            if (Object.keys(delGrades).length > 0) {
+              setGrades(prev => prev.filter(g => {
+                const gid = g?.id ? String(g.id).trim() : '';
+                if (!gid || !delGrades[gid]) return true;
+                return getGradeTimestampMs(g) > delGrades[gid];
+              }));
+            }
             break;
           }
           case 'school_attendance':
@@ -385,10 +419,10 @@ export default function App() {
 
     // Reload from localStorage helper (used after async hydration/cache sync finishes)
     const reloadFromLocalStorage = async (allowSeedFallback: boolean = false) => {
-      const savedTeachers = safeParseStorageArray<Teacher>('school_teachers');
-      const savedClasses = safeParseStorageArray<Class>('school_classes');
-      const savedParents = safeParseStorageArray<Parent>('school_parents');
-      const savedStudents = safeParseStorageArray<Student>('school_students');
+      const savedTeachers = filterOutDeletedEntities('teachers', safeParseStorageArray<Teacher>('school_teachers'));
+      const savedClasses = filterOutDeletedEntities('classes', safeParseStorageArray<Class>('school_classes'));
+      const savedParents = filterOutDeletedEntities('parents', safeParseStorageArray<Parent>('school_parents'));
+      const savedStudents = filterOutDeletedEntities('students', safeParseStorageArray<Student>('school_students'));
       const savedGrades = safeParseStorageArray<Grade>('school_grades');
       const savedAtt = safeParseStorageArray<Attendance>('school_attendance');
       const savedAnn = safeParseStorageArray<Announcement>('school_announcements');
@@ -396,13 +430,13 @@ export default function App() {
       const savedExc = safeParseStorageArray<AbsenceExcuse>('school_excuses');
       const savedExams = safeParseStorageArray<ExamQuestionPaper>('school_exam_questions');
 
-      if (savedTeachers.length > 0 || (!allowSeedFallback && localStorage.getItem('school_teachers') === '[]')) setTeachers(savedTeachers);
-      if (savedClasses.length > 0 || (!allowSeedFallback && localStorage.getItem('school_classes') === '[]')) setClasses(savedClasses);
-      if (savedParents.length > 0 || (!allowSeedFallback && localStorage.getItem('school_parents') === '[]')) setParents(savedParents);
+      if (savedTeachers.length > 0 || localStorage.getItem('school_teachers') === '[]') setTeachers(savedTeachers);
+      if (savedClasses.length > 0 || localStorage.getItem('school_classes') === '[]') setClasses(savedClasses);
+      if (savedParents.length > 0 || localStorage.getItem('school_parents') === '[]') setParents(savedParents);
       if (savedStudents.length > 0) {
         const cleanList = sanitizeAndDeduplicateStudents(savedStudents);
         setStudents(cleanList.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar')));
-      } else if (!allowSeedFallback && localStorage.getItem('school_students') === '[]') {
+      } else if (localStorage.getItem('school_students') === '[]') {
         setStudents([]);
       }
       if (savedAtt.length > 0 || (!allowSeedFallback && localStorage.getItem('school_attendance') === '[]')) setAttendance(savedAtt);
@@ -439,7 +473,7 @@ export default function App() {
       }
 
       // Lazy-load default exam samples ONLY if none exist locally after cloud sync
-      if (allowSeedFallback && savedExams.length === 0) {
+      if (allowSeedFallback && savedExams.length === 0 && localStorage.getItem('school_exam_questions') === null) {
         import('./lib/defaultExamSamples')
           .then(({ getDefaultExamSamples }) => {
             const samples = getDefaultExamSamples();
@@ -449,14 +483,16 @@ export default function App() {
           .catch(() => {});
       }
 
-      // If real cloud data is already present on this browser, mark seed as satisfied and NEVER merge old static demo rows!
-      const allCorePopulated =
-        savedTeachers.length > 0 &&
-        savedClasses.length > 0 &&
-        savedStudents.length > 0 &&
-        savedParents.length > 0;
+      // NEVER re-inject static seed data once seed has been applied OR once any core storage key exists (including intentional '[]' deletes!)
+      const seedAlreadyApplied = localStorage.getItem('school_seed_applied_v1') === '1';
+      const hasAnyCoreStorageKey =
+        localStorage.getItem('school_teachers') !== null ||
+        localStorage.getItem('school_classes') !== null ||
+        localStorage.getItem('school_students') !== null ||
+        localStorage.getItem('school_parents') !== null ||
+        localStorage.getItem('school_deleted_records') !== null;
 
-      if (allCorePopulated) {
+      if (seedAlreadyApplied || hasAnyCoreStorageKey) {
         try {
           localStorage.setItem('school_seed_applied_v1', '1');
         } catch {}
@@ -464,22 +500,22 @@ export default function App() {
         try {
           const seed = await loadInitialSeedBundle();
           if (savedTeachers.length === 0 && seed.teachers.length > 0) {
-            const merged = mergeTeachersWithSeed(savedTeachers, seed.teachers);
+            const merged = filterOutDeletedEntities('teachers', mergeTeachersWithSeed(savedTeachers, seed.teachers));
             saveLocalSeedWithoutCloudWrite('school_teachers', JSON.stringify(merged));
             setTeachers(merged);
           }
           if (savedClasses.length === 0 && seed.classes.length > 0) {
-            const merged = mergeClassesWithSeed(savedClasses, seed.classes);
+            const merged = filterOutDeletedEntities('classes', mergeClassesWithSeed(savedClasses, seed.classes));
             saveLocalSeedWithoutCloudWrite('school_classes', JSON.stringify(merged));
             setClasses(merged);
           }
           if (savedParents.length === 0 && seed.parents.length > 0) {
-            const merged = mergeParentsWithSeed(savedParents, seed.parents);
+            const merged = filterOutDeletedEntities('parents', mergeParentsWithSeed(savedParents, seed.parents));
             saveLocalSeedWithoutCloudWrite('school_parents', JSON.stringify(merged));
             setParents(merged);
           }
           if (savedStudents.length === 0 && seed.students.length > 0) {
-            const merged = mergeStudentsWithSeed(savedStudents, seed.students);
+            const merged = filterOutDeletedEntities('students', mergeStudentsWithSeed(savedStudents, seed.students));
             const cleaned = sanitizeAndDeduplicateStudents(merged).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
             saveLocalSeedWithoutCloudWrite('school_students', JSON.stringify(cleaned));
             setStudents(cleaned);
@@ -496,11 +532,12 @@ export default function App() {
         if (savedSheetsRaw) {
           try {
             const parsedSheets = JSON.parse(savedSheetsRaw);
-            if (Array.isArray(parsedSheets) && parsedSheets.length > 0) {
+            const aliveSheets = Array.isArray(parsedSheets) ? filterOutDeletedMonthsFromSheets(parsedSheets) : [];
+            if (aliveSheets.length > 0) {
               const reconstructedGrades: Grade[] = [];
-              for (const sheet of parsedSheets) {
+              for (const sheet of aliveSheets) {
                 const month = sheet.month || 'التاسع';
-                const summaryList = sheet.studentsSummary || sheet.studentResults || [];
+                const summaryList = sheet.studentsSummary || (sheet as any).studentResults || [];
                 for (const res of summaryList) {
                   if (res.studentId && Array.isArray(res.scores)) {
                     for (const sc of res.scores) {
@@ -551,21 +588,28 @@ export default function App() {
     };
     window.addEventListener('school_live_sync_completed', handleLiveSyncCompleted);
 
-    // Immediately hydrate offline vault for instant first paint and sync fresh cloud state on app open
+    // Immediately hydrate offline vault for instant first paint; only fetch full baseline if device cache is empty,
+    // otherwise rely on delta-only listeners (`updatedAt > since` / `_parent_pulse`) to fetch only new/changed items.
     const startupKeys = activePortal === 'parent' ? PARENT_FAST_LIVE_KEYS : FAST_LIVE_SYNC_KEYS;
     hydrateFromOfflineVault()
-      .then((restored) => {
+      .then(async (restored) => {
         if (restored) reloadFromLocalStorage(false);
-      })
-      .catch(() => {});
-
-    syncLivePortalDataFromServer({ keys: startupKeys, bypassCache: true, forceServer: true })
-      .then(() => {
-        reloadFromLocalStorage(true);
+        const isParent = activePortal === 'parent';
+        if (hasPortalBaselineCache(isParent)) {
+          if (isParent) {
+            ensureParentRealtimeListeners();
+          } else {
+            ensureAllRealtimeListeners();
+          }
+          reloadFromLocalStorage(false);
+          return;
+        }
+        const syncOk = await syncLivePortalDataFromServer({ keys: startupKeys, bypassCache: true, forceServer: true });
+        reloadFromLocalStorage(Boolean(syncOk));
       })
       .catch((err) => {
         console.warn('Startup Firestore live sync notice:', err);
-        reloadFromLocalStorage(true);
+        reloadFromLocalStorage(false);
       });
 
     return () => {
@@ -1073,29 +1117,50 @@ export default function App() {
     logEvent(`تم تعديل كلمة مرور المدير العام بنجاح`, 'success');
   };
 
-  // 2. Director registers a Student and links/creates a Parent
+  // 2. Director registers or updates a Student (unified across Manual Add and Student Registration)
   const addStudent = (studentData: Omit<Student, 'id'>, parentData: Omit<Parent, 'id' | 'childrenIds'>) => {
     const currentStudents = studentsRef.current;
     const currentParents = parentsRef.current;
+    const currentClasses = classesRef.current;
     const now = Date.now();
 
-    // Generate guaranteed collision-free student ID across tabs/devices
-    let studentId = `s_${now.toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
-    while (currentStudents.some(s => s.id === studentId)) {
-      studentId = `s_${now.toString(36)}_${Math.random().toString(36).substring(2, 7)}`;
+    const candidateUnified = String(studentData.unifiedNo || studentData.rollNo || '').trim() || String(currentStudents.length + 1).padStart(3, '0');
+    const selectedClass = currentClasses.find(c => c.id === studentData.classId);
+    const canonicalShift = selectedClass?.shift || studentData.shift || 'morning';
+
+    // Check if student with same unifiedNo already exists so updating in-place preserves student.id and all linked grades
+    const existingByUnified = candidateUnified
+      ? currentStudents.find(s => String(s.unifiedNo || s.rollNo || '').trim() === candidateUnified)
+      : undefined;
+
+    let studentId = existingByUnified?.id || '';
+    if (!studentId) {
+      studentId = `s_${now.toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
+      while (currentStudents.some(s => s.id === studentId)) {
+        studentId = `s_${now.toString(36)}_${Math.random().toString(36).substring(2, 7)}`;
+      }
     }
 
-    const candidateUnified = studentData.unifiedNo || studentData.rollNo || String(currentStudents.length + 1).padStart(3, '0');
-    
-    // Check if parent already exists (by phone)
-    let parentId = '';
-    const existingParent = currentParents.find(p => p.phone === parentData.phone);
+    // Link or create parent cleanly
+    const cleanParentPhone = String(parentData.phone || studentData.parentPhone || '').trim();
+    const cleanParentName = String(parentData.name || studentData.parentName || '').trim() || `ولي أمر ${studentData.name}`;
+    let parentId = existingByUnified?.parentId || '';
+    const existingParent = currentParents.find(
+      p => (parentId && p.id === parentId) || (cleanParentPhone && p.phone === cleanParentPhone)
+    );
     let updatedParentsList: Parent[];
-    
+
     if (existingParent) {
       parentId = existingParent.id;
-      updatedParentsList = currentParents.map(p => 
-        p.id === parentId ? { ...p, childrenIds: [...p.childrenIds.filter(id => id !== studentId), studentId] } : p
+      updatedParentsList = currentParents.map(p =>
+        p.id === parentId
+          ? {
+              ...p,
+              name: cleanParentName || p.name,
+              phone: cleanParentPhone || p.phone,
+              childrenIds: [...p.childrenIds.filter(id => id !== studentId), studentId]
+            }
+          : p
       );
     } else {
       let pId = `p_${now.toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
@@ -1105,9 +1170,9 @@ export default function App() {
       parentId = pId;
       const newParent: Parent = {
         id: parentId,
-        name: parentData.name,
-        email: parentData.email,
-        phone: parentData.phone,
+        name: cleanParentName,
+        email: parentData.email || `${cleanParentName.replace(/\s+/g, '') || 'parent'}@school.edu`,
+        phone: cleanParentPhone,
         childrenIds: [studentId]
       };
       updatedParentsList = [...currentParents, newParent];
@@ -1117,21 +1182,44 @@ export default function App() {
     setParents(updatedParentsList);
     persistDirectToFirestore('school_parents', updatedParentsList);
 
-    const newStudent: Student = {
+    const gender = studentData.gender || existingByUnified?.gender || 'male';
+    const canonicalStudent: Student = {
+      ...(existingByUnified || {}),
       ...studentData,
       id: studentId,
+      name: (studentData.name || existingByUnified?.name || '').trim(),
+      classId: studentData.classId || existingByUnified?.classId || '',
       parentId,
       unifiedNo: candidateUnified,
-      rollNo: studentData.rollNo || candidateUnified,
-      createdAt: now
+      rollNo: candidateUnified,
+      nationalId: studentData.nationalId || existingByUnified?.nationalId || '',
+      serialNo: studentData.serialNo || existingByUnified?.serialNo || String(currentStudents.length + 1),
+      gender,
+      dob: studentData.dob || existingByUnified?.dob || '2015-01-01',
+      parentName: cleanParentName,
+      parentPhone: cleanParentPhone,
+      shift: canonicalShift,
+      healthStatus: studentData.healthStatus || existingByUnified?.healthStatus || 'سليم / ممتاز',
+      bloodTypeOrHealth: studentData.bloodTypeOrHealth || studentData.healthStatus || existingByUnified?.bloodTypeOrHealth || 'سليم / ممتاز',
+      transportation: studentData.transportation || existingByUnified?.transportation || 'حافلة المدرسة',
+      booksStatus: studentData.booksStatus || existingByUnified?.booksStatus || 'تم التسليم',
+      uniformStatus: studentData.uniformStatus || existingByUnified?.uniformStatus || 'تم التسليم',
+      guardianRelation: studentData.guardianRelation || existingByUnified?.guardianRelation || 'أب',
+      avatar: studentData.avatar || existingByUnified?.avatar || (gender === 'female' ? '👧' : '👦'),
+      photo: studentData.photo || existingByUnified?.photo || '',
+      createdAt: existingByUnified?.createdAt || now
     };
 
-    const sanitized = sanitizeAndDeduplicateStudents([...currentStudents, newStudent]);
+    const nextBase = existingByUnified
+      ? currentStudents.map(s => (s.id === studentId ? canonicalStudent : s))
+      : [...currentStudents, canonicalStudent];
+    const sanitized = sanitizeAndDeduplicateStudents(nextBase);
     const sorted = sanitized.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar'));
     studentsRef.current = sorted;
     setStudents(sorted);
     persistDirectToFirestore('school_students', sorted);
-    logEvent(`تم تسجيل الطالب: ${newStudent.name} (الرقم الموحد: ${candidateUnified}) وربطه بولي الأمر: ${parentData.name}`, 'success');
+    syncStudentsDirectoryToFirestore(sorted).catch(() => {});
+    logEvent(`${existingByUnified ? 'تم تحديث بيانات الطالب' : 'تم تسجيل الطالب'}: ${canonicalStudent.name} (الرقم الموحد: ${candidateUnified}) وربطه بولي الأمر: ${cleanParentName}`, 'success');
   };
 
   // 3. Director or Teacher publishes Announcement
@@ -1257,7 +1345,11 @@ export default function App() {
   const saveGrade = (gradeData: Omit<Grade, 'id' | 'date'>) => {
     const id = 'g_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
     const date = new Date().toISOString().split('T')[0];
-    const newGrade: Grade = { ...gradeData, id, date };
+    const nowTs = Date.now();
+    const newGrade: Grade = { ...gradeData, id, date, updatedAt: nowTs };
+    if (gradeData.examName) {
+      unmarkDeletedEvaluationMonth(gradeData.examName);
+    }
 
     setGrades(prev => {
       const updated = [newGrade, ...prev];

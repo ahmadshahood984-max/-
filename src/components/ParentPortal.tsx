@@ -66,11 +66,14 @@ import {
   persistDirectToFirestore,
   filterOutDeletedMonthsFromSheets,
   getDeletedEvaluationMonthsMap,
+  getDeletedEntityIdsSet,
   isGradeMessageDeletedByMonth
 } from '../lib/firebaseSync';
 import {
   fetchConsolidatedStudentRecord,
-  isConsolidatedRecordConfirmedMissingOnServer
+  isConsolidatedRecordConfirmedMissingOnServer,
+  cacheConsolidatedRecordToVault,
+  removeConsolidatedRecordFromVault
 } from '../lib/studentGradesQuery';
 import { fetchSingleStudentByUnifiedNo } from '../lib/parentStudentQuery';
 import { isReadCacheFresh, markReadCacheFresh, needsInitialSessionServerSync } from '../lib/readCache';
@@ -510,7 +513,28 @@ export default function ParentPortal({
     );
   }, [messages, directMessages]);
 
+  const filterAndCleanSheets = React.useCallback(
+    (sheets: SentGradeSheet[], delMonthsMap: Record<string, number> = getDeletedEvaluationMonthsMap()): SentGradeSheet[] => {
+      const byMonthAndReport = filterOutDeletedMonthsFromSheets(sheets, delMonthsMap);
+      const deletedStudents = getDeletedEntityIdsSet('students');
+      if (deletedStudents.size === 0) return byMonthAndReport;
+      const out: SentGradeSheet[] = [];
+      for (const sh of byMonthAndReport) {
+        if (!sh || !Array.isArray(sh.studentsSummary)) continue;
+        const remaining = sh.studentsSummary.filter(sm => !deletedStudents.has(String(sm.studentId || '').trim()));
+        if (remaining.length === sh.studentsSummary.length) {
+          out.push(sh);
+        } else if (remaining.length > 0) {
+          out.push({ ...sh, studentCount: remaining.length, studentsSummary: remaining });
+        }
+      }
+      return out;
+    },
+    []
+  );
+
   const inFlightParentBundleRef = useRef<Map<string, Promise<void>>>(new Map());
+  const hadServerConsolidatedDocRef = useRef<Set<string>>(new Set());
 
   // Strict Single-Student On-Demand Fetch with 5-Minute TTL Cache:
   // Fetches ONLY this student's profile (`students/{id}` / `where unifiedNo == ...`)
@@ -533,11 +557,16 @@ export default function ParentPortal({
       return existingPromise;
     }
 
-    const shouldHitServer =
-      forceServer ||
-      needsInitialSessionServerSync(cacheKey) ||
-      !isReadCacheFresh(cacheKey);
-    const effectiveForceServer = isFirestoreReadQuotaExceeded() ? false : shouldHitServer;
+    const effectiveForceServer = isFirestoreReadQuotaExceeded() ? false : forceServer;
+    const hasCachedActiveChild = Boolean(
+      activeChild?.id &&
+      (!targetStudentId || String(activeChild.id).trim() === String(targetStudentId).trim()) &&
+      typeof localStorage !== 'undefined' &&
+      localStorage.getItem('parent_portal_active_student_obj') !== null
+    );
+    const hasCachedEvalMonth =
+      typeof localStorage !== 'undefined' &&
+      localStorage.getItem('school_evaluation_current_month') !== null;
 
     const runTask = (async () => {
     try {
@@ -548,9 +577,9 @@ export default function ParentPortal({
       const { trackFirestoreRead } = await import('../lib/firestoreTracker');
 
       const fetchEvalMonthOnce = async () => {
-        if (!db || (!effectiveForceServer && isReadCacheFresh('school_eval_month_doc'))) return null;
+        if (!db || (!effectiveForceServer && (hasCachedEvalMonth || isReadCacheFresh('school_eval_month_doc')))) return null;
         try {
-          const forceMonthServer = effectiveForceServer || needsInitialSessionServerSync('school_eval_month_doc');
+          const forceMonthServer = effectiveForceServer || (!hasCachedEvalMonth && needsInitialSessionServerSync('school_eval_month_doc'));
           const { snap, fromCache } = await getDocCacheFirst(
             doc(db, 'school_live_data', 'school_evaluation_current_month'),
             { forceServer: isFirestoreReadQuotaExceeded() ? false : forceMonthServer, timeoutMs: 2500 }
@@ -566,8 +595,9 @@ export default function ParentPortal({
         }
       };
 
+      const shouldLookupStudentDoc = Boolean(queryInput) && (effectiveForceServer || !hasCachedActiveChild);
       const [singleStudentRes, initialConsolidatedRec, monthSnap] = await Promise.all([
-        queryInput
+        shouldLookupStudentDoc
           ? fetchSingleStudentByUnifiedNo(queryInput, { forceServer: effectiveForceServer }).catch(() => ({ student: null, fromCache: true }))
           : Promise.resolve({ student: null, fromCache: true }),
         targetStudentId
@@ -641,9 +671,13 @@ export default function ParentPortal({
 
       const delMonthsMap = getDeletedEvaluationMonthsMap();
       setDeletedEvaluationMonths(delMonthsMap);
-      mergedSheetsAcc = filterOutDeletedMonthsFromSheets(mergedSheetsAcc, delMonthsMap);
+      mergedSheetsAcc = filterAndCleanSheets(mergedSheetsAcc, delMonthsMap);
 
       if (consolidatedRec) {
+        const recCid = String(consolidatedRec.studentId || resolvedStudentId || targetStudentId || '').trim();
+        if (recCid) {
+          hadServerConsolidatedDocRef.current.add(recCid);
+        }
         if (Array.isArray(consolidatedRec.approvedSheets)) {
           const approvedOnly = filterOutDeletedMonthsFromSheets(
             consolidatedRec.approvedSheets.filter(isApprovedSentSheet),
@@ -765,27 +799,34 @@ export default function ParentPortal({
           }
         }
       } else if (resolvedStudentId && isConsolidatedRecordConfirmedMissingOnServer(resolvedStudentId)) {
-        // Server confirmed no consolidated document exists for this student (e.g., Director deleted the sheet/month)
-        mergedSheetsAcc = pruneTargetStudentFromSheets(mergedSheetsAcc);
-        const noteTargetId = resolvedStudentId || targetStudentId;
-        if (noteTargetId) {
-          setMonthlyEvaluations(prev => {
-            const keysToClear = Object.keys(prev).filter(
-              k => k === noteTargetId || k.startsWith(`${noteTargetId}_`)
-            );
-            if (keysToClear.length === 0) return prev;
-            const updated = { ...prev };
-            keysToClear.forEach(k => delete updated[k]);
-            saveSyncedLocalOnly('school_monthly_evaluations', JSON.stringify(updated));
-            return updated;
-          });
+        // Only prune if the student was deleted or previously had a consolidated doc that was intentionally removed
+        const deletedStudents = getDeletedEntityIdsSet('students');
+        const cleanResolvedId = String(resolvedStudentId).trim();
+        const shouldPruneMissing =
+          deletedStudents.has(cleanResolvedId) ||
+          hadServerConsolidatedDocRef.current.has(cleanResolvedId);
+        if (shouldPruneMissing) {
+          mergedSheetsAcc = pruneTargetStudentFromSheets(mergedSheetsAcc);
+          const noteTargetId = resolvedStudentId || targetStudentId;
+          if (noteTargetId) {
+            setMonthlyEvaluations(prev => {
+              const keysToClear = Object.keys(prev).filter(
+                k => k === noteTargetId || k.startsWith(`${noteTargetId}_`)
+              );
+              if (keysToClear.length === 0) return prev;
+              const updated = { ...prev };
+              keysToClear.forEach(k => delete updated[k]);
+              saveSyncedLocalOnly('school_monthly_evaluations', JSON.stringify(updated));
+              return updated;
+            });
+          }
         }
       }
 
-      const deduped = filterOutDeletedMonthsFromSheets(deduplicateGradeSheets(mergedSheetsAcc), delMonthsMap);
+      const deduped = filterAndCleanSheets(deduplicateGradeSheets(mergedSheetsAcc), delMonthsMap);
       saveSyncedLocalOnly('school_sent_grade_sheets', JSON.stringify(deduped));
       setSentGradeSheets(prev => {
-        const preservedOtherSiblings = filterOutDeletedMonthsFromSheets(pruneTargetStudentFromSheets(prev), delMonthsMap);
+        const preservedOtherSiblings = filterAndCleanSheets(pruneTargetStudentFromSheets(prev), delMonthsMap);
         return deduplicateGradeSheets([...deduped, ...preservedOtherSiblings]);
       });
 
@@ -924,14 +965,23 @@ export default function ParentPortal({
         try {
           const parsed = JSON.parse(value);
           if (Array.isArray(parsed)) {
-            setSentGradeSheets(filterOutDeletedMonthsFromSheets(deduplicateGradeSheets(parsed)));
+            setSentGradeSheets(filterAndCleanSheets(deduplicateGradeSheets(parsed)));
           }
         } catch {}
+      } else if (key === 'school_deleted_records') {
+        const delMap = getDeletedEvaluationMonthsMap();
+        setSentGradeSheets(prev => {
+          const next = filterAndCleanSheets(prev, delMap);
+          if (next.length !== prev.length) {
+            saveSyncedLocalOnly('school_sent_grade_sheets', JSON.stringify(next));
+          }
+          return next;
+        });
       } else if (key === 'school_deleted_evaluation_months') {
         const delMap = getDeletedEvaluationMonthsMap();
         setDeletedEvaluationMonths(delMap);
         setSentGradeSheets(prev => {
-          const next = filterOutDeletedMonthsFromSheets(prev, delMap);
+          const next = filterAndCleanSheets(prev, delMap);
           saveSyncedLocalOnly('school_sent_grade_sheets', JSON.stringify(next));
           return next;
         });
@@ -940,7 +990,8 @@ export default function ParentPortal({
           let changed = false;
           for (const k of Object.keys(next)) {
             const m = String(next[k]?.month || '').trim() || (k.includes('_') ? k.slice(k.indexOf('_') + 1).trim() : '');
-            if (m && delMap[m]) {
+            const evalTs = Number((next[k] as any)?.updatedAt) || 0;
+            if (m && delMap[m] && (evalTs <= 0 || delMap[m] >= evalTs)) {
               delete next[k];
               changed = true;
             }
@@ -1039,28 +1090,34 @@ export default function ParentPortal({
           initialEvent = false;
 
           if (!snap.exists()) {
-            // Document deleted by Director — immediately clear this student's sent sheets & evaluations
-            setSentGradeSheets(prev => {
-              const filtered = pruneActiveChildFromSheets(prev);
-              saveSyncedLocalOnly('school_sent_grade_sheets', JSON.stringify(filtered));
-              return filtered;
-            });
-            setMonthlyEvaluations(prev => {
-              const keysToRemove = Object.keys(prev).filter(
-                k => k === cleanChildId || k.startsWith(`${cleanChildId}_`)
-              );
-              if (keysToRemove.length === 0) return prev;
-              const next = { ...prev };
-              keysToRemove.forEach(k => delete next[k]);
-              saveSyncedLocalOnly('school_monthly_evaluations', JSON.stringify(next));
-              return next;
-            });
+            // Only clear local sheets/evaluations if student was deleted or previously had a consolidated doc
+            const deletedStudents = getDeletedEntityIdsSet('students');
+            if (deletedStudents.has(cleanChildId) || hadServerConsolidatedDocRef.current.has(cleanChildId)) {
+              void removeConsolidatedRecordFromVault(cleanChildId);
+              setSentGradeSheets(prev => {
+                const filtered = pruneActiveChildFromSheets(prev);
+                saveSyncedLocalOnly('school_sent_grade_sheets', JSON.stringify(filtered));
+                return filtered;
+              });
+              setMonthlyEvaluations(prev => {
+                const keysToRemove = Object.keys(prev).filter(
+                  k => k === cleanChildId || k.startsWith(`${cleanChildId}_`)
+                );
+                if (keysToRemove.length === 0) return prev;
+                const next = { ...prev };
+                keysToRemove.forEach(k => delete next[k]);
+                saveSyncedLocalOnly('school_monthly_evaluations', JSON.stringify(next));
+                return next;
+              });
+            }
             return;
           }
 
+          hadServerConsolidatedDocRef.current.add(cleanChildId);
           const delMonthsMap = getDeletedEvaluationMonthsMap();
           const rec = snap.data() as any;
-          const approvedOnly: SentGradeSheet[] = filterOutDeletedMonthsFromSheets(
+          void cacheConsolidatedRecordToVault({ ...rec, studentId: rec.studentId || cleanChildId });
+          const approvedOnly: SentGradeSheet[] = filterAndCleanSheets(
             Array.isArray(rec.approvedSheets) ? rec.approvedSheets.filter(isApprovedSentSheet) : [],
             delMonthsMap
           );
@@ -1899,12 +1956,13 @@ ${url}
       const currentPerm = Notification.permission;
       setPushPermissionStatus(currentPerm);
 
-      // If already granted, register/update device token ONCE per session per parentId to avoid wasted writes on re-renders
-      const sessionSyncKey = `fcm_token_synced_${selectedParentId}`;
-      const alreadySynced = typeof sessionStorage !== 'undefined' && sessionStorage.getItem(sessionSyncKey) === '1';
-      if (currentPerm === 'granted' && selectedParentId && !alreadySynced && !isFirestoreQuotaExceeded()) {
-        if (typeof sessionStorage !== 'undefined') {
-          try { sessionStorage.setItem(sessionSyncKey, '1'); } catch {}
+      // If already granted, register/update device token at most once every 7 days per parentId to avoid wasted writes on every app reopen
+      const tokenSyncKey = `fcm_token_synced_ts_${selectedParentId}`;
+      const lastSyncedAt = Number(typeof localStorage !== 'undefined' ? localStorage.getItem(tokenSyncKey) : 0) || 0;
+      const alreadySyncedRecently = Date.now() - lastSyncedAt < 7 * 24 * 60 * 60 * 1000;
+      if (currentPerm === 'granted' && selectedParentId && !alreadySyncedRecently && !isFirestoreQuotaExceeded()) {
+        if (typeof localStorage !== 'undefined') {
+          try { localStorage.setItem(tokenSyncKey, String(Date.now())); } catch {}
         }
         (async () => {
           try {
@@ -1923,8 +1981,8 @@ ${url}
               trackFirestoreWrite(1, 'تحديث توكن الإشعارات');
             }
           } catch (e: any) {
-            if (typeof sessionStorage !== 'undefined') {
-              try { sessionStorage.removeItem(sessionSyncKey); } catch {}
+            if (typeof localStorage !== 'undefined') {
+              try { localStorage.removeItem(tokenSyncKey); } catch {}
             }
             if (isQuotaError(e)) {
               markFirestoreQuotaExceeded(e);
@@ -2139,12 +2197,9 @@ ${url}
       }
     };
 
-    const handleAppResumeNotifications = (ev: Event) => {
-      const detail = (ev as CustomEvent)?.detail;
+    const handleAppResumeNotifications = () => {
       if (!notifUnsub) {
         void attachRealtimeNotifications();
-      } else if (detail?.forceRefresh) {
-        void fetchNotificationsOnDemand(true);
       }
     };
 

@@ -10,6 +10,8 @@ import {
   getDocsFromCache,
   getDocsFromServer,
   onSnapshot,
+  query,
+  where,
   writeBatch,
   type QuerySnapshot
 } from 'firebase/firestore';
@@ -42,12 +44,19 @@ import {
   subscribeLiveRelayGradeReports
 } from './liveRelayClient';
 import { isReadCacheFresh, markReadCacheFresh, invalidateReadCache, needsInitialSessionServerSync } from './readCache';
-import { notifyCrossDeviceKeyChanged } from './firebaseSync';
+import {
+  filterOutDeletedMonthsFromSheets,
+  getDeletedRecordsMap,
+  isStudentOrParentPortal,
+  notifyCrossDeviceKeyChanged,
+  recordDeletedEntityIds
+} from './firebaseSync';
 import { getVaultItem, setVaultItem } from './offlineVault';
 
 export const GRADE_REPORTS_COLLECTION = 'grade_reports';
 const GRADE_REPORTS_CACHE_KEY = 'grade_reports:all';
 const GRADE_REPORTS_LOCAL_KEY = 'school_grade_reports_cache_v1';
+const GRADE_REPORTS_DELTA_SINCE_KEY = 'school_grade_reports_delta_since_v1';
 
 // Free ~1MB+ of browser 5MB localStorage by migrating duplicate grade_reports cache strictly to IndexedDB Vault
 try {
@@ -119,14 +128,15 @@ function mergeGradeReportLists(
   secondary: SentGradeSheet[]
 ): SentGradeSheet[] {
   const deletedIds = getDeletedRelayGradeReportIds();
+  const tombstoneReports = getDeletedRecordsMap().gradeReports || {};
   const map = new Map<string, SentGradeSheet & { updatedAt?: number }>();
 
   for (const list of [primary, secondary]) {
     for (const item of list) {
       if (!item || !item.id) continue;
       const itemTs = Number((item as any).updatedAt) || new Date(item.dateSent || 0).getTime() || 0;
-      const deletedTs = deletedIds.get(item.id) || 0;
-      if (deletedTs > itemTs) continue;
+      const deletedTs = Math.max(deletedIds.get(item.id) || 0, tombstoneReports[item.id] || 0);
+      if (deletedTs > 0 && deletedTs >= itemTs) continue;
 
       const existing = map.get(item.id);
       const existingTs = Number(existing?.updatedAt) || (existing ? new Date(existing.dateSent || 0).getTime() || 0 : 0);
@@ -136,8 +146,10 @@ function mergeGradeReportLists(
     }
   }
 
-  return Array.from(map.values()).sort(
-    (a, b) => (new Date(b.dateSent || 0).getTime() || 0) - (new Date(a.dateSent || 0).getTime() || 0)
+  return filterOutDeletedMonthsFromSheets(
+    Array.from(map.values()).sort(
+      (a, b) => (new Date(b.dateSent || 0).getTime() || 0) - (new Date(a.dateSent || 0).getTime() || 0)
+    )
   );
 }
 
@@ -288,6 +300,10 @@ export async function deleteGradeReportFromFirestore(reportId: string): Promise<
   saveCachedGradeReportsToLocal(remainingCached);
   invalidateReadCache(GRADE_REPORTS_CACHE_KEY);
 
+  if (!isStudentOrParentPortal()) {
+    recordDeletedEntityIds('gradeReports', [reportId]).catch(() => false);
+  }
+
   if (!db) {
     await relayPromise;
     return;
@@ -329,6 +345,9 @@ export async function deleteGradeReportsBulkFromFirestore(reportIds: string[]): 
   const remainingCached = loadCachedGradeReportsFromLocal().filter((r) => r && !idSet.has(r.id));
   saveCachedGradeReportsToLocal(remainingCached);
   invalidateReadCache(GRADE_REPORTS_CACHE_KEY);
+  if (!isStudentOrParentPortal()) {
+    recordDeletedEntityIds('gradeReports', cleanIds).catch(() => false);
+  }
 
   const relayPromise = Promise.allSettled(cleanIds.map((id) => deleteLiveRelayGradeReport(id)));
 
@@ -378,6 +397,8 @@ export async function deleteGradeReportsBulkFromFirestore(reportIds: string[]): 
 
 export function clearAllGradeReportsLocalCache(): void {
   saveCachedGradeReportsToLocal([]);
+  gradeReportsDeltaSince = 0;
+  setVaultItem(GRADE_REPORTS_DELTA_SINCE_KEY, '0').catch(() => {});
   invalidateReadCache(GRADE_REPORTS_CACHE_KEY);
 }
 
@@ -399,33 +420,62 @@ function mapSnapshotToGradeReports(snap: QuerySnapshot): SentGradeSheet[] {
 
 let activeGradeReportsFetchPromise: Promise<SentGradeSheet[]> | null = null;
 let lastGradeReportsFetchResult: SentGradeSheet[] | null = null;
-let vaultCacheHydrated = false;
+let gradeReportsDeltaSince = 0;
+let vaultHydrationPromise: Promise<void> | null = null;
 
-function hydrateGradeReportsCacheFromVault(): void {
-  if (vaultCacheHydrated) return;
-  vaultCacheHydrated = true;
-  getVaultItem(GRADE_REPORTS_LOCAL_KEY)
-    .then((raw) => {
-      if (!raw) return;
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0 && (!lastGradeReportsFetchResult || lastGradeReportsFetchResult.length === 0)) {
-        lastGradeReportsFetchResult = parsed;
-      }
-    })
-    .catch(() => {});
+function advanceGradeReportsDeltaSince(list: SentGradeSheet[]): void {
+  let maxTs = gradeReportsDeltaSince;
+  for (const item of list) {
+    const ts = Number((item as any)?.updatedAt) || 0;
+    if (ts > maxTs) maxTs = ts;
+  }
+  if (maxTs > gradeReportsDeltaSince) {
+    gradeReportsDeltaSince = maxTs;
+    setVaultItem(GRADE_REPORTS_DELTA_SINCE_KEY, String(maxTs)).catch(() => {});
+  }
 }
 
-hydrateGradeReportsCacheFromVault();
+async function ensureGradeReportsVaultHydrated(): Promise<void> {
+  if (!vaultHydrationPromise) {
+    vaultHydrationPromise = Promise.all([
+      getVaultItem(GRADE_REPORTS_LOCAL_KEY).catch(() => null),
+      getVaultItem(GRADE_REPORTS_DELTA_SINCE_KEY).catch(() => null)
+    ])
+      .then(([rawList, rawDelta]) => {
+        const deltaNum = Number(rawDelta) || 0;
+        if (deltaNum > gradeReportsDeltaSince) {
+          gradeReportsDeltaSince = deltaNum;
+        }
+        if (rawList) {
+          try {
+            const parsed = JSON.parse(rawList);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              const cleaned = mergeGradeReportLists(parsed, lastGradeReportsFetchResult || []);
+              lastGradeReportsFetchResult = cleaned;
+              if (gradeReportsDeltaSince === 0) {
+                advanceGradeReportsDeltaSince(cleaned);
+              }
+            }
+          } catch {}
+        }
+      })
+      .catch(() => {});
+  }
+  return vaultHydrationPromise;
+}
+
+void ensureGradeReportsVaultHydrated();
 
 function loadCachedGradeReportsFromLocal(): SentGradeSheet[] {
   if (lastGradeReportsFetchResult && lastGradeReportsFetchResult.length > 0) {
-    return lastGradeReportsFetchResult;
+    return mergeGradeReportLists(lastGradeReportsFetchResult, []);
   }
   return [];
 }
 
 function saveCachedGradeReportsToLocal(list: SentGradeSheet[]): void {
   lastGradeReportsFetchResult = list;
+  advanceGradeReportsDeltaSince(list);
   try {
     setVaultItem(GRADE_REPORTS_LOCAL_KEY, JSON.stringify(list)).catch(() => {});
   } catch {}
@@ -525,6 +575,7 @@ export async function fetchGradeReportsFromFirestore(options?: { force?: boolean
 /**
  * Subscribes to grade report updates via real-time Firestore `onSnapshot` on `grade_reports`
  * combined with Live Relay SSE so Teacher <-> Director grade sheets sync immediately across PC and Phone APK.
+ * Uses IndexedDB Vault cache + `where('updatedAt', '>', deltaSince)` so app reopen reads ONLY new/changed sheets.
  */
 export function subscribeGradeReportsRealtime(
   onReports: (reports: SentGradeSheet[]) => void,
@@ -569,10 +620,15 @@ export function subscribeGradeReportsRealtime(
   const attachFirestoreListener = () => {
     if (disposed || unsubFirestore || !db || isFirestoreReadQuotaExceeded()) return;
     let isInitialSnap = true;
+    const useDeltaQuery = gradeReportsDeltaSince > 0 && latestFirestoreReports.length > 0;
     try {
       const colRef = collection(db, GRADE_REPORTS_COLLECTION);
+      const listenTarget = useDeltaQuery
+        ? query(colRef, where('updatedAt', '>', Math.max(0, gradeReportsDeltaSince - 15000)))
+        : colRef;
+
       unsubFirestore = onSnapshot(
-        colRef,
+        listenTarget,
         (snap) => {
           if (disposed) return;
           const fromCache = !!snap.metadata?.fromCache;
@@ -589,7 +645,10 @@ export function subscribeGradeReportsRealtime(
           if (!fromCache) {
             if (isInitialSnap) {
               if (snap.size > 0) {
-                trackFirestoreRead(snap.size, 'مزامنة مبدئية لكشوفات الدرجات');
+                trackFirestoreRead(
+                  snap.size,
+                  useDeltaQuery ? `جلب كشوفات جديدة فقط (${snap.size})` : 'مزامنة مبدئية لكشوفات الدرجات'
+                );
               }
             } else {
               const serverChanges = snap.docChanges().filter(
@@ -604,7 +663,10 @@ export function subscribeGradeReportsRealtime(
           const wasInitial = isInitialSnap;
           isInitialSnap = false;
 
-          latestFirestoreReports = mapSnapshotToGradeReports(snap);
+          const incomingReports = mapSnapshotToGradeReports(snap);
+          latestFirestoreReports = useDeltaQuery
+            ? mergeGradeReportLists(incomingReports, latestFirestoreReports)
+            : mergeGradeReportLists(incomingReports, []);
           const merged = mergeGradeReportLists(latestFirestoreReports, latestRelayReports);
           saveCachedGradeReportsToLocal(merged);
           emitCombined(!wasInitial || removedIds.length > 0 || !fromCache);
@@ -639,11 +701,19 @@ export function subscribeGradeReportsRealtime(
     }
   };
 
-  if (db && !isFirestoreReadQuotaExceeded()) {
-    attachFirestoreListener();
-  } else {
-    triggerReportsFetch(false);
-  }
+  ensureGradeReportsVaultHydrated().then(() => {
+    if (disposed) return;
+    const vaultCached = loadCachedGradeReportsFromLocal();
+    if (vaultCached.length > 0) {
+      latestFirestoreReports = mergeGradeReportLists(vaultCached, latestFirestoreReports);
+      emitCombined(false);
+    }
+    if (db && !isFirestoreReadQuotaExceeded()) {
+      attachFirestoreListener();
+    } else {
+      triggerReportsFetch(false);
+    }
+  });
 
   const handleReportsPulse = () => {
     triggerReportsFetch(true);
@@ -652,15 +722,27 @@ export function subscribeGradeReportsRealtime(
     const force = Boolean((evt as CustomEvent<{ forceRefresh?: boolean }>)?.detail?.forceRefresh);
     if (!unsubFirestore) {
       attachFirestoreListener();
+      if (!unsubFirestore && force) {
+        triggerReportsFetch(true);
+      }
     }
-    if (force) {
-      triggerReportsFetch(true);
+  };
+  const handleStorageTombstoneSync = (evt: Event) => {
+    const key = (evt as CustomEvent<{ key?: string }>)?.detail?.key;
+    if (key === 'school_deleted_records' || key === 'school_deleted_evaluation_months') {
+      const pruned = mergeGradeReportLists(latestFirestoreReports, []);
+      if (pruned.length !== latestFirestoreReports.length) {
+        latestFirestoreReports = pruned;
+        saveCachedGradeReportsToLocal(mergeGradeReportLists(pruned, latestRelayReports));
+        emitCombined(true);
+      }
     }
   };
 
   if (typeof window !== 'undefined') {
     window.addEventListener('school_grade_reports_pulse', handleReportsPulse);
     window.addEventListener('school_app_resumed', handleAppResumed);
+    window.addEventListener('school_storage_update', handleStorageTombstoneSync);
   }
 
   return () => {
@@ -679,6 +761,7 @@ export function subscribeGradeReportsRealtime(
     if (typeof window !== 'undefined') {
       window.removeEventListener('school_grade_reports_pulse', handleReportsPulse);
       window.removeEventListener('school_app_resumed', handleAppResumed);
+      window.removeEventListener('school_storage_update', handleStorageTombstoneSync);
     }
   };
 }

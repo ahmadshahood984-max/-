@@ -178,7 +178,17 @@ export async function fetchLiveRelaySnapshot(): Promise<LiveRelaySnapshot | null
     ) as Record<string, number>;
 
     if (keyUpdateHandler) {
-      for (const [key, rec] of Object.entries(keys)) {
+      const priorityOrder: Record<string, number> = {
+        school_deleted_records: 0,
+        school_deleted_evaluation_months: 1,
+        school_evaluation_current_month: 2,
+        school_evaluation_saved_months: 3,
+        school_saved_evaluation_months: 4
+      };
+      const sortedEntries = Object.entries(keys).sort(
+        ([a], [b]) => (priorityOrder[a] ?? 10) - (priorityOrder[b] ?? 10)
+      );
+      for (const [key, rec] of sortedEntries) {
         if (rec && typeof rec.value === 'string') {
           keyUpdateHandler({
             key,

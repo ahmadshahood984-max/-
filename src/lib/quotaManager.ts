@@ -145,6 +145,9 @@ export function isFirestoreWriteQuotaExceeded(): boolean {
       sessionStorage.removeItem(WRITE_DATE_KEY);
       sessionStorage.removeItem(WRITE_REASON_KEY);
     } catch {}
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('firestore_quota_status_changed', { detail: { exceeded: false } }));
+    }
   });
 }
 
