@@ -67,8 +67,10 @@ import {
   filterOutDeletedMonthsFromSheets,
   getDeletedEvaluationMonthsMap,
   getDeletedEntityIdsSet,
-  isGradeMessageDeletedByMonth
+  isGradeMessageDeletedByMonth,
+  syncLivePortalDataFromServer
 } from '../lib/firebaseSync';
+import { getEstimationFromAverage, matchSubjectName } from '../lib/gradeSplitUtils';
 import {
   fetchConsolidatedStudentRecord,
   isConsolidatedRecordConfirmedMissingOnServer,
@@ -535,6 +537,7 @@ export default function ParentPortal({
 
   const inFlightParentBundleRef = useRef<Map<string, Promise<void>>>(new Map());
   const hadServerConsolidatedDocRef = useRef<Set<string>>(new Set());
+  const resolvedConsolidatedDocIdRef = useRef<Map<string, string>>(new Map());
 
   // Strict Single-Student On-Demand Fetch with 5-Minute TTL Cache:
   // Fetches ONLY this student's profile (`students/{id}` / `where unifiedNo == ...`)
@@ -568,6 +571,27 @@ export default function ParentPortal({
       typeof localStorage !== 'undefined' &&
       localStorage.getItem('school_evaluation_current_month') !== null;
 
+    const PUBLIC_GRADING_CONFIG_KEYS = [
+      'school_evaluation_current_month',
+      'school_custom_subjects',
+      'school_max_grade_setting',
+      'school_custom_max_grade',
+      'school_pass_grade_setting',
+      'school_custom_pass_grade',
+      'school_blocked_grades',
+      'school_deleted_evaluation_months',
+      'school_seal_and_signatures_config'
+    ];
+    const missingPublicGradingConfig =
+      typeof localStorage !== 'undefined' &&
+      [
+        'school_evaluation_current_month',
+        'school_custom_subjects',
+        'school_max_grade_setting',
+        'school_blocked_grades',
+        'school_deleted_evaluation_months'
+      ].some(k => localStorage.getItem(k) === null);
+
     const runTask = (async () => {
     try {
       const queryInput = targetUnifiedNo || targetStudentId;
@@ -596,6 +620,7 @@ export default function ParentPortal({
       };
 
       const shouldLookupStudentDoc = Boolean(queryInput) && (effectiveForceServer || !hasCachedActiveChild);
+      const shouldSyncPublicConfig = effectiveForceServer || missingPublicGradingConfig;
       const [singleStudentRes, initialConsolidatedRec, monthSnap] = await Promise.all([
         shouldLookupStudentDoc
           ? fetchSingleStudentByUnifiedNo(queryInput, { forceServer: effectiveForceServer }).catch(() => ({ student: null, fromCache: true }))
@@ -603,7 +628,13 @@ export default function ParentPortal({
         targetStudentId
           ? fetchConsolidatedStudentRecord(targetStudentId, targetUnifiedNo, effectiveForceServer).catch(() => null)
           : Promise.resolve(null),
-        fetchEvalMonthOnce()
+        shouldSyncPublicConfig
+          ? syncLivePortalDataFromServer({
+              keys: PUBLIC_GRADING_CONFIG_KEYS,
+              forceServer: effectiveForceServer,
+              bypassCache: effectiveForceServer
+            }).then(() => null).catch(() => null)
+          : fetchEvalMonthOnce()
       ]);
 
       let consolidatedRec = initialConsolidatedRec;
@@ -677,6 +708,12 @@ export default function ParentPortal({
         const recCid = String(consolidatedRec.studentId || resolvedStudentId || targetStudentId || '').trim();
         if (recCid) {
           hadServerConsolidatedDocRef.current.add(recCid);
+          if (targetStudentId) {
+            resolvedConsolidatedDocIdRef.current.set(String(targetStudentId).trim(), recCid);
+          }
+          if (resolvedStudentId) {
+            resolvedConsolidatedDocIdRef.current.set(String(resolvedStudentId).trim(), recCid);
+          }
         }
         if (Array.isArray(consolidatedRec.approvedSheets)) {
           const approvedOnly = filterOutDeletedMonthsFromSheets(
@@ -1072,6 +1109,8 @@ export default function ParentPortal({
       return out;
     };
 
+    let triedUnifiedFallback = false;
+
     const attachChildGradeListener = async () => {
       if (disposed || unsub || isFirestoreReadQuotaExceeded()) return;
       try {
@@ -1079,21 +1118,49 @@ export default function ParentPortal({
         const { db } = await import('../lib/firebase');
         if (!db || disposed || unsub) return;
 
+        const listenerDocId = resolvedConsolidatedDocIdRef.current.get(cleanChildId) || cleanChildId;
         let initialEvent = true;
-        unsub = onSnapshot(doc(db, 'students_grades', cleanChildId), (snap) => {
+        unsub = onSnapshot(doc(db, 'students_grades', listenerDocId), (snap) => {
           if (disposed || snap.metadata.fromCache) return;
           if (!initialEvent) {
             import('../lib/firestoreTracker')
-              .then(({ trackFirestoreRead }) => trackFirestoreRead(1, `تحديث تلقائي للطالب (${cleanChildId})`))
+              .then(({ trackFirestoreRead }) => trackFirestoreRead(1, `تحديث تلقائي للطالب (${listenerDocId})`))
               .catch(() => {});
           }
           initialEvent = false;
 
           if (!snap.exists()) {
+            const unifiedFallbackInput = String(activeChild?.unifiedNo || activeChild?.rollNo || '').trim();
+            if (!triedUnifiedFallback && unifiedFallbackInput && listenerDocId === cleanChildId) {
+              triedUnifiedFallback = true;
+              fetchConsolidatedStudentRecord(cleanChildId, unifiedFallbackInput, false)
+                .then((fallbackRec) => {
+                  const fallbackDocId = String(fallbackRec?.studentId || '').trim();
+                  if (fallbackDocId && fallbackDocId !== listenerDocId && !disposed) {
+                    resolvedConsolidatedDocIdRef.current.set(cleanChildId, fallbackDocId);
+                    if (unsub) {
+                      try { unsub(); } catch {}
+                      unsub = undefined;
+                    }
+                    void attachChildGradeListener();
+                  }
+                })
+                .catch(() => {});
+              return;
+            }
+
             // Only clear local sheets/evaluations if student was deleted or previously had a consolidated doc
             const deletedStudents = getDeletedEntityIdsSet('students');
-            if (deletedStudents.has(cleanChildId) || hadServerConsolidatedDocRef.current.has(cleanChildId)) {
-              void removeConsolidatedRecordFromVault(cleanChildId);
+            if (
+              deletedStudents.has(cleanChildId) ||
+              deletedStudents.has(listenerDocId) ||
+              hadServerConsolidatedDocRef.current.has(listenerDocId) ||
+              hadServerConsolidatedDocRef.current.has(cleanChildId)
+            ) {
+              void removeConsolidatedRecordFromVault(listenerDocId);
+              if (listenerDocId !== cleanChildId) {
+                void removeConsolidatedRecordFromVault(cleanChildId);
+              }
               setSentGradeSheets(prev => {
                 const filtered = pruneActiveChildFromSheets(prev);
                 saveSyncedLocalOnly('school_sent_grade_sheets', JSON.stringify(filtered));
@@ -1113,10 +1180,12 @@ export default function ParentPortal({
             return;
           }
 
+          const rec = snap.data() as any;
+          const activeRecId = String(rec.studentId || listenerDocId || cleanChildId).trim();
+          hadServerConsolidatedDocRef.current.add(activeRecId);
           hadServerConsolidatedDocRef.current.add(cleanChildId);
           const delMonthsMap = getDeletedEvaluationMonthsMap();
-          const rec = snap.data() as any;
-          void cacheConsolidatedRecordToVault({ ...rec, studentId: rec.studentId || cleanChildId });
+          void cacheConsolidatedRecordToVault({ ...rec, studentId: activeRecId });
           const approvedOnly: SentGradeSheet[] = filterAndCleanSheets(
             Array.isArray(rec.approvedSheets) ? rec.approvedSheets.filter(isApprovedSentSheet) : [],
             delMonthsMap
@@ -4320,14 +4389,18 @@ ${url}
 
 
 
-                  {blockedGrades[selectedChildId]?.blocked ? (
+                  {(blockedGrades[selectedChildId] ||
+                    (activeChild?.unifiedNo ? blockedGrades[activeChild.unifiedNo] : undefined) ||
+                    (activeChild?.rollNo ? blockedGrades[activeChild.rollNo] : undefined))?.blocked ? (
                     <div className="bg-rose-50 border border-rose-100 p-8 rounded-3xl shadow-xs text-center space-y-4 max-w-2xl mx-auto">
                       <div className="w-16 h-16 bg-rose-500 rounded-2xl text-white shadow-md flex items-center justify-center mx-auto">
                         <ShieldAlert className="w-8 h-8" />
                       </div>
                       <h3 className="text-base font-bold text-rose-800">تنبيه من إدارة المدرسة: حجب كشف العلامات</h3>
                       <p className="text-slate-700 text-xs font-semibold leading-relaxed max-w-md mx-auto bg-white/85 p-4 rounded-xl border border-rose-100/60 shadow-2xs">
-                        {blockedGrades[selectedChildId]?.reason || 'حجبت العلامات لعدم دفع القسط المالي'}
+                        {(blockedGrades[selectedChildId] ||
+                          (activeChild?.unifiedNo ? blockedGrades[activeChild.unifiedNo] : undefined) ||
+                          (activeChild?.rollNo ? blockedGrades[activeChild.rollNo] : undefined))?.reason || 'حجبت العلامات لعدم دفع القسط المالي'}
                       </p>
                       <div className="text-[10px] text-slate-400 pt-2 border-t border-rose-100/50">
                         الرجاء التواصل مع إدارة الحسابات والمالية بالمدرسة لتسوية المستحقات وتنشيط الكشف فوراً.
@@ -4368,87 +4441,7 @@ ${url}
                           return false;
                         };
 
-                        const isEnglishSubject = (s: string): boolean => {
-                          const norm = (s || '').trim().toLowerCase().replace(/[أإآ]/g, 'ا').replace(/ة$/, 'ه');
-                          return norm.includes('انكليز') || 
-                                 norm.includes('انجليز') || 
-                                 norm.includes('اجنبي') || 
-                                 norm.includes('english') || 
-                                 norm === 'لغه' || 
-                                 norm === 'اللغه' || 
-                                 norm === 'لغة' || 
-                                 norm === 'اللغة';
-                        };
-
-                        const isArabicSubject = (s: string): boolean => {
-                          const norm = (s || '').trim().toLowerCase().replace(/[أإآ]/g, 'ا').replace(/ة$/, 'ه');
-                          return norm.includes('عرب') || norm === 'لغه عربيه' || norm === 'اللغه العربيه';
-                        };
-
-                        const isMathSubject = (s: string): boolean => {
-                          const norm = (s || '').trim().toLowerCase().replace(/[أإآ]/g, 'ا').replace(/ة$/, 'ه');
-                          return norm.includes('رياض') || norm.includes('حساب');
-                        };
-
-                        const isScienceSubject = (s: string): boolean => {
-                          const norm = (s || '').trim().toLowerCase().replace(/[أإآ]/g, 'ا').replace(/ة$/, 'ه');
-                          return norm.includes('علوم') || norm.includes('فيزيا') || norm.includes('كيميا') || norm.includes('احيا');
-                        };
-
-                        const isReligionSubject = (s: string): boolean => {
-                          const norm = (s || '').trim().toLowerCase().replace(/[أإآ]/g, 'ا').replace(/ة$/, 'ه');
-                          return norm.includes('اسلام') || norm.includes('ديان') || norm.includes('دين') || norm.includes('فقه') || norm.includes('توحيد') || norm.includes('قران');
-                        };
-
-                        const isSocialSubject = (s: string): boolean => {
-                          const norm = (s || '').trim().toLowerCase().replace(/[أإآ]/g, 'ا').replace(/ة$/, 'ه');
-                          return norm.includes('اجتماع') || norm.includes('تاريخ') || norm.includes('جغرافي') || norm.includes('وطني');
-                        };
-
-                        const normalizeSubject = (str: string): string => {
-                          return (str || '')
-                            .trim()
-                            .toLowerCase()
-                            .replace(/^ال/, '')
-                            .replace(/^تربية\s+/, '')
-                            .replace(/^لغة\s+/, '')
-                            .replace(/ة$/, 'ه')
-                            .replace(/[أإآ]/g, 'ا')
-                            .replace(/\s+/g, '');
-                        };
-
-                        const matchSubject = (a: string, b: string): boolean => {
-                          if (!a || !b) return false;
-                          if (a.trim() === b.trim()) return true;
-
-                          // 1. English / Foreign language matching (e.g. 'لغة' <-> 'اللغة الإنجليزية')
-                          if (isEnglishSubject(a) && isEnglishSubject(b)) return true;
-                          // If one is explicitly Arabic and the other is English, they MUST NOT match!
-                          if ((isArabicSubject(a) && isEnglishSubject(b)) || (isEnglishSubject(a) && isArabicSubject(b))) return false;
-
-                          // 2. Arabic language matching (e.g. 'العربي' <-> 'اللغة العربية')
-                          if (isArabicSubject(a) && isArabicSubject(b)) return true;
-
-                          // 3. Math matching ('رياضيات' <-> 'الرياضيات')
-                          if (isMathSubject(a) && isMathSubject(b)) return true;
-
-                          // 4. Science matching ('علوم' <-> 'العلوم')
-                          if (isScienceSubject(a) && isScienceSubject(b)) return true;
-
-                          // 5. Islamic Studies / Religion matching ('اسلامية' <-> 'التربية الإسلامية')
-                          if (isReligionSubject(a) && isReligionSubject(b)) return true;
-
-                          // 6. Social studies matching ('اجتماعيات' <-> 'الاجتماعيات')
-                          if (isSocialSubject(a) && isSocialSubject(b)) return true;
-
-                          // 7. General fallback normalized substring match
-                          const na = normalizeSubject(a);
-                          const nb = normalizeSubject(b);
-                          if (na === nb) return true;
-                          if (na.length >= 3 && nb.length >= 3 && (na.includes(nb) || nb.includes(na))) return true;
-
-                          return false;
-                        };
+                        const matchSubject = matchSubjectName;
 
                         // 1. Get ONLY Director-approved certified grade sheets for this student (preferring class-specific over any legacy cohort sheet)
                         const rawApprovedForStudent = filterOutDeletedMonthsFromSheets(sentGradeSheets, deletedEvaluationMonths).filter(sheet =>
@@ -4597,25 +4590,44 @@ ${url}
                           }
                         }
 
+                        const newestSheetTs = sheetsForMonth.reduce((maxTs, sh) => {
+                          const ts = sh?.dateSent ? new Date(sh.dateSent).getTime() : 0;
+                          return ts > maxTs ? ts : maxTs;
+                        }, 0);
+
                         let totalScore = 0;
                         let scoredCount = 0;
                         const gradeValues = combinedSubjects.map(sub => {
-                          const subGrade = studentGrades.find(g => matchSubject(g.subject, sub) && g.score !== null && g.score !== undefined);
-                          let finalScore: number | null = null;
-                          if (subGrade && subGrade.score !== null && subGrade.score !== undefined) {
-                            finalScore = subGrade.score;
-                          } else {
-                            for (const sum of summariesForMonth) {
-                              if (!sum || !Array.isArray(sum.scores)) continue;
-                              const sentSub = sum.scores.find(sc => matchSubject(sc.subject, sub) && sc.score !== null && sc.score !== undefined);
-                              if (sentSub && sentSub.score !== null && sentSub.score !== undefined) {
-                                finalScore = Number(sentSub.score);
-                                break;
-                              }
+                          const subTrim = sub.trim();
+                          const subGrade =
+                            studentGrades.find(g => String(g.subject || '').trim() === subTrim && g.score !== null && g.score !== undefined) ||
+                            studentGrades.find(g => matchSubject(g.subject, sub) && g.score !== null && g.score !== undefined);
+
+                          let sheetScore: number | null = null;
+                          for (const sum of summariesForMonth) {
+                            if (!sum || !Array.isArray(sum.scores)) continue;
+                            const sentSub =
+                              sum.scores.find(sc => String(sc.subject || '').trim() === subTrim && sc.score !== null && sc.score !== undefined) ||
+                              sum.scores.find(sc => matchSubject(sc.subject, sub) && sc.score !== null && sc.score !== undefined);
+                            if (sentSub && sentSub.score !== null && sentSub.score !== undefined) {
+                              sheetScore = Number(sentSub.score);
+                              break;
                             }
                           }
+
+                          let finalScore: number | null = null;
+                          const localGradeTs = Number(subGrade?.updatedAt) || 0;
+                          if (sheetScore !== null && (!subGrade || localGradeTs <= newestSheetTs + 5000)) {
+                            finalScore = sheetScore;
+                          } else if (subGrade && subGrade.score !== null && subGrade.score !== undefined) {
+                            finalScore = subGrade.score;
+                          } else if (sheetScore !== null) {
+                            finalScore = sheetScore;
+                          }
                           if (finalScore === null) {
-                            const msgMatchKey = Object.keys(messageGradesMap).find(k => matchSubject(k, sub));
+                            const msgMatchKey =
+                              Object.keys(messageGradesMap).find(k => k.trim() === subTrim) ||
+                              Object.keys(messageGradesMap).find(k => matchSubject(k, sub));
                             if (msgMatchKey && messageGradesMap[msgMatchKey] !== undefined) {
                               finalScore = messageGradesMap[msgMatchKey];
                             }
@@ -4640,21 +4652,19 @@ ${url}
                         let badgeColor = 'bg-slate-100 text-slate-700';
                         if (avg !== null) {
                           const avgNum = parseFloat(avg);
-                          if (avgNum > 90) {
-                            estimation = 'ممتاز 🌟';
-                            badgeColor = 'bg-emerald-50 text-emerald-800 border-emerald-200';
-                          } else if (avgNum > 80) {
-                            estimation = 'جيد جداً 🎈';
-                            badgeColor = 'bg-teal-50 text-teal-800 border-teal-200';
-                          } else if (avgNum > 60) {
-                            estimation = 'جيد 👍';
-                            badgeColor = 'bg-blue-50 text-blue-800 border-blue-200';
-                          } else if (avgNum > 40) {
-                            estimation = 'وسط 🟢';
-                            badgeColor = 'bg-amber-50 text-amber-800 border-amber-200';
-                          } else {
-                            estimation = 'ضعيف 🔴';
-                            badgeColor = 'bg-rose-50 text-rose-800 border-rose-200';
+                          if (!Number.isNaN(avgNum)) {
+                            estimation = getEstimationFromAverage(avgNum).cardLabel;
+                            if (avgNum > 90) {
+                              badgeColor = 'bg-emerald-50 text-emerald-800 border-emerald-200';
+                            } else if (avgNum > 80) {
+                              badgeColor = 'bg-teal-50 text-teal-800 border-teal-200';
+                            } else if (avgNum > 60) {
+                              badgeColor = 'bg-blue-50 text-blue-800 border-blue-200';
+                            } else if (avgNum > 40) {
+                              badgeColor = 'bg-amber-50 text-amber-800 border-amber-200';
+                            } else {
+                              badgeColor = 'bg-rose-50 text-rose-800 border-rose-200';
+                            }
                           }
                         } else if (sentStudentSummary?.estimation) {
                           estimation = sentStudentSummary.estimation;

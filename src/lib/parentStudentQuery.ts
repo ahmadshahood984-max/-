@@ -406,7 +406,7 @@ export async function fetchSingleStudentByUnifiedNo(
   const colRef = collection(db, STUDENTS_COLLECTION);
 
   const runSingleMatchQuery = async (field: string): Promise<{ student: Student | null; fromCache: boolean }> => {
-    const q = query(colRef, where(field, 'in', variants), limit(1));
+    const q = query(colRef, where(field, 'in', variants), limit(5));
     const { snap, fromCache } = await getDocsCacheFirst(q, {
       forceServer,
       timeoutMs: 3500
@@ -415,10 +415,20 @@ export async function fetchSingleStudentByUnifiedNo(
       trackFirestoreRead(Math.max(1, snap.size), `جلب مستند طالب (${clean})`);
     }
     if (snap && !snap.empty) {
-      const docSnap = snap.docs[0];
-      const data = docSnap.data() as Student & { className?: string; teacherName?: string };
+      const candidates = snap.docs.map((docSnap) => {
+        const data = docSnap.data() as Student & { className?: string; teacherName?: string; updatedAt?: number };
+        return { ...data, id: data.id || docSnap.id };
+      });
+      candidates.sort((a, b) => {
+        const aTime = Number((a as any).updatedAt) || 0;
+        const bTime = Number((b as any).updatedAt) || 0;
+        if (bTime !== aTime) return bTime - aTime;
+        const aClass = a.classId ? 1 : 0;
+        const bClass = b.classId ? 1 : 0;
+        return bClass - aClass;
+      });
       return {
-        student: { ...data, id: data.id || docSnap.id },
+        student: candidates[0],
         fromCache
       };
     }

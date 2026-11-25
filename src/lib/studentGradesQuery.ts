@@ -3,12 +3,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { commitFirestoreBatchViaRest, commitFirestoreDeletesViaRest, db, deleteFirestoreDocFast, getDocCacheFirst, writeFirestoreDocFast } from './firebase';
+import { commitFirestoreBatchViaRest, commitFirestoreDeletesViaRest, db, deleteFirestoreDocFast, getDocCacheFirst, getDocsCacheFirst, writeFirestoreDocFast } from './firebase';
 import { 
   collection,
   doc, 
   getDocs,
+  limit,
+  query,
   setDoc, 
+  where,
   writeBatch
 } from 'firebase/firestore';
 import { Grade, SentGradeSheet } from '../types';
@@ -22,6 +25,7 @@ import {
 } from './quotaManager';
 import { enqueuePendingGradeBatch, getPendingGradeBatches, removePendingGradeBatch, removePendingGradeBatchesForStudents, clearPendingGradeBatches, getVaultItem, setVaultItem, removeVaultItem } from './offlineVault';
 import { isReadCacheFresh, markReadCacheFresh, invalidateReadCache } from './readCache';
+import { getEstimationFromAverage } from './gradeSplitUtils';
 
 /**
  * Interface for Consolidated Single-Document Student Grades
@@ -34,6 +38,7 @@ export interface ConsolidatedStudentGradeRecord {
   classId?: string;
   className?: string;
   unifiedNo?: string;
+  unifiedNoNormalized?: string;
   rollNo?: string;
   term?: string;
   evaluationMonth?: string;
@@ -65,8 +70,18 @@ function normalizeId(id: string | number | undefined | null): string {
   return String(id).trim();
 }
 
+function normalizeDigits(val: unknown): string {
+  if (val === undefined || val === null) return '';
+  return String(val)
+    .replace(/[٠-٩]/g, (d) => '٠١٢٣٤٥٦٧٨٩'.indexOf(d).toString())
+    .replace(/[^\d]/g, '')
+    .trim();
+}
+
 /**
- * Calculates total, max, percentage, and qualitative estimation from a subjects map
+ * Calculates total, max, percentage, and qualitative estimation from a subjects map.
+ * Only subjects with a valid numeric score contribute to totalScore & maxTotalScore,
+ * matching DirectorPortal & ParentPortal average calculation exactly.
  */
 export function calculateGradesSummary(subjectsMap: ConsolidatedStudentGradeRecord['subjects']): {
   totalScore: number;
@@ -76,20 +91,18 @@ export function calculateGradesSummary(subjectsMap: ConsolidatedStudentGradeReco
 } {
   let total = 0;
   let maxTotal = 0;
+  let scoredCount = 0;
 
   Object.values(subjectsMap || {}).forEach(sub => {
-    if (sub && sub.score !== null && !isNaN(Number(sub.score))) {
+    if (sub && sub.score !== null && sub.score !== undefined && !isNaN(Number(sub.score))) {
       total += Number(sub.score);
+      maxTotal += Number(sub?.maxScore || 100);
+      scoredCount++;
     }
-    maxTotal += Number(sub?.maxScore || 100);
   });
 
-  const percentage = maxTotal > 0 ? Math.round((total / maxTotal) * 100 * 10) / 10 : 0;
-  let estimation = 'ضعيف';
-  if (percentage >= 90) estimation = 'ممتاز';
-  else if (percentage >= 80) estimation = 'جيد جداً';
-  else if (percentage >= 70) estimation = 'جيد';
-  else if (percentage >= 60) estimation = 'مقبول';
+  const percentage = scoredCount > 0 && maxTotal > 0 ? Math.round((total / maxTotal) * 100 * 10) / 10 : 0;
+  const estimation = scoredCount > 0 ? getEstimationFromAverage(percentage).label : '---';
 
   return {
     totalScore: total,
@@ -301,6 +314,17 @@ export async function fetchConsolidatedStudentRecord(
 
   const effectiveForceServer = isFirestoreReadQuotaExceeded() ? false : forceServer;
 
+  const hasConsolidatedContent = (rec: ConsolidatedStudentGradeRecord | null | undefined): boolean => {
+    if (!rec) return false;
+    const hasSheets = Array.isArray(rec.approvedSheets) && rec.approvedSheets.length > 0;
+    const hasSubjects = Boolean(
+      rec.subjects &&
+      Object.values(rec.subjects).some((s) => s && s.score !== null && s.score !== undefined)
+    );
+    const hasNotes = Boolean((rec.teacherNotes || '').trim() || (rec.directorNotes || '').trim());
+    return hasSheets || hasSubjects || hasNotes;
+  };
+
   try {
     const docRef = doc(db, 'students_grades', cleanId);
     const { snap, fromCache } = await getDocCacheFirst(docRef, {
@@ -313,10 +337,12 @@ export async function fetchConsolidatedStudentRecord(
       markReadCacheFresh(cacheKey);
     }
     if (snap && snap.exists()) {
-      const rec = snap.data() as ConsolidatedStudentGradeRecord;
-      void cacheConsolidatedRecordToVault({ ...rec, studentId: rec.studentId || cleanId });
-      markReadCacheFresh(cacheKey);
-      return rec;
+      const rec = { ...(snap.data() as ConsolidatedStudentGradeRecord), studentId: (snap.data() as any)?.studentId || snap.id };
+      if (hasConsolidatedContent(rec) || !fallbackUnifiedNo) {
+        void cacheConsolidatedRecordToVault({ ...rec, studentId: cleanId });
+        markReadCacheFresh(cacheKey);
+        return rec;
+      }
     }
 
     let altMissingConfirmed = !fallbackUnifiedNo || normalizeId(fallbackUnifiedNo) === cleanId;
@@ -331,12 +357,56 @@ export async function fetchConsolidatedStudentRecord(
         trackFirestoreRead(1, `قراءة السجل الموحد (${fallbackUnifiedNo})`);
       }
       if (altSnap && altSnap.exists()) {
-        const rec = altSnap.data() as ConsolidatedStudentGradeRecord;
-        void cacheConsolidatedRecordToVault({ ...rec, studentId: rec.studentId || cleanId });
-        markReadCacheFresh(cacheKey);
-        return rec;
+        const rec = { ...(altSnap.data() as ConsolidatedStudentGradeRecord), studentId: (altSnap.data() as any)?.studentId || altSnap.id };
+        if (hasConsolidatedContent(rec)) {
+          void cacheConsolidatedRecordToVault({ ...rec, studentId: cleanId });
+          markReadCacheFresh(cacheKey);
+          return rec;
+        }
       }
       altMissingConfirmed = Boolean(altSnap && !altFromCache && !altSnap.exists());
+    }
+
+    // Fallback single-field query by unifiedNo / unifiedNoNormalized in case studentId differed across devices
+    const cleanUnif = normalizeId(fallbackUnifiedNo);
+    const normDigits = normalizeDigits(cleanUnif);
+    const unpaddedDigits = normDigits ? String(parseInt(normDigits, 10)) : '';
+    const variants = Array.from(new Set([cleanUnif, normDigits, unpaddedDigits].filter((v) => v && v !== 'NaN'))).slice(0, 10);
+
+    if (variants.length > 0) {
+      const colRef = collection(db, 'students_grades');
+      const runUnifiedQuery = async (field: 'unifiedNo' | 'unifiedNoNormalized') => {
+        const q = query(colRef, where(field, 'in', variants), limit(5));
+        const { snap: qSnap, fromCache: qFromCache } = await getDocsCacheFirst(q, {
+          forceServer: effectiveForceServer,
+          timeoutMs: 3000
+        });
+        if (qSnap && !qFromCache) {
+          trackFirestoreRead(Math.max(1, qSnap.size), `بحث السجل الموحد بالرقم (${cleanUnif})`);
+        }
+        if (qSnap && !qSnap.empty) {
+          const candidates = qSnap.docs
+            .map((d) => ({ ...(d.data() as ConsolidatedStudentGradeRecord), studentId: (d.data() as any)?.studentId || d.id }))
+            .sort((a, b) => {
+              const aRich = hasConsolidatedContent(a) ? 1 : 0;
+              const bRich = hasConsolidatedContent(b) ? 1 : 0;
+              if (bRich !== aRich) return bRich - aRich;
+              return (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0);
+            });
+          return candidates[0] || null;
+        }
+        return null;
+      };
+
+      const matchedByUnif = (await runUnifiedQuery('unifiedNo')) || (normDigits ? await runUnifiedQuery('unifiedNoNormalized') : null);
+      if (matchedByUnif) {
+        void cacheConsolidatedRecordToVault({ ...matchedByUnif, studentId: cleanId });
+        if (matchedByUnif.studentId && matchedByUnif.studentId !== cleanId) {
+          void cacheConsolidatedRecordToVault(matchedByUnif);
+        }
+        markReadCacheFresh(cacheKey);
+        return matchedByUnif;
+      }
     }
 
     if (snap && !fromCache && !snap.exists() && altMissingConfirmed) {
@@ -487,12 +557,14 @@ async function commitConsolidatedBatchToFirestore(
       const summary = calculateGradesSummary(rec.subjects);
 
       const docRef = doc(db, 'students_grades', cleanId);
+      const rawUnif = rec.unifiedNo || rec.rollNo || '';
       const payload: ConsolidatedStudentGradeRecord = {
         studentId: cleanId,
         studentName: rec.studentName || '',
         classId: rec.classId || '',
         className: rec.className || '',
         unifiedNo: rec.unifiedNo || '',
+        unifiedNoNormalized: normalizeDigits(rawUnif),
         rollNo: rec.rollNo || '',
         evaluationMonth: rec.month || '',
         subjects: rec.subjects || {},
@@ -622,10 +694,12 @@ export async function batchSaveStudentsGradesConsolidated(
     teacherNotes?: string;
     directorNotes?: string;
     approvedSheets?: SentGradeSheet[];
-  }>
+  }>,
+  options?: { force?: boolean }
 ): Promise<boolean> {
   if (!records || records.length === 0) return true;
 
+  await ensureSignaturesHydratedFromVault();
   const changedRecords: typeof records = [];
   const pendingSigUpdates: Array<{ cleanId: string; sig: string; subSig: string }> = [];
 
@@ -633,7 +707,7 @@ export async function batchSaveStudentsGradesConsolidated(
     const cleanId = normalizeId(rec.studentId);
     if (!cleanId) return;
     const sig = computeRecordSignature(rec);
-    if (lastSyncedConsolidatedSignatures.get(cleanId) === sig) {
+    if (!options?.force && lastSyncedConsolidatedSignatures.get(cleanId) === sig) {
       return;
     }
     pendingSigUpdates.push({
@@ -841,13 +915,43 @@ function computeSubjectsSignature(subjects: any): string {
   }
 }
 
-function computeRecordSignature(rec: { subjects: any; teacherNotes?: string; directorNotes?: string; month?: string }): string {
+function computeApprovedSheetsSignature(approvedSheets?: SentGradeSheet[]): string {
+  if (!Array.isArray(approvedSheets) || approvedSheets.length === 0) return '';
+  try {
+    return compactHash(JSON.stringify(approvedSheets.map((sh) => ({
+      id: sh.id,
+      m: sh.month || '',
+      st: sh.status || '',
+      c: sh.classId || '',
+      t: sh.teacherId || '',
+      sm: (sh.studentsSummary || []).map((st) => ({
+        id: st.studentId,
+        avg: st.average || '',
+        est: st.estimation || '',
+        tn: st.teacherNotes || '',
+        dn: st.directorNotes || '',
+        sc: (st.scores || []).map((x) => `${x.subject}:${x.score ?? 'null'}:${x.maxScore ?? 100}`)
+      }))
+    }))));
+  } catch {
+    return String(Date.now());
+  }
+}
+
+function computeRecordSignature(rec: {
+  subjects: any;
+  teacherNotes?: string;
+  directorNotes?: string;
+  month?: string;
+  approvedSheets?: SentGradeSheet[];
+}): string {
   try {
     return compactHash(JSON.stringify({
       m: rec.month || '',
       s: computeSubjectsSignature(rec.subjects),
       tn: rec.teacherNotes || '',
-      dn: rec.directorNotes || ''
+      dn: rec.directorNotes || '',
+      sh: computeApprovedSheetsSignature(rec.approvedSheets)
     }));
   } catch {
     return String(Date.now());
@@ -976,7 +1080,7 @@ async function runSyncSentGradeSheetsToConsolidatedCollection(
         continue;
       }
 
-      if (existing.length < 6 && !seenKeys.has(scopeKey)) {
+      if (existing.length < 12 && !seenKeys.has(scopeKey)) {
         seenKeys.add(scopeKey);
         existing.push({
           id: sheet.id,
@@ -1058,8 +1162,8 @@ async function runSyncSentGradeSheetsToConsolidatedCollection(
         rollNo: st.rollNo || existingRec?.rollNo,
         month: sheet.month || existingRec?.month,
         subjects: subjectsMap,
-        teacherNotes: st.teacherNotes || existingRec?.teacherNotes,
-        directorNotes: st.directorNotes || existingRec?.directorNotes,
+        teacherNotes: st.teacherNotes !== undefined ? st.teacherNotes : existingRec?.teacherNotes,
+        directorNotes: st.directorNotes !== undefined ? st.directorNotes : existingRec?.directorNotes,
         approvedSheets: perStudentApprovedSheets.get(cleanId)
       });
     });
@@ -1078,27 +1182,17 @@ async function runSyncSentGradeSheetsToConsolidatedCollection(
     directorNotes?: string;
     approvedSheets?: SentGradeSheet[];
   }> = [];
-  const pendingSheetSigUpdates: Array<{ sigKey: string; sig: string }> = [];
 
   perStudentMerged.forEach((rec, cleanId) => {
     if (scopedIds && !scopedIds.has(cleanId)) return;
-    const sigKey = `${cleanId}_${rec.month || ''}`;
-    const sig = compactHash(computeRecordSignature(rec) + `_sh:${JSON.stringify((rec.approvedSheets || []).map((s) => `${s.id}:${s.status}`))}`);
-    if (lastSyncedConsolidatedSignatures.get(sigKey) !== sig) {
-      pendingSheetSigUpdates.push({ sigKey, sig });
+    const sig = computeRecordSignature(rec);
+    if (lastSyncedConsolidatedSignatures.get(cleanId) !== sig) {
       records.push(rec);
     }
   });
 
   if (records.length > 0) {
-    const savedOk = await batchSaveStudentsGradesConsolidated(records);
-    if (savedOk) {
-      pendingSheetSigUpdates.forEach(({ sigKey, sig }) => {
-        lastSyncedConsolidatedSignatures.set(sigKey, sig);
-      });
-      persistConsolidatedSignaturesToStorage();
-    }
-    return savedOk;
+    return await batchSaveStudentsGradesConsolidated(records);
   }
   return true;
 }

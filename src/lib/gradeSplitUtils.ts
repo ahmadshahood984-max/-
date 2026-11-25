@@ -139,3 +139,110 @@ export function applyGradePartUpdate(
 
   return copy;
 }
+
+const isEnglishSubjectName = (s: string): boolean => {
+  const norm = (s || '').trim().toLowerCase().replace(/[أإآ]/g, 'ا').replace(/ة$/, 'ه');
+  return (
+    norm.includes('انكليز') ||
+    norm.includes('انجليز') ||
+    norm.includes('اجنبي') ||
+    norm.includes('english') ||
+    norm === 'لغه' ||
+    norm === 'اللغه' ||
+    norm === 'لغة' ||
+    norm === 'اللغة'
+  );
+};
+
+const isArabicSubjectName = (s: string): boolean => {
+  const norm = (s || '').trim().toLowerCase().replace(/[أإآ]/g, 'ا').replace(/ة$/, 'ه');
+  return norm.includes('عرب') || norm === 'لغه عربيه' || norm === 'اللغه العربيه';
+};
+
+const isMathSubjectName = (s: string): boolean => {
+  const norm = (s || '').trim().toLowerCase().replace(/[أإآ]/g, 'ا').replace(/ة$/, 'ه');
+  return norm.includes('رياض') || norm.includes('حساب');
+};
+
+const isScienceSubjectName = (s: string): boolean => {
+  const norm = (s || '').trim().toLowerCase().replace(/[أإآ]/g, 'ا').replace(/ة$/, 'ه');
+  return norm.includes('علوم') || norm.includes('فيزيا') || norm.includes('كيميا') || norm.includes('احيا');
+};
+
+const isReligionSubjectName = (s: string): boolean => {
+  const norm = (s || '').trim().toLowerCase().replace(/[أإآ]/g, 'ا').replace(/ة$/, 'ه');
+  return (
+    norm.includes('اسلام') ||
+    norm.includes('ديان') ||
+    norm.includes('دين') ||
+    norm.includes('فقه') ||
+    norm.includes('توحيد') ||
+    norm.includes('قران')
+  );
+};
+
+const isSocialSubjectName = (s: string): boolean => {
+  const norm = (s || '').trim().toLowerCase().replace(/[أإآ]/g, 'ا').replace(/ة$/, 'ه');
+  return norm.includes('اجتماع') || norm.includes('تاريخ') || norm.includes('جغرافي') || norm.includes('وطني');
+};
+
+export const normalizeSubjectName = (str: string): string => {
+  return (str || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^ال/, '')
+    .replace(/^تربية\s+/, '')
+    .replace(/^لغة\s+/, '')
+    .replace(/ة$/, 'ه')
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/\s+/g, '');
+};
+
+/**
+ * Unified canonical subject matcher shared by DirectorPortal and ParentPortal.
+ */
+export const matchSubjectName = (a: string, b: string): boolean => {
+  if (!a || !b) return false;
+  if (a.trim() === b.trim()) return true;
+
+  if (isEnglishSubjectName(a) && isEnglishSubjectName(b)) return true;
+  if ((isArabicSubjectName(a) && isEnglishSubjectName(b)) || (isEnglishSubjectName(a) && isArabicSubjectName(b))) {
+    return false;
+  }
+  if (isArabicSubjectName(a) && isArabicSubjectName(b)) return true;
+  if (isMathSubjectName(a) && isMathSubjectName(b)) return true;
+  if (isScienceSubjectName(a) && isScienceSubjectName(b)) return true;
+  if (isReligionSubjectName(a) && isReligionSubjectName(b)) return true;
+  if (isSocialSubjectName(a) && isSocialSubjectName(b)) return true;
+
+  const na = normalizeSubjectName(a);
+  const nb = normalizeSubjectName(b);
+  if (na === nb) return true;
+  if (na.length >= 3 && nb.length >= 3 && (na.includes(nb) || nb.includes(na))) return true;
+
+  return false;
+};
+
+/**
+ * Official school estimation scale shared across Director table, Firestore summary, and Parent card.
+ */
+export function getEstimationFromAverage(avgNum: number): {
+  label: string;
+  emojiLabel: string;
+  cardLabel: string;
+} {
+  if (avgNum > 90) {
+    return { label: 'ممتاز', emojiLabel: 'ممتاز 🌟', cardLabel: 'ممتاز 🌟' };
+  }
+  if (avgNum > 80) {
+    return { label: 'جيد جداً', emojiLabel: 'جيد جداً ✨', cardLabel: 'جيد جداً 🎈' };
+  }
+  if (avgNum > 60) {
+    return { label: 'جيد', emojiLabel: 'جيد 👍', cardLabel: 'جيد 👍' };
+  }
+  if (avgNum > 40) {
+    return { label: 'وسط', emojiLabel: 'وسط 🟢', cardLabel: 'وسط 🟢' };
+  }
+  return { label: 'ضعيف', emojiLabel: 'ضعيف 🔴', cardLabel: 'ضعيف 🔴' };
+}
+
